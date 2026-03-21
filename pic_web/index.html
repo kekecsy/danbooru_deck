@@ -1,0 +1,885 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mosaic Web Studio</title>
+    <style>
+        :root{--bg:#f3ede2;--panel:#fffaf3;--line:#dbcab3;--ink:#2d2419;--muted:#766552;--accent:#b65434;--accent2:#8d3d23;--soft:#f3dfd4}
+        *{box-sizing:border-box} body{margin:0;height:100vh;overflow:hidden;font-family:"Segoe UI","Microsoft YaHei",sans-serif;color:var(--ink);background:radial-gradient(circle at top left,rgba(255,255,255,.9),transparent 30%),linear-gradient(135deg,#f8f3eb,#ede2d1)}
+        .app{display:grid;grid-template-columns:300px 1fr;gap:12px;height:100vh;padding:12px}
+        .panel{min-height:0;background:rgba(255,250,243,.94);border:1px solid var(--line);border-radius:20px;box-shadow:0 14px 30px rgba(87,58,25,.10)}
+        .side{padding:12px;display:flex;flex-direction:column;gap:10px;overflow:hidden}
+        .side-scroll{flex:1;min-height:0;overflow:auto;padding-right:2px}
+        .side-scroll::-webkit-scrollbar{width:6px}.side-scroll::-webkit-scrollbar-thumb{background:#ccb79b;border-radius:999px}
+        .hero{padding:2px 2px 6px}
+        .hero h1{margin:8px 0 4px;font-size:24px;line-height:1.05;letter-spacing:-.04em}
+        .eyebrow{display:inline-block;padding:4px 8px;border-radius:999px;background:var(--soft);color:var(--accent2);font-size:11px;font-weight:700}
+        .hero p,.hint,.status{color:var(--muted);font-size:12px;line-height:1.45}
+        .card{padding:12px;border-radius:16px;background:var(--panel);border:1px solid rgba(74,53,25,.08);margin-bottom:10px}
+        .card:last-child{margin-bottom:0}
+        .card h2{margin:0 0 8px;font-size:13px}
+        .field{display:flex;flex-direction:column;gap:6px;margin-bottom:8px}
+        .field:last-child{margin-bottom:0}
+        label{font-size:12px;font-weight:700}
+        input[type="text"],input[type="number"],select{width:100%;padding:8px 10px;border-radius:12px;border:1px solid var(--line);background:#fff;color:var(--ink);font-size:12px}
+        input[type="range"]{width:100%;accent-color:var(--accent)}
+        .row2,.row3{display:grid;gap:10px}.row2{grid-template-columns:repeat(2,minmax(0,1fr))}.row3{grid-template-columns:repeat(3,minmax(0,1fr))}
+        .row2,.row3{gap:8px}
+        button{border:0;border-radius:12px;padding:8px 10px;font-size:12px;font-weight:700;color:#fff;background:linear-gradient(135deg,var(--accent),var(--accent2));cursor:pointer}
+        button.secondary{color:var(--ink);background:linear-gradient(135deg,#fbf4eb,#f2e8db)} button.ghost{color:var(--accent2);background:rgba(182,84,52,.1)}
+        button:disabled{opacity:.6;cursor:not-allowed}
+        .hidden{display:none}
+        .presets{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+        .preset{border:1px solid var(--line);background:#fff;border-radius:16px;padding:0;overflow:hidden}.preset.active{outline:2px solid var(--accent)}
+        .preset img{display:block;width:100%;aspect-ratio:1/1;object-fit:cover;background:#eee}.preset span{display:block;padding:6px;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+        .log{min-height:110px;max-height:300px;overflow:auto;margin:0;padding:10px;border-radius:14px;background:#21170f;color:#f3e9dc;font-family:Consolas,monospace;font-size:11px;line-height:1.45}
+        .main{padding:12px;display:flex;flex-direction:column;gap:10px;min-width:0;overflow:hidden}
+        .top{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 10px;border:1px solid rgba(74,53,25,.08);border-radius:16px;background:rgba(255,255,255,.55)}
+        .top h2{margin:0;font-size:18px;letter-spacing:-.03em}
+        .top-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+        .tool-group{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid rgba(74,53,25,.08);border-radius:14px;background:rgba(255,255,255,.7)}
+        .tool-group.export-group{padding-right:6px}
+        .tool-input{width:76px !important;padding:6px 8px !important;font-size:11px !important}
+        .tool-label{font-size:11px;color:var(--muted);font-weight:700;white-space:nowrap}
+        .log-button{position:relative;min-width:74px}
+        .log-badge{position:absolute;top:-5px;right:-5px;min-width:18px;height:18px;padding:0 5px;border-radius:999px;background:#d94f2b;color:#fff;font-size:10px;line-height:18px;text-align:center;box-shadow:0 6px 14px rgba(217,79,43,.25)}
+        .log-popover{position:absolute;top:64px;right:14px;width:320px;max-width:calc(100vw - 48px);padding:10px;border-radius:18px;border:1px solid rgba(74,53,25,.12);background:rgba(255,250,243,.98);box-shadow:0 24px 40px rgba(53,33,13,.18);z-index:20}
+        .log-popover-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+        .log-popover-title{font-size:12px;font-weight:700;color:var(--ink)}
+        .log-actions{display:flex;align-items:center;gap:6px}
+        .log-empty{font-size:11px;color:var(--muted);padding:6px 2px 2px}
+        .stats{display:flex;gap:10px;flex-wrap:wrap;font-size:12px;color:var(--muted)} .stats strong{color:var(--ink)}
+        .scroll{flex:1;min-height:0;overflow:auto;padding:14px;border-radius:20px;border:1px solid rgba(74,53,25,.08);background:linear-gradient(45deg,rgba(255,255,255,.65) 25%,transparent 25%) 0 0/18px 18px,linear-gradient(-45deg,rgba(255,255,255,.65) 25%,transparent 25%) 0 0/18px 18px,linear-gradient(45deg,transparent 75%,rgba(255,255,255,.65) 75%) 0 0/18px 18px,linear-gradient(-45deg,transparent 75%,rgba(255,255,255,.65) 75%) 0 0/18px 18px,#efe3d0}
+        .canvas-wrap{display:inline-block;min-width:min-content;min-height:min-content}
+        canvas{display:block;background:#fff;box-shadow:0 18px 32px rgba(53,33,13,.18)}
+        .empty{display:grid;place-items:center;min-height:220px;border-radius:18px;border:1px dashed rgba(74,53,25,.25);color:var(--muted);text-align:center;padding:16px;background:rgba(255,255,255,.35)}
+        .tips{margin:8px 0 0;padding-left:18px;font-size:12px;line-height:1.5}
+        @media (max-width:1080px){body{height:auto;overflow:auto}.app{grid-template-columns:1fr;height:auto}.side{order:2}.side-scroll{overflow:visible}.main{order:1;min-height:72vh}}
+    </style>
+</head>
+<body>
+    <div class="app">
+        <aside class="panel side">
+            <div class="hero">
+                <span class="eyebrow">FastAPI + Web</span>
+                <h1>Mosaic Web Studio</h1>
+                <p>浏览器版替代 `mosaic_qt`，保留图片导入、矩形打码、白条文字、贴图填充、导出和 ZIP 转 GIF。</p>
+            </div>
+
+            <div class="side-scroll">
+            <section class="card">
+                <h2>素材</h2>
+                <div class="row2">
+                    <button id="upload-btn">导入图片</button>
+                    <button id="paste-btn" class="secondary">剪贴板</button>
+                </div>
+                <div class="field" style="margin-top:12px">
+                    <label>ZIP 转 GIF</label>
+                    <div class="row2">
+                        <button id="zip-btn" class="secondary">选择 ZIP</button>
+                        <button id="zip-run-btn" class="ghost">转换下载</button>
+                    </div>
+                    <div class="hint" id="zip-name">未选择 ZIP 文件</div>
+                </div>
+                <input id="image-input" class="hidden" type="file" accept="image/*">
+                <input id="overlay-input" class="hidden" type="file" accept="image/*">
+                <input id="zip-input" class="hidden" type="file" accept=".zip,application/zip">
+            </section>
+
+            <section class="card">
+                <h2>绘制</h2>
+                <div class="field">
+                    <label for="fill-mode">填充模式</label>
+                    <select id="fill-mode">
+                        <option value="mosaic">默认马赛克</option>
+                        <option value="stripe">白条</option>
+                        <option value="image">贴图填充</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="opacity-range">透明度 <span id="opacity-text">100%</span></label>
+                    <input id="opacity-range" type="range" min="10" max="100" value="100">
+                </div>
+                <div class="row3">
+                    <button id="undo-btn" class="secondary">撤销</button>
+                    <button id="clear-btn" class="secondary">清空</button>
+                    <button id="delete-btn" class="ghost">删除选中</button>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>白条设置</h2>
+                <div class="field">
+                    <label for="stripe-text">文字</label>
+                    <input id="stripe-text" type="text" value="该信息已被管理员撤回">
+                </div>
+                <div class="field">
+                    <label for="stripe-font-family">字体</label>
+                    <select id="stripe-font-family">
+                        <option>Arial</option>
+                        <option selected>Times New Roman</option>
+                        <option>Courier New</option>
+                        <option>Verdana</option>
+                        <option>Microsoft YaHei</option>
+                        <option>SimHei</option>
+                        <option>SimSun</option>
+                    </select>
+                </div>
+                <div class="row2">
+                    <div class="field">
+                        <label for="stripe-font-size">字号</label>
+                        <input id="stripe-font-size" type="number" min="8" max="96" value="25">
+                    </div>
+                    <div class="field">
+                        <label for="stripe-orientation">方向</label>
+                        <select id="stripe-orientation">
+                            <option value="horizontal">水平</option>
+                            <option value="vertical">垂直</option>
+                        </select>
+                    </div>
+                </div>
+            </section>
+
+            <section class="card">
+                <h2>贴图填充</h2>
+                <div class="row2">
+                    <button id="overlay-btn" class="secondary">上传贴图</button>
+                    <button id="overlay-clear-btn" class="ghost">清空贴图</button>
+                </div>
+                <div class="hint" id="overlay-name" style="margin-top:10px">未选择贴图</div>
+                <div class="presets" id="preset-grid" style="margin-top:12px"></div>
+            </section>
+
+            </div>
+        </aside>
+
+        <main class="panel main">
+            <div class="top">
+                <div>
+                    <h2>编辑画布</h2>
+                    <div id="status-text" class="status">导入图片后拖拽创建矩形打码区域。</div>
+                </div>
+                <div class="top-tools">
+                    <div class="tool-group">
+                        <button id="fit-btn" class="secondary">适应窗口</button>
+                        <button id="actual-btn" class="secondary">实际大小</button>
+                        <button id="zoom-btn" class="ghost">放大</button>
+                    </div>
+                    <div class="tool-group export-group">
+                        <span class="tool-label">导出边长</span>
+                        <input id="max-edge" class="tool-input" type="number" min="0" max="10000" value="1920">
+                        <button id="export-btn">导出 PNG</button>
+                        <button id="copy-btn" class="secondary">复制图片</button>
+                    </div>
+                    <button id="log-toggle-btn" class="secondary log-button">日志<span id="log-badge" class="log-badge hidden">0</span></button>
+                </div>
+            </div>
+            <div id="log-popover" class="log-popover hidden">
+                <div class="log-popover-head">
+                    <div class="log-popover-title">操作日志</div>
+                    <div class="log-actions">
+                        <button id="log-clear-btn" class="ghost">清空</button>
+                        <button id="log-close-btn" class="secondary">关闭</button>
+                    </div>
+                </div>
+                <pre id="log-box" class="log">等待加载...</pre>
+                <div id="log-empty" class="log-empty hidden">当前还没有日志。</div>
+            </div>
+            <div class="stats">
+                <span><strong id="size-text">无图片</strong></span>
+                <span><strong id="zoom-text">100%</strong> 缩放</span>
+                <span><strong id="layers-text">0</strong> 个打码层</span>
+                <span><strong id="selection-text">未选中</strong></span>
+            </div>
+            <div id="workspace" class="scroll">
+                <div id="empty-state" class="empty">
+                    <div>
+                        <div>支持文件导入、拖拽和 Ctrl+V 粘贴。</div>
+                        <ol class="tips">
+                            <li>拖拽画布创建矩形区域。</li>
+                            <li>点击区域可移动，拖边角可缩放。</li>
+                            <li>白条模式会自动横向或纵向贯穿整张图。</li>
+                        </ol>
+                    </div>
+                </div>
+                <div id="canvas-wrap" class="canvas-wrap hidden">
+                    <canvas id="canvas"></canvas>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        const state = {sourceFile:null,image:null,imageUrl:null,zoom:1,layers:[],selectedId:null,nextId:1,mode:null,handle:null,start:null,draft:null,fillMode:"mosaic",opacity:1,stripeText:"该信息已被管理员撤回",stripeFontFamily:"Times New Roman",stripeFontSize:25,stripeOrientation:"horizontal",imageDataUrl:null,imageName:"",zipFile:null,logUnread:0,logOpen:false};
+        const canvas = document.getElementById("canvas");
+        const ctx = canvas.getContext("2d");
+        const workspace = document.getElementById("workspace");
+        const wrap = document.getElementById("canvas-wrap");
+        const empty = document.getElementById("empty-state");
+        const logBox = document.getElementById("log-box");
+        const logPopover = document.getElementById("log-popover");
+        const logBadge = document.getElementById("log-badge");
+        const logEmpty = document.getElementById("log-empty");
+        const imageInput = document.getElementById("image-input");
+        const overlayInput = document.getElementById("overlay-input");
+        const zipInput = document.getElementById("zip-input");
+        const $ = id => document.getElementById(id);
+        const APP_BASE = window.location.pathname === "/" ? "" : window.location.pathname.replace(/\/$/, "");
+        const stamp = () => new Date().toLocaleTimeString("zh-CN", {hour12:false});
+        const status = msg => $("status-text").textContent = msg;
+
+        function syncLogUi() {
+            logPopover.classList.toggle("hidden", !state.logOpen);
+            const hasUnread = state.logUnread > 0;
+            logBadge.classList.toggle("hidden", !hasUnread);
+            logBadge.textContent = state.logUnread > 99 ? "99+" : String(state.logUnread);
+            logEmpty.classList.toggle("hidden", logBox.textContent.trim().length > 0);
+        }
+
+        function setLogOpen(isOpen) {
+            state.logOpen = isOpen;
+            if (isOpen) state.logUnread = 0;
+            syncLogUi();
+        }
+
+        const log = msg => {
+            const current = logBox.textContent.trim();
+            if (!current || current === "等待加载...") {
+                logBox.textContent = "";
+            }
+            logBox.textContent += `[${stamp()}] ${msg}\n`;
+            logBox.scrollTop = logBox.scrollHeight;
+            if (!state.logOpen) state.logUnread += 1;
+            syncLogUi();
+        };
+
+        function setWorkspaceEmptyState(isEmpty) {
+            empty.classList.toggle("hidden", !isEmpty);
+            wrap.classList.toggle("hidden", isEmpty);
+            empty.style.display = isEmpty ? "grid" : "none";
+            wrap.style.display = isEmpty ? "none" : "inline-block";
+            empty.setAttribute("aria-hidden", String(!isEmpty));
+            wrap.setAttribute("aria-hidden", String(isEmpty));
+        }
+
+        function syncStats() {
+            $("size-text").textContent = state.image ? `${state.image.width} x ${state.image.height}` : "无图片";
+            $("zoom-text").textContent = `${Math.round(state.zoom * 100)}%`;
+            $("layers-text").textContent = String(state.layers.length);
+            $("selection-text").textContent = state.selectedId ? `已选中 #${state.selectedId}` : "未选中";
+            $("opacity-text").textContent = `${Math.round(state.opacity * 100)}%`;
+        }
+
+        function selectedLayer() { return state.layers.find(x => x.id === state.selectedId) || null; }
+        function fileToDataUrl(file) { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file); }); }
+        function normalizeLayer(layer) {
+            if (layer.width < 0) { layer.x += layer.width; layer.width = Math.abs(layer.width); }
+            if (layer.height < 0) { layer.y += layer.height; layer.height = Math.abs(layer.height); }
+            layer.width = Math.max(1, layer.width);
+            layer.height = Math.max(1, layer.height);
+            if (!state.image) return;
+            layer.x = Math.max(0, Math.min(layer.x, state.image.width - 1));
+            layer.y = Math.max(0, Math.min(layer.y, state.image.height - 1));
+            layer.width = Math.min(layer.width, state.image.width - layer.x);
+            layer.height = Math.min(layer.height, state.image.height - layer.y);
+        }
+
+        function applyControlsToLayer(layer) {
+            layer.fillMode = state.fillMode;
+            layer.opacity = state.opacity;
+            layer.stripeText = state.stripeText;
+            layer.stripeFontFamily = state.stripeFontFamily;
+            layer.stripeFontSize = Number(state.stripeFontSize);
+            layer.stripeOrientation = state.stripeOrientation;
+            layer.imageDataUrl = state.imageDataUrl;
+            layer.imageName = state.imageName;
+            if (layer.fillMode === "stripe" && state.image) {
+                if (layer.stripeOrientation === "horizontal") { layer.x = 0; layer.width = state.image.width; }
+                else { layer.y = 0; layer.height = state.image.height; }
+            }
+            normalizeLayer(layer);
+        }
+
+        function syncControlsFromSelected() {
+            const layer = selectedLayer();
+            if (layer) {
+                state.fillMode = layer.fillMode;
+                state.opacity = layer.opacity;
+                state.stripeText = layer.stripeText;
+                state.stripeFontFamily = layer.stripeFontFamily;
+                state.stripeFontSize = layer.stripeFontSize;
+                state.stripeOrientation = layer.stripeOrientation;
+                state.imageDataUrl = layer.imageDataUrl || null;
+                state.imageName = layer.imageName || "";
+            }
+            $("fill-mode").value = state.fillMode;
+            $("opacity-range").value = String(Math.round(state.opacity * 100));
+            $("stripe-text").value = state.stripeText;
+            $("stripe-font-family").value = state.stripeFontFamily;
+            $("stripe-font-size").value = String(state.stripeFontSize);
+            $("stripe-orientation").value = state.stripeOrientation;
+            $("overlay-name").textContent = state.imageName || "未选择贴图";
+            syncStats();
+        }
+
+        function setCanvasSize() {
+            if (!state.image) return;
+            canvas.width = Math.max(1, Math.round(state.image.width * state.zoom));
+            canvas.height = Math.max(1, Math.round(state.image.height * state.zoom));
+        }
+
+        function fitToWindow() {
+            if (!state.image) return;
+            const width = Math.max(120, workspace.clientWidth - 40);
+            const height = Math.max(120, workspace.clientHeight - 40);
+            state.zoom = Math.min(width / state.image.width, height / state.image.height, 1);
+            setCanvasSize();
+        }
+
+        async function loadImageFile(file) {
+            if (!file) return;
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => {
+                if (state.imageUrl) URL.revokeObjectURL(state.imageUrl);
+                state.sourceFile = file;
+                state.image = img;
+                state.imageUrl = url;
+                state.layers = [];
+                state.selectedId = null;
+                state.nextId = 1;
+                setWorkspaceEmptyState(false);
+                fitToWindow();
+                render();
+                log(`已导入图片: ${file.name}`);
+                status("拖拽创建打码区域，点击已有区域可编辑。");
+            };
+            img.onerror = () => { URL.revokeObjectURL(url); log("图片加载失败"); };
+            img.src = url;
+        }
+
+        async function loadImageFromUrl(url, fileName) {
+            if (!url) return;
+            try {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`加载失败: ${response.status}`);
+                const blob = await response.blob();
+                const ext = (blob.type && blob.type.split("/")[1]) || "png";
+                const safeName = fileName || `mosaic-source.${ext}`;
+                await loadImageFile(new File([blob], safeName, {type: blob.type || "image/png"}));
+                log(`已从链接载入图片: ${safeName}`);
+            } catch (error) {
+                log(`链接图片加载失败: ${error.message}`);
+            }
+        }
+
+        function handles(layer) {
+            const x = layer.x * state.zoom, y = layer.y * state.zoom, w = layer.width * state.zoom, h = layer.height * state.zoom, s = 10;
+            return {nw:{x:x-s/2,y:y-s/2,s},ne:{x:x+w-s/2,y:y-s/2,s},sw:{x:x-s/2,y:y+h-s/2,s},se:{x:x+w-s/2,y:y+h-s/2,s}};
+        }
+
+        function pointInRect(px, py, rect) { return px >= rect.x && px <= rect.x + rect.width && py >= rect.y && py <= rect.y + rect.height; }
+        function canvasPoint(event) { const rect = canvas.getBoundingClientRect(); return {x:event.clientX - rect.left, y:event.clientY - rect.top}; }
+        function imagePoint(point) { return {x: point.x / state.zoom, y: point.y / state.zoom}; }
+        function findHandle(point, layer) {
+            const map = handles(layer);
+            for (const [name, h] of Object.entries(map)) if (point.x >= h.x && point.x <= h.x + h.s && point.y >= h.y && point.y <= h.y + h.s) return name;
+            return null;
+        }
+        function topLayerAt(point) {
+            for (let i = state.layers.length - 1; i >= 0; i -= 1) {
+                const layer = state.layers[i];
+                const rect = {x:layer.x * state.zoom, y:layer.y * state.zoom, width:layer.width * state.zoom, height:layer.height * state.zoom};
+                if (pointInRect(point.x, point.y, rect)) return layer;
+            }
+            return null;
+        }
+        function selectLayer(id) { state.selectedId = id; syncControlsFromSelected(); render(); }
+        function addLayer(rect) {
+            const layer = {id:state.nextId++, x:rect.x, y:rect.y, width:rect.width, height:rect.height, fillMode:state.fillMode, opacity:state.opacity, stripeText:state.stripeText, stripeFontFamily:state.stripeFontFamily, stripeFontSize:Number(state.stripeFontSize), stripeOrientation:state.stripeOrientation, imageDataUrl:state.imageDataUrl, imageName:state.imageName};
+            applyControlsToLayer(layer);
+            state.layers.push(layer);
+            selectLayer(layer.id);
+            log(`已新增打码层 #${layer.id}`);
+        }
+
+        function drawMosaic(layer) {
+            const block = 15 * state.zoom;
+            ctx.save();
+            ctx.globalAlpha = layer.opacity;
+            for (let y = 0; y < layer.height * state.zoom; y += block) {
+                for (let x = 0; x < layer.width * state.zoom; x += block) {
+                    ctx.fillStyle = (((Math.floor(x / block) + Math.floor(y / block)) % 2) === 0) ? "rgb(180,180,180)" : "rgb(120,120,120)";
+                    ctx.fillRect(layer.x * state.zoom + x, layer.y * state.zoom + y, block, block);
+                }
+            }
+            ctx.restore();
+        }
+
+        function drawStripe(layer) {
+            const x = layer.x * state.zoom, y = layer.y * state.zoom, w = layer.width * state.zoom, h = layer.height * state.zoom;
+            ctx.save();
+            ctx.globalAlpha = layer.opacity;
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(x, y, w, h);
+            ctx.fillStyle = "#000";
+            ctx.font = `700 ${Math.max(10, layer.stripeFontSize * state.zoom)}px "${layer.stripeFontFamily}"`;
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            if (layer.stripeOrientation === "vertical") {
+                const chars = Array.from(layer.stripeText || "");
+                const line = layer.stripeFontSize * state.zoom * 1.1;
+                let start = y + h / 2 - (chars.length * line) / 2 + line / 2;
+                chars.forEach((char, index) => ctx.fillText(char, x + w / 2, start + index * line));
+            } else {
+                ctx.fillText(layer.stripeText || "", x + w / 2, y + h / 2);
+            }
+            ctx.restore();
+        }
+
+        function drawImageFill(layer) {
+            if (!layer.imageDataUrl) { drawMosaic(layer); return; }
+            const img = new Image();
+            img.src = layer.imageDataUrl;
+            const paint = () => {
+                const x = layer.x * state.zoom, y = layer.y * state.zoom, w = layer.width * state.zoom, h = layer.height * state.zoom;
+                const r = Math.min(w / img.width, h / img.height);
+                const dw = img.width * r, dh = img.height * r;
+                const left = x + (w - dw) / 2, top = y + (h - dh) / 2;
+                ctx.save();
+                ctx.globalAlpha = layer.opacity;
+                ctx.drawImage(img, left, top, dw, dh);
+                ctx.restore();
+            };
+            if (img.complete) paint();
+            else img.onload = () => render();
+        }
+
+        function drawSelection(layer) {
+            const x = layer.x * state.zoom, y = layer.y * state.zoom, w = layer.width * state.zoom, h = layer.height * state.zoom;
+            ctx.save();
+            ctx.strokeStyle = "#1d7ef3";
+            ctx.lineWidth = 2;
+            ctx.strokeRect(x, y, w, h);
+            ctx.fillStyle = "#1d7ef3";
+            Object.values(handles(layer)).forEach(h => ctx.fillRect(h.x, h.y, h.s, h.s));
+            ctx.restore();
+        }
+
+        function render() {
+            syncStats();
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            if (!state.image) return;
+            ctx.drawImage(state.image, 0, 0, state.image.width * state.zoom, state.image.height * state.zoom);
+            state.layers.forEach(layer => {
+                if (layer.fillMode === "stripe") drawStripe(layer);
+                else if (layer.fillMode === "image") drawImageFill(layer);
+                else drawMosaic(layer);
+            });
+            if (state.draft) {
+                ctx.save();
+                ctx.setLineDash([8, 6]);
+                ctx.strokeStyle = "#1d7ef3";
+                ctx.lineWidth = 2;
+                ctx.strokeRect(state.draft.x * state.zoom, state.draft.y * state.zoom, state.draft.width * state.zoom, state.draft.height * state.zoom);
+                ctx.restore();
+            }
+            const layer = selectedLayer();
+            if (layer) drawSelection(layer);
+        }
+
+        canvas.addEventListener("mousedown", event => {
+            if (!state.image) return;
+            const point = canvasPoint(event), active = selectedLayer();
+            if (active) {
+                const handle = findHandle(point, active);
+                if (handle) {
+                    state.mode = "resize";
+                    state.handle = handle;
+                    state.start = imagePoint(point);
+                    return;
+                }
+            }
+            const hit = topLayerAt(point);
+            if (hit) {
+                selectLayer(hit.id);
+                state.mode = "move";
+                state.start = imagePoint(point);
+                return;
+            }
+            state.selectedId = null;
+            state.mode = "draw";
+            state.start = imagePoint(point);
+            state.draft = {x: state.start.x, y: state.start.y, width: 0, height: 0};
+            render();
+        });
+
+        window.addEventListener("mousemove", event => {
+            if (!state.mode || !state.image) return;
+            const point = imagePoint(canvasPoint(event));
+            if (state.mode === "draw" && state.draft) {
+                state.draft.width = point.x - state.start.x;
+                state.draft.height = point.y - state.start.y;
+                const draft = {...state.draft};
+                normalizeLayer(draft);
+                state.draft = draft;
+                render();
+                return;
+            }
+            const layer = selectedLayer();
+            if (!layer) return;
+            if (state.mode === "move") {
+                layer.x += point.x - state.start.x;
+                layer.y += point.y - state.start.y;
+                state.start = point;
+                normalizeLayer(layer);
+                render();
+                return;
+            }
+            if (state.mode === "resize") {
+                const dx = point.x - state.start.x, dy = point.y - state.start.y;
+                if (state.handle.includes("n")) { layer.y += dy; layer.height -= dy; }
+                if (state.handle.includes("s")) layer.height += dy;
+                if (state.handle.includes("w")) { layer.x += dx; layer.width -= dx; }
+                if (state.handle.includes("e")) layer.width += dx;
+                state.start = point;
+                normalizeLayer(layer);
+                render();
+            }
+        });
+
+        window.addEventListener("mouseup", () => {
+            if (state.mode === "draw" && state.draft && state.draft.width > 10 && state.draft.height > 10) addLayer(state.draft);
+            state.mode = null;
+            state.handle = null;
+            state.start = null;
+            state.draft = null;
+            render();
+        });
+
+        workspace.addEventListener("dragover", event => event.preventDefault());
+        workspace.addEventListener("drop", event => {
+            event.preventDefault();
+            const [file] = Array.from(event.dataTransfer.files || []);
+            if (!file) return;
+            if (file.type.startsWith("image/")) loadImageFile(file);
+            else if (file.name.toLowerCase().endsWith(".zip")) {
+                state.zipFile = file;
+                $("zip-name").textContent = file.name;
+                log(`已选择 ZIP: ${file.name}`);
+            }
+        });
+
+        window.addEventListener("paste", async event => {
+            const items = Array.from(event.clipboardData?.items || []);
+            const imageItem = items.find(item => item.type.startsWith("image/"));
+            if (!imageItem) return;
+            const blob = imageItem.getAsFile();
+            const ext = blob.type.split("/")[1] || "png";
+            const file = new File([blob], `clipboard-image.${ext}`, {type: blob.type});
+            await loadImageFile(file);
+            log("已从剪贴板粘贴图片");
+        });
+
+        $("upload-btn").addEventListener("click", () => imageInput.click());
+        $("paste-btn").addEventListener("click", async () => {
+            if (!navigator.clipboard?.read) { log("当前浏览器不支持主动读取剪贴板，请直接 Ctrl+V"); return; }
+            try {
+                const items = await navigator.clipboard.read();
+                for (const item of items) {
+                    const type = item.types.find(x => x.startsWith("image/"));
+                    if (!type) continue;
+                    const blob = await item.getType(type);
+                    const ext = type.split("/")[1] || "png";
+                    await loadImageFile(new File([blob], `clipboard-image.${ext}`, {type}));
+                    log("已主动读取剪贴板图片");
+                    return;
+                }
+                log("剪贴板里没有图片");
+            } catch (error) {
+                log(`读取剪贴板失败: ${error.message}`);
+            }
+        });
+        imageInput.addEventListener("change", async event => {
+            const [file] = Array.from(event.target.files || []);
+            await loadImageFile(file);
+            event.target.value = "";
+        });
+
+        $("overlay-btn").addEventListener("click", () => overlayInput.click());
+        overlayInput.addEventListener("change", async event => {
+            const [file] = Array.from(event.target.files || []);
+            if (!file) return;
+            clearPresetActive();
+            state.imageDataUrl = await fileToDataUrl(file);
+            state.imageName = file.name;
+            state.fillMode = "image";
+            syncControlsFromSelected();
+            const layer = selectedLayer();
+            if (layer) { applyControlsToLayer(layer); render(); }
+            log(`已载入贴图: ${file.name}`);
+            event.target.value = "";
+        });
+        $("overlay-clear-btn").addEventListener("click", () => {
+            clearPresetActive();
+            state.imageDataUrl = null;
+            state.imageName = "";
+            syncControlsFromSelected();
+            const layer = selectedLayer();
+            if (layer) { applyControlsToLayer(layer); render(); }
+        });
+
+        $("zip-btn").addEventListener("click", () => zipInput.click());
+        zipInput.addEventListener("change", event => {
+            const [file] = Array.from(event.target.files || []);
+            state.zipFile = file || null;
+            $("zip-name").textContent = file ? file.name : "未选择 ZIP 文件";
+            event.target.value = "";
+        });
+        $("zip-run-btn").addEventListener("click", async () => {
+            if (!state.zipFile) { log("请先选择 ZIP 文件"); return; }
+            const form = new FormData();
+            form.append("zip_file", state.zipFile);
+            log(`开始转换 ZIP: ${state.zipFile.name}`);
+            try {
+                const response = await fetch(`${APP_BASE}/api/zip-to-gif`, {method:"POST", body:form});
+                if (!response.ok) {
+                    const payload = await response.json().catch(() => ({}));
+                    throw new Error(payload.detail || "转换失败");
+                }
+                const blob = await response.blob();
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                link.href = url;
+                link.download = state.zipFile.name.replace(/\.zip$/i, "") + ".gif";
+                link.click();
+                URL.revokeObjectURL(url);
+                log("ZIP 转 GIF 完成");
+            } catch (error) {
+                log(`ZIP 转 GIF 失败: ${error.message}`);
+            }
+        });
+
+        $("fill-mode").addEventListener("change", event => {
+            state.fillMode = event.target.value;
+            const layer = selectedLayer();
+            if (layer) { applyControlsToLayer(layer); render(); }
+            syncControlsFromSelected();
+        });
+        $("opacity-range").addEventListener("input", event => {
+            state.opacity = Number(event.target.value) / 100;
+            const layer = selectedLayer();
+            if (layer) { applyControlsToLayer(layer); render(); }
+            syncControlsFromSelected();
+        });
+        $("stripe-text").addEventListener("input", event => {
+            state.stripeText = event.target.value;
+            const layer = selectedLayer();
+            if (layer) { applyControlsToLayer(layer); render(); }
+        });
+        $("stripe-font-family").addEventListener("change", event => {
+            state.stripeFontFamily = event.target.value;
+            const layer = selectedLayer();
+            if (layer) { applyControlsToLayer(layer); render(); }
+        });
+        $("stripe-font-size").addEventListener("input", event => {
+            state.stripeFontSize = Number(event.target.value || 25);
+            const layer = selectedLayer();
+            if (layer) { applyControlsToLayer(layer); render(); }
+        });
+        $("stripe-orientation").addEventListener("change", event => {
+            state.stripeOrientation = event.target.value;
+            const layer = selectedLayer();
+            if (layer) { applyControlsToLayer(layer); render(); }
+        });
+
+        $("undo-btn").addEventListener("click", () => {
+            const layer = state.layers.pop();
+            if (layer) {
+                if (layer.id === state.selectedId) state.selectedId = null;
+                log(`已撤销打码层 #${layer.id}`);
+                render();
+            }
+        });
+        $("clear-btn").addEventListener("click", () => {
+            if (!state.layers.length) return;
+            state.layers = [];
+            state.selectedId = null;
+            log("已清空全部打码层");
+            render();
+        });
+        $("delete-btn").addEventListener("click", () => {
+            if (!state.selectedId) return;
+            state.layers = state.layers.filter(layer => layer.id !== state.selectedId);
+            log(`已删除打码层 #${state.selectedId}`);
+            state.selectedId = null;
+            render();
+        });
+
+        $("fit-btn").addEventListener("click", () => { fitToWindow(); render(); });
+        $("actual-btn").addEventListener("click", () => {
+            if (!state.image) return;
+            state.zoom = 1;
+            setCanvasSize();
+            render();
+        });
+        $("zoom-btn").addEventListener("click", () => {
+            if (!state.image) return;
+            state.zoom = Math.min(5, state.zoom * 1.2);
+            setCanvasSize();
+            render();
+        });
+        workspace.addEventListener("wheel", event => {
+            if (!event.ctrlKey) return;
+            event.preventDefault();
+            if (!state.image) return;
+            state.zoom = Math.min(5, Math.max(.2, state.zoom * (event.deltaY < 0 ? 1.1 : .9)));
+            setCanvasSize();
+            render();
+        }, {passive:false});
+        window.addEventListener("resize", () => {
+            if (!state.image) return;
+            setCanvasSize();
+            render();
+        });
+        $("log-toggle-btn").addEventListener("click", event => {
+            event.stopPropagation();
+            setLogOpen(!state.logOpen);
+        });
+        $("log-close-btn").addEventListener("click", () => setLogOpen(false));
+        $("log-clear-btn").addEventListener("click", () => {
+            logBox.textContent = "";
+            syncLogUi();
+        });
+        document.addEventListener("click", event => {
+            if (!state.logOpen) return;
+            if (logPopover.contains(event.target) || $("log-toggle-btn").contains(event.target)) return;
+            setLogOpen(false);
+        });
+
+        function exportOps() {
+            return state.layers.map(layer => ({
+                x: layer.x,
+                y: layer.y,
+                width: layer.width,
+                height: layer.height,
+                fillMode: layer.fillMode,
+                opacity: layer.opacity,
+                stripeText: layer.stripeText,
+                stripeFontFamily: layer.stripeFontFamily,
+                stripeFontSize: layer.stripeFontSize,
+                stripeOrientation: layer.stripeOrientation,
+                imageDataUrl: layer.imageDataUrl || null
+            }));
+        }
+
+        async function renderOnServer() {
+            if (!state.sourceFile) throw new Error("请先导入图片");
+            const form = new FormData();
+            form.append("source_image", state.sourceFile);
+            form.append("operations_json", JSON.stringify(exportOps()));
+            form.append("max_edge", String(Number($("max-edge").value || 0)));
+            const response = await fetch(`${APP_BASE}/api/render`, {method:"POST", body:form});
+            if (!response.ok) {
+                const payload = await response.json().catch(() => ({}));
+                throw new Error(payload.detail || "导出失败");
+            }
+            return response.blob();
+        }
+
+        $("export-btn").addEventListener("click", async () => {
+            try {
+                const blob = await renderOnServer();
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement("a");
+                const base = (state.sourceFile?.name || "mosaic").replace(/\.[^.]+$/, "");
+                link.href = url;
+                link.download = `${base}_mosaic.png`;
+                link.click();
+                URL.revokeObjectURL(url);
+                log("已导出 PNG");
+            } catch (error) {
+                log(`导出失败: ${error.message}`);
+            }
+        });
+
+        $("copy-btn").addEventListener("click", async () => {
+            if (!navigator.clipboard || !window.ClipboardItem) {
+                log("当前浏览器不支持复制图片");
+                return;
+            }
+            try {
+                const blob = await renderOnServer();
+                await navigator.clipboard.write([new ClipboardItem({[blob.type]: blob})]);
+                log("已复制导出图片到剪贴板");
+            } catch (error) {
+                log(`复制失败: ${error.message}`);
+            }
+        });
+
+        function clearPresetActive() { document.querySelectorAll(".preset").forEach(node => node.classList.remove("active")); }
+        async function loadPresetDataUrl(url) {
+            const response = await fetch(url);
+            const blob = await response.blob();
+            return fileToDataUrl(new File([blob], "preset.png", {type: blob.type}));
+        }
+
+        async function loadPresets() {
+            const grid = $("preset-grid");
+            grid.innerHTML = "";
+            try {
+                const response = await fetch(`${APP_BASE}/api/presets`);
+                const presets = await response.json();
+                if (!presets.length) {
+                    grid.innerHTML = '<div class="hint">当前没有 preset 目录，后续把素材放到 `pic_web/present` 或 `mosaic_qt/present` 即可。</div>';
+                    return;
+                }
+                presets.forEach(preset => {
+                    const node = document.createElement("button");
+                    node.type = "button";
+                    node.className = "preset";
+                    node.innerHTML = `<img src="${preset.url}" alt="${preset.name}"><span>${preset.name}</span>`;
+                    node.addEventListener("click", async () => {
+                        clearPresetActive();
+                        node.classList.add("active");
+                        state.imageDataUrl = await loadPresetDataUrl(preset.url);
+                        state.imageName = preset.name;
+                        state.fillMode = "image";
+                        syncControlsFromSelected();
+                        const layer = selectedLayer();
+                        if (layer) { applyControlsToLayer(layer); render(); }
+                        log(`已选择预设贴图: ${preset.name}`);
+                    });
+                    grid.appendChild(node);
+                });
+            } catch (error) {
+                grid.innerHTML = '<div class="hint">预设加载失败。</div>';
+                log(`预设加载失败: ${error.message}`);
+            }
+        }
+
+        async function bootstrap() {
+            logBox.textContent = "";
+            setWorkspaceEmptyState(true);
+            syncLogUi();
+            log("编辑器已启动");
+            try {
+                const response = await fetch(`${APP_BASE}/api/health`);
+                const payload = await response.json();
+                log(`服务状态: presets=${payload.presets}, ffmpeg=${payload.ffmpeg ? "ok" : "missing"}`);
+            } catch (error) {
+                log(`健康检查失败: ${error.message}`);
+            }
+            await loadPresets();
+            syncControlsFromSelected();
+            const params = new URLSearchParams(window.location.search);
+            const imageUrl = params.get("image_url");
+            const imageName = params.get("image_name");
+            if (imageUrl) await loadImageFromUrl(imageUrl, imageName);
+        }
+
+        bootstrap();
+    </script>
+</body>
+</html>

@@ -1,0 +1,629 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>Danbooru 下载管理器 · 滚动修复版</title>
+    <style>
+        /* ----- 全局基础样式 (强化滚动容器) ----- */
+        * {
+            box-sizing: border-box;
+        }
+        body { 
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            background-color: #f0f2f5; 
+            color: #333;
+            overflow: hidden;          /* 防止页面整体滚动，所有滚动都在内部容器 */
+        }
+
+        /* 核心网格布局 */
+        .dashboard {
+            display: grid;
+            grid-template-columns: 400px 1fr;
+            gap: 20px;
+            height: calc(100vh - 40px); /* 减去上下padding */
+        }
+
+        /* 左侧栏：必须允许内部收缩以支持滚动 */
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            height: 100%;
+            min-width: 0;
+            min-height: 0;              /* 关键：允许flex子项收缩至小于内容高度 */
+        }
+
+        /* 通用卡片样式 —— 所有flex列容器均设置 min-height:0 以启用滚动 */
+        .card { 
+            background: white; 
+            padding: 20px; 
+            border-radius: 12px; 
+            box-shadow: 0 4px 6px rgba(0,0,0,0.05); 
+            display: flex;
+            flex-direction: column;
+            min-height: 0;                /* 重要：允许内部内容滚动 */
+        }
+
+        .card h2 { 
+            margin: 0 0 12px 0; 
+            font-size: 1.1rem; 
+            color: #1a1a1a; 
+            border-left: 4px solid #2196F3; 
+            padding-left: 10px; 
+            flex-shrink: 0;
+        }
+
+        /* 控制面板行排版 */
+        .row { 
+            margin-bottom: 15px; 
+            display: flex; 
+            align-items: center; 
+            flex-shrink: 0;
+        }
+        
+        label { 
+            width: 100px; 
+            flex-shrink: 0; 
+            font-weight: bold; 
+            font-size: 14px; 
+            white-space: nowrap; 
+        }
+
+        input { 
+            padding: 8px 12px; 
+            border: 1px solid #ddd; 
+            border-radius: 6px; 
+            flex: 1; 
+            min-width: 0; 
+        }
+        
+        .btn-group { 
+            display: flex; 
+            gap: 10px; 
+            margin-top: 5px; 
+            flex-shrink: 0;
+        }
+        button { 
+            flex: 1; 
+            padding: 10px; 
+            border: none; 
+            border-radius: 6px; 
+            background-color: #2196F3; 
+            color: white; 
+            cursor: pointer; 
+            font-weight: bold; 
+            transition: 0.2s; 
+        }
+        button:hover { opacity: 0.9; transform: translateY(-1px); }
+        button:disabled { background-color: #cbd5e0; cursor: not-allowed; transform: none; }
+        .btn-pause { background-color: #ff9800; }
+        .btn-resume { background-color: #4caf50; }
+
+        /* ---------- 日志区域：强制显示滚动条，确保可滚动 ---------- */
+        .log-container {
+            flex: 1;                      /* 撑满卡片剩余空间 */
+            display: flex;
+            flex-direction: column;
+            background: #1e1e1e;
+            border-radius: 8px;
+            overflow: hidden;             /* 隐藏溢出，滚动由内部#log-box负责 */
+            margin-top: 15px;
+            min-height: 0;                 /* 允许收缩 */
+        }
+
+        #log-box { 
+            flex: 1;                       /* 填满父容器高度 */
+            overflow-y: scroll;             /* 强制垂直滚动条始终显示（即使内容少也显示轨道） */
+            color: #d4d4d4; 
+            padding: 12px; 
+            font-family: 'Consolas', 'Monaco', monospace; 
+            font-size: 12px; 
+            line-height: 1.6;
+            white-space: pre-wrap;
+            word-break: break-all;
+            background: #1e1e1e;
+            scrollbar-width: thin;          /* Firefox细滚动条 */
+            scrollbar-color: #555 #2a2a2a;
+        }
+        /* WebKit 滚动条样式 (Chrome, Edge, Safari) */
+        #log-box::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+            background: #2a2a2a;
+        }
+        #log-box::-webkit-scrollbar-track {
+            background: #2a2a2a;
+            border-radius: 10px;
+        }
+        #log-box::-webkit-scrollbar-thumb {
+            background: #555;
+            border-radius: 10px;
+            border: 1px solid #3a3a3a;
+        }
+        #log-box::-webkit-scrollbar-thumb:hover {
+            background: #777;
+        }
+
+        /* 右侧预览区头部 */
+        .content-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-shrink: 0;
+        }
+
+        /* 搜索框美化 */
+        .search-wrapper {
+            position: relative;
+            width: 280px;
+        }
+        .search-wrapper input {
+            width: 100%;
+            padding: 8px 12px 8px 35px;
+            border-radius: 20px;
+            border: 1px solid #ddd;
+            font-size: 13px;
+            transition: 0.3s;
+        }
+        .search-wrapper input:focus {
+            outline: none;
+            border-color: #2196F3;
+            box-shadow: 0 0 8px rgba(33, 150, 243, 0.15);
+        }
+        .search-wrapper::before {
+            content: "🔍";
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 14px;
+            pointer-events: none;
+        }
+
+        /* ---------- 图片预览网格容器：强制滚动条，统一细条风格 ---------- */
+        .gallery-container {
+            flex: 1;                       /* 占满剩余高度 */
+            overflow-y: scroll;              /* 强制垂直滚动条始终显示 */
+            padding-right: 5px;
+            min-height: 0;                   /* 允许收缩 */
+            scrollbar-width: thin;
+            scrollbar-color: #c0c0c0 #f0f0f0;
+        }
+        .gallery-container::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+            background: #f0f0f0;
+        }
+        .gallery-container::-webkit-scrollbar-track {
+            background: #f0f0f0;
+            border-radius: 10px;
+        }
+        .gallery-container::-webkit-scrollbar-thumb {
+            background: #c0c0c0;
+            border-radius: 10px;
+            border: 1px solid #f0f0f0;
+        }
+        .gallery-container::-webkit-scrollbar-thumb:hover {
+            background: #a0a0a0;
+        }
+
+        .gallery { 
+            display: grid; 
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); 
+            gap: 15px; 
+        }
+
+        .img-card { 
+            background: white; 
+            border-radius: 10px; 
+            overflow: hidden; 
+            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            transition: 0.3s;
+            border: 1px solid #eee;
+            animation: fadeIn 0.4s ease forwards;
+            display: flex;
+            flex-direction: column;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .img-card:hover { transform: translateY(-5px); box-shadow: 0 8px 20px rgba(0,0,0,0.15); }
+        .img-card img { 
+            width: 100%; 
+            height: 200px; 
+            object-fit: cover; 
+            display: block; 
+            background: #f8f8f8; 
+            cursor: zoom-in; 
+        }
+        
+        .img-info { 
+            font-size: 12px; 
+            padding: 10px; 
+            text-align: center;
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .img-info b { 
+            display: block; 
+            color: #333; 
+            overflow: hidden; 
+            text-overflow: ellipsis; 
+            white-space: nowrap; 
+            margin-bottom: 4px; 
+        }
+        .card-actions {
+            display: flex;
+            gap: 8px;
+            justify-content: center;
+            margin-top: 8px;
+            flex-wrap: wrap;
+        }
+        .card-link {
+            display: inline-block;
+            padding: 6px 10px;
+            border-radius: 999px;
+            text-decoration: none;
+            font-size: 11px;
+            font-weight: bold;
+            transition: 0.2s;
+        }
+        .card-link.origin {
+            color: #2196F3;
+            background: #eaf4ff;
+        }
+        .card-link.edit {
+            color: white;
+            background: #ff7043;
+        }
+        .card-link:hover {
+            transform: translateY(-1px);
+            opacity: 0.92;
+        }
+
+        /* ---------- 角色标签横向滚动容器 (细条可见) ---------- */
+        .tags-scroll-container {
+            display: flex;
+            overflow-x: auto;        /* 横向滚动 */
+            gap: 5px;
+            padding: 5px 2px;
+            margin: 5px 0;
+            scrollbar-width: thin;   /* Firefox */
+            scrollbar-color: #b0b0b0 #f0f0f0;
+            -webkit-overflow-scrolling: touch;
+            cursor: grab;
+        }
+        .tags-scroll-container::-webkit-scrollbar {
+            height: 5px;             /* 水平滚动条高度 */
+            background: #f0f0f0;
+        }
+        .tags-scroll-container::-webkit-scrollbar-track {
+            background: #f0f0f0;
+            border-radius: 10px;
+        }
+        .tags-scroll-container::-webkit-scrollbar-thumb {
+            background: #b0b0b0;
+            border-radius: 10px;
+        }
+        .tags-scroll-container::-webkit-scrollbar-thumb:hover {
+            background: #909090;
+        }
+
+        /* 单个角色标签样式 */
+        .char-tag {
+            flex: 0 0 auto;          /* 不压缩宽度 */
+            background: #f0f2f5;
+            color: #666;
+            padding: 4px 10px;
+            border-radius: 16px;
+            font-size: 11px;
+            cursor: pointer;
+            white-space: nowrap;
+            transition: all 0.2s;
+            border: 1px solid #e0e0e0;
+            user-select: none;
+            line-height: 1.4;
+        }
+
+        .char-tag:hover {
+            background: #2196F3;
+            color: white;
+            border-color: #2196F3;
+        }
+
+        /* 特殊标记 original 类型 */
+        .char-tag.original {
+            cursor: default;
+            font-style: italic;
+            border: none;
+            background: #f0f2f5;
+            color: #999;
+        }
+        .char-tag.original:hover {
+            background: #f0f2f5;
+            color: #999;
+            border: none;
+        }
+
+        #proxy-status { font-size: 12px; margin-left: 10px; font-weight: normal; }
+
+        /* 全局滚动条美化 (作为后备) */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: rgba(0,0,0,0.05); }
+        ::-webkit-scrollbar-thumb { background: #cbd5e0; border-radius: 10px; }
+    </style>
+</head>
+<body>
+
+<div class="dashboard">
+    <!-- 左侧：控制面板 + 日志 -->
+    <div class="sidebar">
+        <div class="card">
+            <h2>控制面板</h2>
+            <div class="row" style="margin-top: 5px;">
+                <button onclick="checkProxy()" style="flex: none; width: auto; padding: 6px 12px; font-size: 12px;">检查代理</button>
+                <span id="proxy-status">状态: 未知</span>
+            </div>
+            <div class="row">
+                <label>页码范围</label>
+                <input type="number" id="start-page" value="1" min="1">
+                <span style="margin: 0 8px; color: #999;">至</span>
+                <input type="number" id="end-page" value="16" min="1">
+            </div>
+            <div class="row">
+                <label>过滤 Tags</label>
+                <input type="text" id="filter-tags" value="furry, futanari" placeholder="逗号分隔">
+            </div>
+            <div class="btn-group">
+                <button id="btn-start" onclick="startTask()">▶ 开始抓取</button>
+                <button id="btn-pause" class="btn-pause" onclick="pauseTask()" disabled>⏸ 暂停</button>
+                <button id="btn-resume" class="btn-resume" onclick="resumeTask()" disabled>⏯ 继续</button>
+            </div>
+        </div>
+
+        <div class="card" style="flex: 1;">
+            <h2>实时日志</h2>
+            <div class="log-container">
+                <div id="log-box">等待任务启动...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 右侧：预览区 -->
+    <div class="card" style="flex: 1; min-height: 0;">   <!-- 明确允许收缩 -->
+        <div class="content-header">
+            <h2>最新抓取预览</h2>
+            <div class="search-wrapper">
+                <input type="text" id="char-search" placeholder="在预览中搜索角色 (例如: hatsune_miku)" oninput="filterGallery()">
+            </div>
+        </div>
+        
+        <div class="gallery-container">
+            <div id="image-gallery" class="gallery"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    (function() {
+        // ----- DOM 元素 -----
+        const gallery = document.getElementById('image-gallery');
+        const logBox = document.getElementById('log-box');
+        const btnStart = document.getElementById('btn-start');
+        const btnPause = document.getElementById('btn-pause');
+        const btnResume = document.getElementById('btn-resume');
+        const proxyStatus = document.getElementById('proxy-status');
+
+        // ----- 日志自动置底（确保每次添加都滚到最新）-----
+        function appendLog(msg) {
+            if (logBox.innerText === "等待任务启动...") {
+                logBox.innerText = "";
+            }
+            logBox.textContent += msg + '\n';
+            // 多次尝试滚动到底部，应对渲染延迟
+            setTimeout(() => {
+                logBox.scrollTop = logBox.scrollHeight;
+            }, 10);
+            requestAnimationFrame(() => {
+                logBox.scrollTop = logBox.scrollHeight;
+            });
+        }
+
+        // ----- 使用事件委托处理角色标签复制（避免内联onclick问题）-----
+        function setupTagCopyDelegation() {
+            gallery.addEventListener('click', function(e) {
+                const tag = e.target.closest('.char-tag');
+                if (!tag) return;
+                if (tag.classList.contains('original')) return; // original不复制
+
+                e.preventDefault();
+                e.stopPropagation();
+
+                const charName = tag.dataset.char;
+                if (!charName) return;
+
+                navigator.clipboard.writeText(charName).then(() => {
+                    const originalText = tag.innerText;
+                    const originalBg = tag.style.backgroundColor;
+                    const originalColor = tag.style.color;
+
+                    tag.innerText = "✅ 已复制";
+                    tag.style.backgroundColor = "#4caf50";
+                    tag.style.color = "white";
+
+                    setTimeout(() => {
+                        tag.innerText = charName;
+                        tag.style.backgroundColor = originalBg;
+                        tag.style.color = originalColor;
+                    }, 800);
+                }).catch(err => {
+                    console.warn('复制失败', err);
+                });
+            });
+        }
+
+        // ----- 添加图片到展示区 -----
+        function addImageToGallery(imgData) {
+            const card = document.createElement('div');
+            card.className = 'img-card';
+            
+            const charString = imgData.tags?.tag_string_character || "";
+            card.dataset.characters = charString.toLowerCase();
+            
+            const charArray = charString.split(' ').filter(c => c.length > 0);
+            
+            let tagsHtml = '';
+            if (charArray.length > 0) {
+                charArray.forEach(char => {
+                    const safeChar = char.replace(/"/g, '&quot;');
+                    tagsHtml += `<span class="char-tag" data-char="${safeChar}" title="点击复制: ${char}">${char}</span>`;
+                });
+            } else {
+                tagsHtml = '<span class="char-tag original" data-char="original">👤 original</span>';
+            }
+
+            const imageSrc = imgData.web_url || imgData.file_url || 'https://via.placeholder.com/300?text=No+Image';
+            const encodedImage = encodeURIComponent(imageSrc);
+            const encodedName = encodeURIComponent(imgData.filename || `${imgData.artist || 'image'}.png`);
+            const mosaicUrl = `/mosaic?image_url=${encodedImage}&image_name=${encodedName}`;
+            
+            card.innerHTML = `
+                <a href="${imageSrc}" target="_blank" rel="noopener noreferrer">
+                    <img src="${imageSrc}" loading="lazy" title="画师: ${imgData.artist || '未知'}">
+                </a>
+                <div class="img-info">
+                    <b title="${imgData.artist || '未知'}">${imgData.artist || '未知'}</b>
+                    <div class="tags-scroll-container">
+                        ${tagsHtml}
+                    </div>
+                    <div class="card-actions">
+                        <a href="${imgData.post_url || '#'}" target="_blank" rel="noopener noreferrer" class="card-link origin">查看原贴</a>
+                        <a href="${mosaicUrl}" target="_blank" rel="noopener noreferrer" class="card-link edit">编辑打码</a>
+                    </div>
+                </div>
+            `;
+            
+            gallery.insertBefore(card, gallery.firstChild);
+            filterGallery();
+            
+            if (gallery.children.length > 200) {
+                gallery.removeChild(gallery.lastChild);
+            }
+        }
+
+        // ----- 搜索过滤 -----
+        function filterGallery() {
+            const query = document.getElementById('char-search').value.toLowerCase().trim();
+            const cards = gallery.getElementsByClassName('img-card');
+            Array.from(cards).forEach(card => {
+                const tags = card.dataset.characters || '';
+                if (query === "" || tags.includes(query)) {
+                    card.style.display = "";
+                } else {
+                    card.style.display = "none";
+                }
+            });
+        }
+
+        // ----- 按钮状态同步 -----
+        function updateButtons(isRunning, isPaused) {
+            btnStart.disabled = isRunning;
+            btnPause.disabled = !isRunning || isPaused;
+            btnResume.disabled = !isRunning || !isPaused;
+        }
+
+        // ----- API 交互 -----
+        async function checkProxy() {
+            proxyStatus.innerText = "正在检查...";
+            proxyStatus.style.color = '';
+            try {
+                let res = await fetch('/api/proxy_check');
+                if (!res.ok) throw new Error('网络响应异常');
+                let data = await res.json();
+                proxyStatus.innerText = data.msg || '未知';
+                if (data.color === 'green') proxyStatus.style.color = '#4caf50';
+                else if (data.color === 'orange') proxyStatus.style.color = '#ff9800';
+                else proxyStatus.style.color = '#f44336';
+            } catch (e) {
+                proxyStatus.innerText = "请求失败";
+                proxyStatus.style.color = '#f44336';
+            }
+        }
+
+        async function startTask() {
+            const startP = document.getElementById('start-page').value;
+            const endP = document.getElementById('end-page').value;
+            const tags = document.getElementById('filter-tags').value;
+            try {
+                await fetch('/api/start', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        start_page: parseInt(startP) || 1, 
+                        end_page: parseInt(endP) || 16, 
+                        tags: tags 
+                    })
+                });
+            } catch (e) {
+                appendLog('❌ 启动任务请求失败: ' + e.message);
+            }
+        }
+
+        async function pauseTask() { 
+            try { await fetch('/api/pause', { method: 'POST' }); } 
+            catch (e) { appendLog('暂停失败'); }
+        }
+        async function resumeTask() { 
+            try { await fetch('/api/resume', { method: 'POST' }); } 
+            catch (e) { appendLog('继续失败'); }
+        }
+
+        // ----- 全局挂载函数 -----
+        window.checkProxy = checkProxy;
+        window.startTask = startTask;
+        window.pauseTask = pauseTask;
+        window.resumeTask = resumeTask;
+        window.filterGallery = filterGallery;
+
+        // ----- 状态轮询 -----
+        let polling = setInterval(async () => {
+            try {
+                let res = await fetch('/api/status');
+                if (!res.ok) return;
+                let data = await res.json();
+                
+                if (data.new_logs?.length > 0) {
+                    data.new_logs.forEach(log => appendLog(log));
+                }
+                if (data.new_images?.length > 0) {
+                    data.new_images.forEach(img => addImageToGallery(img));
+                }
+                updateButtons(data.is_running, data.is_paused);
+            } catch (e) {
+                // 静默失败
+            }
+        }, 1000);
+
+        // 初始化事件委托
+        setupTagCopyDelegation();
+
+        // 监听搜索输入
+        document.getElementById('char-search').addEventListener('input', filterGallery);
+
+        // 清理轮询
+        window.addEventListener('beforeunload', function() {
+            clearInterval(polling);
+        });
+
+        appendLog('🟢 界面已加载。');
+    })();
+</script>
+
+</body>
+</html>
