@@ -4,6 +4,17 @@
     <meta charset="UTF-8">
     <title>Danbooru 下载管理器 · 滚动修复版</title>
     <style>
+        :root {
+            --bg: #f3ede2;
+            --panel: rgba(255, 250, 243, 0.94);
+            --panel-strong: #fffaf3;
+            --line: #dbcab3;
+            --ink: #2d2419;
+            --muted: #766552;
+            --accent: #b65434;
+            --accent-deep: #8d3d23;
+            --accent-soft: #f3dfd4;
+        }
         /* ----- 全局基础样式 (强化滚动容器) ----- */
         * {
             box-sizing: border-box;
@@ -12,8 +23,10 @@
             font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif; 
             margin: 0; 
             padding: 20px; 
-            background-color: #f0f2f5; 
-            color: #333;
+            background:
+                radial-gradient(circle at top left, rgba(255,255,255,0.9), transparent 30%),
+                linear-gradient(135deg, #f8f3eb, #ede2d1);
+            color: var(--ink);
             overflow: hidden;          /* 防止页面整体滚动，所有滚动都在内部容器 */
         }
 
@@ -37,10 +50,11 @@
 
         /* 通用卡片样式 —— 所有flex列容器均设置 min-height:0 以启用滚动 */
         .card { 
-            background: white; 
+            background: var(--panel); 
             padding: 20px; 
-            border-radius: 12px; 
-            box-shadow: 0 4px 6px rgba(0,0,0,0.05); 
+            border-radius: 20px; 
+            border: 1px solid var(--line);
+            box-shadow: 0 14px 30px rgba(87,58,25,0.10); 
             display: flex;
             flex-direction: column;
             min-height: 0;                /* 重要：允许内部内容滚动 */
@@ -49,8 +63,8 @@
         .card h2 { 
             margin: 0 0 12px 0; 
             font-size: 1.1rem; 
-            color: #1a1a1a; 
-            border-left: 4px solid #2196F3; 
+            color: var(--ink); 
+            border-left: 4px solid var(--accent); 
             padding-left: 10px; 
             flex-shrink: 0;
         }
@@ -73,10 +87,12 @@
 
         input { 
             padding: 8px 12px; 
-            border: 1px solid #ddd; 
-            border-radius: 6px; 
+            border: 1px solid var(--line); 
+            border-radius: 12px; 
             flex: 1; 
             min-width: 0; 
+            background: rgba(255,255,255,0.92);
+            color: var(--ink);
         }
         
         .btn-group { 
@@ -89,8 +105,8 @@
             flex: 1; 
             padding: 10px; 
             border: none; 
-            border-radius: 6px; 
-            background-color: #2196F3; 
+            border-radius: 12px; 
+            background: linear-gradient(135deg, var(--accent), var(--accent-deep)); 
             color: white; 
             cursor: pointer; 
             font-weight: bold; 
@@ -98,8 +114,8 @@
         }
         button:hover { opacity: 0.9; transform: translateY(-1px); }
         button:disabled { background-color: #cbd5e0; cursor: not-allowed; transform: none; }
-        .btn-pause { background-color: #ff9800; }
-        .btn-resume { background-color: #4caf50; }
+        .btn-pause { background: linear-gradient(135deg, #d48f2f, #b46e16); }
+        .btn-resume { background: linear-gradient(135deg, #6d8b57, #4d6841); }
 
         /* ---------- 日志区域：强制显示滚动条，确保可滚动 ---------- */
         .log-container {
@@ -107,7 +123,7 @@
             display: flex;
             flex-direction: column;
             background: #1e1e1e;
-            border-radius: 8px;
+            border-radius: 14px;
             overflow: hidden;             /* 隐藏溢出，滚动由内部#log-box负责 */
             margin-top: 15px;
             min-height: 0;                 /* 允许收缩 */
@@ -164,14 +180,15 @@
             width: 100%;
             padding: 8px 12px 8px 35px;
             border-radius: 20px;
-            border: 1px solid #ddd;
+            border: 1px solid var(--line);
             font-size: 13px;
             transition: 0.3s;
+            background: rgba(255,255,255,0.92);
         }
         .search-wrapper input:focus {
             outline: none;
-            border-color: #2196F3;
-            box-shadow: 0 0 8px rgba(33, 150, 243, 0.15);
+            border-color: var(--accent);
+            box-shadow: 0 0 8px rgba(182, 84, 52, 0.15);
         }
         .search-wrapper::before {
             content: "🔍";
@@ -217,12 +234,12 @@
         }
 
         .img-card { 
-            background: white; 
-            border-radius: 10px; 
+            background: var(--panel-strong); 
+            border-radius: 16px; 
             overflow: hidden; 
-            box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+            box-shadow: 0 10px 20px rgba(87,58,25,0.10);
             transition: 0.3s;
-            border: 1px solid #eee;
+            border: 1px solid rgba(74,53,25,0.08);
             animation: fadeIn 0.4s ease forwards;
             display: flex;
             flex-direction: column;
@@ -232,7 +249,7 @@
             to { opacity: 1; transform: translateY(0); }
         }
 
-        .img-card:hover { transform: translateY(-5px); box-shadow: 0 8px 20px rgba(0,0,0,0.15); }
+        .img-card:hover { transform: translateY(-5px); box-shadow: 0 16px 28px rgba(87,58,25,0.16); }
         .img-card img { 
             width: 100%; 
             height: 200px; 
@@ -384,6 +401,9 @@
                 <button id="btn-start" onclick="startTask()">▶ 开始抓取</button>
                 <button id="btn-pause" class="btn-pause" onclick="pauseTask()" disabled>⏸ 暂停</button>
                 <button id="btn-resume" class="btn-resume" onclick="resumeTask()" disabled>⏯ 继续</button>
+            </div>
+            <div class="btn-group">
+                <a href="/mosaic" target="_blank" rel="noopener noreferrer" style="display:block; width:100%; text-align:center; text-decoration:none; padding:10px 12px; border-radius:12px; background:linear-gradient(135deg, #8d3d23, #b65434); color:white; font-weight:bold;">使用马赛克编辑</a>
             </div>
         </div>
 
