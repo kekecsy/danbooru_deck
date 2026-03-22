@@ -11,6 +11,14 @@ from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
+from my_utils import (
+    clear_runtime_snapshot,
+    load_json,
+    merge_daily_viewer_data,
+    save_global_data,
+    save_runtime_snapshot,
+    save_viewer_data,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -28,21 +36,25 @@ save_dir = os.path.join(base_download_dir, today_str)
 stats_path = os.path.join(base_download_dir, "artist_stats.json") 
 log_path = os.path.join(base_download_dir, "log.json")
 status_path = os.path.join(base_download_dir, "status.json")
+runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
 
 os.makedirs(save_dir, exist_ok=True)
 os.makedirs('./drawer', exist_ok=True)
 
-# 加载全局数据
-def load_json(path, default):
-    if os.path.exists(path):
-        try:
-            with open(path, 'r', encoding='utf-8') as f: return json.load(f)
-        except: return default
-    return default
-
 log_data = load_json(log_path, {})
 artist_stats = load_json(stats_path, {})
 daily_viewer_data = load_json(os.path.join(save_dir, "viewer_data.json"), [])
+runtime_snapshot = load_json(runtime_snapshot_path, {})
+if runtime_snapshot:
+    log_data.update(runtime_snapshot.get("log_data", {}))
+    artist_stats.update(runtime_snapshot.get("artist_stats", {}))
+    daily_viewer_data = merge_daily_viewer_data(
+        daily_viewer_data,
+        runtime_snapshot.get("daily_viewer_data", [])
+    )
+    save_global_data(log_data, artist_stats, log_path, stats_path)
+    save_viewer_data(daily_viewer_data, save_dir)
+    clear_runtime_snapshot(runtime_snapshot_path)
 
 # 初始化排除列表和画师字典
 if not os.path.exists('./drawer/txtdata.txt'):
@@ -69,17 +81,54 @@ def get_folder_name(name):
     return (name.replace(":", "%3A").replace("/", "%2F").replace("!", "_")
             .replace("?", "_").replace("<", "_").replace(">", "_").rstrip('.'))
 
-def save_global_data():
-    temp_path = log_path + ".tmp"
-    with open(temp_path, 'w', encoding='utf-8') as f:
-        json.dump(log_data, f, ensure_ascii=False, indent=4)
-    os.replace(temp_path, log_path)
-    with open(stats_path, 'w', encoding='utf-8') as f:
-        json.dump(artist_stats, f, ensure_ascii=False, indent=4)
+def build_local_image_library():
+    library = []
+    current_day_dir = Path(save_dir)
+    viewer_files = [current_day_dir / "viewer_data.json"]
+    known_paths = set()
 
-def save_viewer_data(viewer_data):
-    with open(os.path.join(save_dir, "viewer_data.json"), 'w', encoding='utf-8') as f:
-        json.dump(viewer_data, f, ensure_ascii=False, indent=4)
+    for viewer_file in viewer_files:
+        if not viewer_file.exists():
+            continue
+        day_folder = viewer_file.parent.name
+        items = load_json(str(viewer_file), [])
+        for item in reversed(items):
+            filename = item.get("filename")
+            web_url = item.get("web_url")
+            if not filename:
+                continue
+            if not web_url:
+                web_url = f"/images/{day_folder}/{filename}"
+            local_key = os.path.join(day_folder, filename).replace("\\", "/")
+            known_paths.add(local_key)
+            library.append({
+                "artist": item.get("artist") or "未知",
+                "filename": filename,
+                "local_path": item.get("local_path") or os.path.join(base_download_dir, day_folder, filename),
+                "post_url": item.get("post_url") or "#",
+                "web_url": web_url,
+                "tags": item.get("tags") or {}
+            })
+
+    if current_day_dir.exists():
+        for image_path in sorted(current_day_dir.iterdir(), key=lambda p: p.name, reverse=True):
+            if not image_path.is_file():
+                continue
+            if image_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                continue
+            local_key = f"{current_day_dir.name}/{image_path.name}"
+            if local_key in known_paths:
+                continue
+            library.append({
+                "artist": "未知",
+                "filename": image_path.name,
+                "local_path": str(image_path),
+                "post_url": "#",
+                "web_url": f"/images/{current_day_dir.name}/{image_path.name}",
+                "tags": {}
+            })
+
+    return library
 
 def fetch_data_with_retry(ids, retries=5, delay=3):
     url = f'https://danbooru.donmai.us/posts/{ids}.json'
@@ -92,6 +141,7 @@ def fetch_data_with_retry(ids, retries=5, delay=3):
         except Exception as e:
             attempt += 1
             append_log(f"请求ID {ids} 失败 ({attempt}/{retries}): {e}")
+            save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
             sleep(delay)
     return None
 
@@ -110,7 +160,7 @@ class ScraperState:
         self.play_event.set()
         self.logs = []
         self.filter_tags = []
-        self.sent_image_count = 0
+        self.sent_image_count = len(daily_viewer_data)
 
 state = ScraperState()
 
@@ -122,6 +172,9 @@ class StartRequest(BaseModel):
     start_page: int
     end_page: int
     tags: str
+
+class OpenLocalRequest(BaseModel):
+    local_path: str
 
 # ==========================================
 # 3. 核心爬虫逻辑 (融入了打断检测)
@@ -153,6 +206,7 @@ def grabber(all_drawer, page_num, filter_tags):
                 return None
         except Exception as e:
             append_log(f"下载出错: {e}")
+            save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
             return None
 
     global log_data, artist_stats, daily_viewer_data
@@ -168,6 +222,7 @@ def grabber(all_drawer, page_num, filter_tags):
         r.raise_for_status()
     except Exception as e:
         append_log(f"获取页面失败: {e}")
+        save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
         return [], {"1": [], "2": []}
 
     soup = BeautifulSoup(r.content, "html.parser")
@@ -202,6 +257,7 @@ def grabber(all_drawer, page_num, filter_tags):
                 saved_filename = download_image(image_url, save_dir)
                 if saved_filename:
                     log_data[ids] = image_url
+                    save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
                     sleep(1)
                 else:
                     append_log(f"跳过 ID {ids}，下载失败。")
@@ -234,57 +290,63 @@ def grabber(all_drawer, page_num, filter_tags):
                         "tag_string_artist": test.get('tag_string_artist', '')
                     }
                 })
+                save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
 
-    save_global_data()
-    save_viewer_data(daily_viewer_data)
+    save_global_data(log_data, artist_stats, log_path, stats_path)
+    save_viewer_data(daily_viewer_data, save_dir)
+    clear_runtime_snapshot(runtime_snapshot_path)
     return new_hot_artists, page_need_update
 
 
 def scraper_task(start_page, end_page):
     try:
-        with open('./drawer/hot_drawer.txt', 'r', encoding='utf-8') as f:
-            output = f.read().split('\n')
-            output = [x for x in output if x] # 清理空行
-    except:
-        output = []
+        try:
+            with open('./drawer/hot_drawer.txt', 'r', encoding='utf-8') as f:
+                output = f.read().split('\n')
+                output = [x for x in output if x] # 清理空行
+        except:
+            output = []
 
-    need_update_json_path = './drawer/need_update.json'
-    if os.path.exists(need_update_json_path):
-        with open(need_update_json_path, 'r', encoding='utf-8') as f:
-            temp_nu = json.load(f)
-            nu_sets = {"1": set(temp_nu.get("1", [])), "2": set(temp_nu.get("2", []))}
-    else:
-        nu_sets = {"1": set(), "2": set()}
+        need_update_json_path = './drawer/need_update.json'
+        if os.path.exists(need_update_json_path):
+            with open(need_update_json_path, 'r', encoding='utf-8') as f:
+                temp_nu = json.load(f)
+                nu_sets = {"1": set(temp_nu.get("1", [])), "2": set(temp_nu.get("2", []))}
+        else:
+            nu_sets = {"1": set(), "2": set()}
 
-    n = start_page
-    append_log(f"▶ 开始抓取，从第 {start_page} 页到第 {end_page} 页")
-    append_log(f"▶ 当前过滤 Tags: {state.filter_tags}")
+        n = start_page
+        append_log(f"▶ 开始抓取，从第 {start_page} 页到第 {end_page} 页")
+        append_log(f"▶ 当前过滤 Tags: {state.filter_tags}")
 
-    while n <= end_page:
-        if not state.is_running: 
-            append_log("⏹ 任务已被强制终止。")
-            break
+        while n <= end_page:
+            if not state.is_running: 
+                append_log("⏹ 任务已被强制终止。")
+                break
+                
+            state.play_event.wait() # 等待暂停恢复
             
-        state.play_event.wait() # 等待暂停恢复
-        
-        append_log(f"--- 正在处理大页码 第 {n} 页 ---")
-        o, n_u_dict = grabber(all_drawer, n, state.filter_tags)
-        
-        output = list(set(output + o) - all_drawer)
-        for k in ["1", "2"]:
-            nu_sets[k].update(n_u_dict[k])
-        
-        with open('./drawer/hot_drawer.txt', 'w', encoding='utf-8') as f:
-            f.write('\n'.join(list(set(output))))
+            append_log(f"--- 正在处理大页码 第 {n} 页 ---")
+            o, n_u_dict = grabber(all_drawer, n, state.filter_tags)
             
-        final_nu = {k: sorted(list(v)) for k, v in nu_sets.items()}
-        with open(need_update_json_path, 'w', encoding='utf-8') as f:
-            json.dump(final_nu, f, ensure_ascii=False, indent=4)
+            output = list(set(output + o) - all_drawer)
+            for k in ["1", "2"]:
+                nu_sets[k].update(n_u_dict[k])
             
-        n += 1
-
-    state.is_running = False
-    append_log("✅ 所有页面处理完毕或已结束。")
+            with open('./drawer/hot_drawer.txt', 'w', encoding='utf-8') as f:
+                f.write('\n'.join(list(set(output))))
+                
+            final_nu = {k: sorted(list(v)) for k, v in nu_sets.items()}
+            with open(need_update_json_path, 'w', encoding='utf-8') as f:
+                json.dump(final_nu, f, ensure_ascii=False, indent=4)
+                
+            n += 1
+    except Exception as e:
+        save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
+        append_log(f"❌ 抓取任务异常中断，已写入临时快照: {e}")
+    finally:
+        state.is_running = False
+        append_log("✅ 所有页面处理完毕或已结束。")
 
 # ==========================================
 # 4. API 路由定义
@@ -317,7 +379,8 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
     state.filter_tags = [t.strip() for t in req.tags.split(',') if t.strip()]
     state.is_running = True
     state.play_event.set()
-    state.logs = [] 
+    state.logs = []
+    state.sent_image_count = len(daily_viewer_data)
     
     background_tasks.add_task(scraper_task, req.start_page, req.end_page)
     return {"msg": "任务已启动"}
@@ -333,6 +396,14 @@ def resume_scraper():
     state.play_event.set()
     append_log("\n🟢 任务已恢复...")
     return {"msg": "已恢复"}
+
+@app.post("/api/stop")
+def stop_scraper():
+    state.is_running = False
+    state.play_event.set()
+    save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
+    append_log("\n⏹ 已强制结束任务，当前进度已写入临时快照。")
+    return {"msg": "已强制结束任务"}
 
 @app.get("/api/status")
 def get_status():
@@ -354,6 +425,29 @@ def get_status():
         "new_logs": logs,
         "new_images": new_images  # 发送给前端渲染
     }
+
+@app.get("/api/gallery_data")
+def get_gallery_data():
+    return {
+        "latest_images": [],
+        "local_images": build_local_image_library()
+    }
+
+@app.post("/api/open_local")
+def open_local_file(req: OpenLocalRequest):
+    try:
+        target_path = Path(req.local_path).resolve()
+        base_path = Path(base_download_dir).resolve()
+        if not str(target_path).startswith(str(base_path)):
+            return {"ok": False, "msg": "路径不在允许范围内"}
+        if not target_path.exists():
+            return {"ok": False, "msg": "文件不存在"}
+        if hasattr(os, "startfile"):
+            os.startfile(str(target_path))
+            return {"ok": True, "msg": "已打开本地文件"}
+        return {"ok": False, "msg": "当前系统不支持直接打开本地文件"}
+    except Exception as e:
+        return {"ok": False, "msg": f"打开失败: {e}"}
 
 @app.get("/")
 def read_root():
