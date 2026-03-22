@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from pic_web.main import app as mosaic_editor_app
 
 # ==========================================
-# 1. 爬虫全局配置与初始化 (源自原脚本)
+# 1. 爬虫全局配置与初始化
 # ==========================================
 base_download_dir = './hot_pic'
 os.makedirs(base_download_dir, exist_ok=True)
