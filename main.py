@@ -18,6 +18,7 @@ from my_utils import (
     save_global_data,
     save_runtime_snapshot,
     save_viewer_data,
+    get_proxies_for_url
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -133,9 +134,10 @@ def build_local_image_library():
 def fetch_data_with_retry(ids, retries=5, delay=3):
     url = f'https://danbooru.donmai.us/posts/{ids}.json'
     attempt = 0
+    proxies = get_proxies_for_url(url)
     while attempt < retries:
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=10, proxies=proxies)
             response.raise_for_status()
             return response.json()
         except Exception as e:
@@ -180,7 +182,7 @@ class OpenLocalRequest(BaseModel):
 # 3. 核心爬虫逻辑 (融入了打断检测)
 # ==========================================
 def grabber(all_drawer, page_num, filter_tags):
-    def download_image(url, folder):
+    def download_image(url, folder, proxies={}):
         if not url: return None
         filename = url.split('/')[-1]
         filepath = os.path.join(folder, filename)
@@ -194,7 +196,7 @@ def grabber(all_drawer, page_num, filter_tags):
             if not state.is_running: return None
 
             append_log(f"正在下载: {filename} ...")
-            r = requests.get(url, timeout=20)
+            r = requests.get(url, timeout=20, proxies=proxies)
             if r.status_code == 200:
                 with open(filepath, 'wb') as f:
                     for chunk in r.iter_content(1024):
@@ -213,12 +215,14 @@ def grabber(all_drawer, page_num, filter_tags):
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
 
+    proxies = get_proxies_for_url('https://danbooru.donmai.us')
+
     state.play_event.wait() # 【关键点】获取页面前检查是否暂停
     if not state.is_running: return [], page_need_update
 
     try:
         append_log(f"正在获取第 {page_num} 页...")
-        r = requests.get(f'https://danbooru.donmai.us/posts?d=1&page={page_num}&tags=order%3Arank', timeout=15)
+        r = requests.get(f'https://danbooru.donmai.us/posts?d=1&page={page_num}&tags=order%3Arank', timeout=15, proxies=proxies)
         r.raise_for_status()
     except Exception as e:
         append_log(f"获取页面失败: {e}")
@@ -254,7 +258,7 @@ def grabber(all_drawer, page_num, filter_tags):
             saved_filename = None
 
             if image_url:
-                saved_filename = download_image(image_url, save_dir)
+                saved_filename = download_image(image_url, save_dir, proxies)
                 if saved_filename:
                     log_data[ids] = image_url
                     save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
@@ -354,10 +358,10 @@ def scraper_task(start_page, end_page):
 @app.get("/api/proxy_check")
 def check_proxy():
     url = "https://danbooru.donmai.us"
+    proxies = get_proxies_for_url(url)
     try:
-        resp = requests.get(url, timeout=5, allow_redirects=True)
+        resp = requests.get(url, timeout=5, allow_redirects=True, proxies=proxies)
         if resp.status_code == 200:
-            proxies = requests.utils.get_environ_proxies(url)
             if proxies:
                 return {"status": "success", "msg": "代理可用（已连通）", "color": "green"}
             else:

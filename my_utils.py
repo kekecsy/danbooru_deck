@@ -1,5 +1,13 @@
+# my_utils.py
 import json
 import os
+from requests.utils import get_environ_proxies
+
+def get_proxies_for_url(url):
+    proxies = get_environ_proxies(url)
+    if 'https' in proxies and proxies['https'].startswith('https://'):
+        proxies['https'] = proxies['https'].replace('https://', 'http://', 1)
+    return proxies
 
 
 def load_json(path, default):

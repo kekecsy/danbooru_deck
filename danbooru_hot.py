@@ -5,7 +5,7 @@ from bs4 import BeautifulSoup
 from time import sleep
 import datetime
 import json
-
+from proxy import get_proxies_for_url
 # --- 配置区 ---
 base_download_dir = './hot_pic'
 os.makedirs(base_download_dir, exist_ok=True)
@@ -14,6 +14,9 @@ save_dir = os.path.join(base_download_dir, today_str)
 stats_path = os.path.join(base_download_dir, "artist_stats.json") # 统计画师频率的文件
 log_path = os.path.join(base_download_dir, "log.json")
 status_path = os.path.join(base_download_dir, "status.json")
+
+proxies = get_proxies_for_url("https://danbooru.donmai.us")
+
 # --- 配置结束 ---
 
 if not os.path.exists(save_dir):
@@ -54,7 +57,8 @@ def check_proxy(self):
         resp = requests.get(
             url,
             timeout=5,                 # 防止卡死 UI
-            allow_redirects=True
+            allow_redirects=True,
+            proxies=proxies           # 使用代理设置
         )
 
         if resp.status_code == 200:
@@ -121,7 +125,7 @@ def fetch_data_with_retry(ids, retries=5, delay=3):
     attempt = 0
     while attempt < retries:
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=10, proxies=proxies)
             response.raise_for_status()
             return response.json()
         except Exception as e:
@@ -172,7 +176,7 @@ def grabber(all_drawer, page_num,log_callback=None, filter_tags=['furry','futana
 
         try:
             custom_print(f"正在下载: {filename} ...")
-            r = requests.get(url, timeout=20)
+            r = requests.get(url, timeout=20, proxies=proxies)
             if r.status_code == 200:
                 with open(filepath, 'wb') as f:
                     for chunk in r.iter_content(1024):
@@ -191,7 +195,7 @@ def grabber(all_drawer, page_num,log_callback=None, filter_tags=['furry','futana
     new_hot_artists = []
     try:
         custom_print(f"正在获取第 {page_num} 页...")
-        r = requests.get(f'https://danbooru.donmai.us/posts?d=1&page={page_num}&tags=order%3Arank', timeout=15)
+        r = requests.get(f'https://danbooru.donmai.us/posts?d=1&page={page_num}&tags=order%3Arank', timeout=15, proxies=proxies)
         r.raise_for_status()
     except Exception as e:
         custom_print(f"获取页面失败: {e}")
