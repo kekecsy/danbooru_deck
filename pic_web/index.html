@@ -99,6 +99,7 @@
                         <option value="mosaic">默认马赛克</option>
                         <option value="stripe">白条</option>
                         <option value="image">贴图填充</option>
+                        <option value="reveal">显示遮罩</option>
                     </select>
                 </div>
                 <div class="field">
@@ -153,6 +154,24 @@
                 </div>
                 <div class="hint" id="overlay-name" style="margin-top:10px">未选择贴图</div>
                 <div class="presets" id="preset-grid" style="margin-top:12px"></div>
+            </section>
+
+            <section class="card" id="reveal-settings" style="display:none;">
+                <h2>显示遮罩设置</h2>
+                <div class="row2">
+                    <div class="field">
+                        <label for="reveal-color">遮罩颜色</label>
+                        <input id="reveal-color" type="color" value="#000000">
+                    </div>
+                    <div class="field">
+                        <label for="reveal-opacity">遮罩透明度 <span id="reveal-opacity-text">80%</span></label>
+                        <input id="reveal-opacity" type="range" min="10" max="100" value="80">
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="reveal-radius">点击挖空半径 (px)</label>
+                    <input id="reveal-radius" type="number" min="10" max="500" value="50">
+                </div>
             </section>
 
             </div>
@@ -221,7 +240,7 @@
     </div>
 
     <script>
-        const state = {sourceFile:null,image:null,imageUrl:null,zoom:1,layers:[],selectedId:null,nextId:1,mode:null,handle:null,start:null,draft:null,fillMode:"mosaic",opacity:1,stripeText:"该信息已被管理员撤回",stripeFontFamily:"Times New Roman",stripeFontSize:25,stripeOrientation:"horizontal",imageDataUrl:null,imageName:"",zipFile:null,logUnread:0,logOpen:false};
+        const state = {sourceFile:null,image:null,imageUrl:null,zoom:1,layers:[],selectedId:null,nextId:1,mode:null,handle:null,start:null,draft:null,fillMode:"mosaic",opacity:1,stripeText:"该信息已被管理员撤回",stripeFontFamily:"Times New Roman",stripeFontSize:25,stripeOrientation:"horizontal",imageDataUrl:null,imageName:"",zipFile:null,logUnread:0,logOpen:false,imageName:"", zipFile:null, logUnread:0, logOpen:false, revealColor: "#000000", revealOpacity: 0.8};
         const canvas = document.getElementById("canvas");
         const ctx = canvas.getContext("2d");
         const workspace = document.getElementById("workspace");
@@ -313,10 +332,12 @@
             layer.stripeOrientation = state.stripeOrientation;
             layer.imageDataUrl = state.imageDataUrl;
             layer.imageName = state.imageName;
-            if (layer.fillMode === "stripe" && state.image) {
-                if (layer.stripeOrientation === "horizontal") { layer.x = 0; layer.width = state.image.width; }
-                else { layer.y = 0; layer.height = state.image.height; }
+
+            if (layer.fillMode === "reveal") {
+                layer.revealColor = state.revealColor;
+                layer.revealOpacity = state.revealOpacity;
             }
+
             normalizeLayer(layer);
         }
 
@@ -331,6 +352,7 @@
                 state.stripeOrientation = layer.stripeOrientation;
                 state.imageDataUrl = layer.imageDataUrl || null;
                 state.imageName = layer.imageName || "";
+                if (layer.revealColor) state.revealColor = layer.revealColor;
             }
             $("fill-mode").value = state.fillMode;
             $("opacity-range").value = String(Math.round(state.opacity * 100));
@@ -339,6 +361,8 @@
             $("stripe-font-size").value = String(state.stripeFontSize);
             $("stripe-orientation").value = state.stripeOrientation;
             $("overlay-name").textContent = state.imageName || "未选择贴图";
+            if ($("reveal-color")) $("reveal-color").value = state.revealColor; // 新增这行
+            if ($("reveal-radius")) $("reveal-radius").value = String(state.revealRadius); // 新增这行
             syncStats();
         }
 
@@ -416,11 +440,38 @@
         }
         function selectLayer(id) { state.selectedId = id; syncControlsFromSelected(); render(); }
         function addLayer(rect) {
-            const layer = {id:state.nextId++, x:rect.x, y:rect.y, width:rect.width, height:rect.height, fillMode:state.fillMode, opacity:state.opacity, stripeText:state.stripeText, stripeFontFamily:state.stripeFontFamily, stripeFontSize:Number(state.stripeFontSize), stripeOrientation:state.stripeOrientation, imageDataUrl:state.imageDataUrl, imageName:state.imageName};
+            const layer = {
+                id: state.nextId++,
+                x: rect.x,
+                y: rect.y,
+                width: rect.width,
+                height: rect.height,
+                fillMode: state.fillMode,
+                opacity: state.opacity,
+                stripeText: state.stripeText,
+                stripeFontFamily: state.stripeFontFamily,
+                stripeFontSize: Number(state.stripeFontSize),
+                stripeOrientation: state.stripeOrientation,
+                imageDataUrl: state.imageDataUrl,
+                imageName: state.imageName,
+                revealColor: state.revealColor,
+                revealOpacity: state.revealOpacity
+            };
             applyControlsToLayer(layer);
+            if (layer.fillMode === "stripe" && state.image) {
+                if (layer.stripeOrientation === "horizontal") {
+                    layer.x = 0;
+                    layer.width = state.image.width;
+                } else {
+                    layer.y = 0;
+                    layer.height = state.image.height;
+                }
+                normalizeLayer(layer);
+            }
+
             state.layers.push(layer);
             selectLayer(layer.id);
-            log(`已新增打码层 #${layer.id}`);
+            log(`已新增${layer.fillMode === "reveal" ? "挖孔" : "打码"}层 #${layer.id}`);
         }
 
         function drawMosaic(layer) {
@@ -486,6 +537,36 @@
             ctx.restore();
         }
 
+        function applyRevealMask(ctx, canvasWidth, canvasHeight, layers, scale, globalColor, globalOpacity) {
+            if (!layers.some(l => l.fillMode === "reveal")) return;
+            
+            const maskCanvas = document.createElement("canvas");
+            maskCanvas.width = canvasWidth;
+            maskCanvas.height = canvasHeight;
+            const mCtx = maskCanvas.getContext("2d");
+            
+            mCtx.fillStyle = globalColor;
+            mCtx.globalAlpha = globalOpacity;
+            mCtx.fillRect(0, 0, canvasWidth, canvasHeight);
+            
+            mCtx.globalCompositeOperation = "destination-out";
+            mCtx.globalAlpha = 1;
+            
+            layers.forEach(layer => {
+                if (layer.fillMode === "reveal") {
+                    mCtx.beginPath();
+                    const cx = (layer.x + layer.width / 2) * scale;
+                    const cy = (layer.y + layer.height / 2) * scale;
+                    const rx = (layer.width / 2) * scale;
+                    const ry = (layer.height / 2) * scale;
+                    mCtx.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+                    mCtx.fill();
+                }
+            });
+            
+            ctx.drawImage(maskCanvas, 0, 0);
+        }
+
         function render() {
             syncStats();
             ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -494,8 +575,29 @@
             state.layers.forEach(layer => {
                 if (layer.fillMode === "stripe") drawStripe(layer);
                 else if (layer.fillMode === "image") drawImageFill(layer);
-                else drawMosaic(layer);
+                else if (layer.fillMode === "mosaic") drawMosaic(layer); // 避开 reveal
             });
+
+            const hasRevealLayers = state.layers.some(l => l.fillMode === "reveal");
+            if (hasRevealLayers) {
+                applyRevealMask(ctx, canvas.width, canvas.height, state.layers, state.zoom, state.revealColor, state.revealOpacity);
+            }
+
+            if (state.fillMode === "reveal" && state.mode === "draw" && state.start && state.current) {
+                const dx = state.current.x - state.start.x;
+                const dy = state.current.y - state.start.y;
+                const x = dx >= 0 ? state.start.x : state.current.x;
+                const y = dy >= 0 ? state.start.y : state.current.y;
+                const w = Math.abs(dx);
+                const h = Math.abs(dy);
+                ctx.save();
+                ctx.setLineDash([8, 6]);
+                ctx.strokeStyle = "#1d7ef3";
+                ctx.lineWidth = 2;
+                ctx.strokeRect(x * state.zoom, y * state.zoom, w * state.zoom, h * state.zoom);
+                ctx.restore();
+            }
+
             if (state.draft) {
                 ctx.save();
                 ctx.setLineDash([8, 6]);
@@ -590,8 +692,14 @@
             state.layers.forEach(layer => {
                 if (layer.fillMode === "stripe") drawStripeOnContext(renderCtx, layer, scale);
                 else if (layer.fillMode === "image") drawImageFillOnContext(renderCtx, layer, scale, imageCache);
-                else drawMosaicOnContext(renderCtx, layer, scale);
+                else if (layer.fillMode === "mosaic") drawMosaicOnContext(renderCtx, layer, scale);
             });
+
+
+            const hasRevealLayers = state.layers.some(l => l.fillMode === "reveal");
+            if (hasRevealLayers) {
+                applyRevealMask(renderCtx, outWidth, outHeight, state.layers, scale, state.revealColor, state.revealOpacity);
+            }
 
             return new Promise((resolve, reject) => {
                 renderCanvas.toBlob(blob => {
@@ -606,29 +714,39 @@
 
         canvas.addEventListener("mousedown", event => {
             if (!state.image) return;
-            const point = canvasPoint(event), active = selectedLayer();
-            if (active) {
+
+            const point = canvasPoint(event);
+            const hitLayer = topLayerAt(point);
+            if (hitLayer) {
+                if (state.selectedId !== hitLayer.id) selectLayer(hitLayer.id);
+                const active = selectedLayer();
                 const handle = findHandle(point, active);
                 if (handle) {
                     state.mode = "resize";
                     state.handle = handle;
                     state.start = imagePoint(point);
-                    return;
+                } else {
+                    state.mode = "move";
+                    state.start = imagePoint(point);
                 }
-            }
-            const hit = topLayerAt(point);
-            if (hit) {
-                selectLayer(hit.id);
-                state.mode = "move";
-                state.start = imagePoint(point);
                 return;
             }
-            state.selectedId = null;
-            state.mode = "draw";
-            state.start = imagePoint(point);
-            state.draft = {x: state.start.x, y: state.start.y, width: 0, height: 0};
-            render();
+            if (state.fillMode === "reveal") {
+                state.selectedId = null;
+                state.mode = "draw";
+                state.start = imagePoint(point);
+                state.current = { ...state.start };
+                state.draft = null;
+                render();
+            } else {
+                state.selectedId = null;
+                state.mode = "draw";
+                state.start = imagePoint(point);
+                state.draft = { x: state.start.x, y: state.start.y, width: 0, height: 0 };
+                render();
+            }
         });
+
         canvas.addEventListener("contextmenu", event => {
             event.preventDefault();
             if (!state.image) return;
@@ -643,17 +761,26 @@
         window.addEventListener("mousemove", event => {
             if (!state.mode || !state.image) return;
             const point = imagePoint(canvasPoint(event));
+
+            if (state.mode === "draw" && state.fillMode === "reveal") {
+                state.current = point;
+                render();
+                return;
+            }
+
             if (state.mode === "draw" && state.draft) {
                 state.draft.width = point.x - state.start.x;
                 state.draft.height = point.y - state.start.y;
-                const draft = {...state.draft};
+                const draft = { ...state.draft };
                 normalizeLayer(draft);
                 state.draft = draft;
                 render();
                 return;
             }
+
             const layer = selectedLayer();
             if (!layer) return;
+
             if (state.mode === "move") {
                 layer.x += point.x - state.start.x;
                 layer.y += point.y - state.start.y;
@@ -662,6 +789,7 @@
                 render();
                 return;
             }
+
             if (state.mode === "resize") {
                 const dx = point.x - state.start.x, dy = point.y - state.start.y;
                 if (state.handle.includes("n")) { layer.y += dy; layer.height -= dy; }
@@ -675,7 +803,26 @@
         });
 
         window.addEventListener("mouseup", () => {
-            if (state.mode === "draw" && state.draft && state.draft.width > 10 && state.draft.height > 10) addLayer(state.draft);
+            if (state.mode === "draw") {
+                if (state.fillMode === "reveal" && state.start && state.current) {
+                    const dx = state.current.x - state.start.x;
+                    const dy = state.current.y - state.start.y;
+                    const width = Math.abs(dx);
+                    const height = Math.abs(dy);
+                    if (width > 10 && height > 10) {
+                        const x = dx >= 0 ? state.start.x : state.current.x;
+                        const y = dy >= 0 ? state.start.y : state.current.y;
+                        const rect = { x, y, width, height };
+                        normalizeLayer(rect);
+                        addLayer(rect);
+                    }
+                } else if (state.fillMode !== "reveal" && state.draft && Math.abs(state.draft.width) > 10 && Math.abs(state.draft.height) > 10) {
+                    const rect = { ...state.draft };
+                    normalizeLayer(rect);
+                    addLayer(rect);
+                }
+            }
+
             state.mode = null;
             state.handle = null;
             state.start = null;
@@ -817,6 +964,49 @@
             state.stripeOrientation = event.target.value;
             const layer = selectedLayer();
             if (layer) { applyControlsToLayer(layer); render(); }
+        });
+
+        $("reveal-opacity").addEventListener("input", event => {
+            state.revealOpacity = Number(event.target.value) / 100;
+            $("reveal-opacity-text").textContent = `${event.target.value}%`;
+            state.layers.forEach(layer => {
+                if (layer.fillMode === "reveal") {
+                    layer.revealOpacity = state.revealOpacity;
+                }
+            });
+            render();
+        });
+
+        $("reveal-color").addEventListener("input", event => {
+            state.revealColor = event.target.value;
+            state.layers.forEach(layer => {
+                if (layer.fillMode === "reveal") {
+                    layer.revealColor = state.revealColor;
+                }
+            });
+            render();
+        });
+
+        $("reveal-radius").addEventListener("input", event => {
+            state.revealRadius = Number(event.target.value || 50);
+        });
+
+        $("fill-mode").addEventListener("change", (e) => {
+            state.fillMode = e.target.value;
+            $("reveal-settings").style.display = state.fillMode === "reveal" ? "block" : "none";
+            render();
+        });
+
+        $("reveal-color").addEventListener("input", (e) => {
+            state.revealColor = e.target.value;
+            render();
+        });
+
+        $("reveal-opacity").addEventListener("input", (e) => {
+            const val = parseInt(e.target.value);
+            state.revealOpacity = val / 100;
+            $("reveal-opacity-text").textContent = val + "%";
+            render();
         });
 
         $("undo-btn").addEventListener("click", () => {
