@@ -152,6 +152,7 @@ def fetch_data_with_retry(ids, retries=5, delay=3):
 # ==========================================
 app = FastAPI()
 app.mount("/images", StaticFiles(directory="hot_pic"), name="images")
+app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/mosaic", mosaic_editor_app)
 
 
