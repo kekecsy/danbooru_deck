@@ -113,10 +113,16 @@
         const localPath = imgData.local_path || '';
         const tags = imgData.tags || {};
         const charString = tags.tag_string_character || '';
-        const encodedImage = encodeURIComponent(imageSrc);
-        const encodedName = encodeURIComponent(filename);
         const extension = getFileExtension(filename || localPath || imageSrc) || 'FILE';
         const isImage = IMAGE_EXTENSIONS.has(extension);
+
+        const params = new URLSearchParams({
+            image_url: imageSrc,
+            image_name: filename,
+            artist: artist,
+            post_url: imgData.post_url || '',
+            characters: charString
+        });
 
         return {
             ...imgData,
@@ -127,7 +133,7 @@
             post_url: imgData.post_url || '#',
             tags,
             characters: charString,
-            mosaicUrl: `${SERVER_BASE}/mosaic?image_url=${encodedImage}&image_name=${encodedName}`,
+            mosaicUrl: `${SERVER_BASE}/mosaic?${params.toString()}`,
             isImage,
             previewSrc: isImage ? imageSrc : buildPlaceholderDataUrl(extension),
             fileExtensionLabel: extension.toUpperCase()

@@ -17,6 +17,9 @@ const APP_BASE = window.location.pathname === "/" ? "" : window.location.pathnam
 const stamp = () => new Date().toLocaleTimeString("zh-CN", {hour12:false});
 const status = msg => $("status-text").textContent = msg;
 
+state.stripeText = "该信息已被管理员撤回";
+state.sourceMeta = {artist:"",characters:"",postUrl:"",imageName:""};
+
 function syncOpacityUIFromState() {
     const v = String(Math.round(state.opacity * 100));
     const ids = ["opacity-range", "opacity-range-stripe", "opacity-range-image"];
@@ -44,9 +47,6 @@ function updateModePanels() {
     ["mosaic", "stripe", "image", "reveal"].forEach(mode => {
         const el = $(`panel-mode-${mode}`);
         if (el) el.classList.toggle("hidden", mode !== m);
-    });
-    document.querySelectorAll(".mode-switch").forEach(node => {
-        node.classList.toggle("active", node.dataset.mode === m);
     });
 }
 
@@ -101,6 +101,44 @@ function syncStats() {
     if ($("opacity-text")) $("opacity-text").textContent = `${op}%`;
     if ($("opacity-text-stripe")) $("opacity-text-stripe").textContent = `${op}%`;
     if ($("opacity-text-image")) $("opacity-text-image").textContent = `${op}%`;
+}
+
+function normalizeCharactersText(value) {
+    return String(value || "").split(" ").filter(Boolean).join(", ");
+}
+
+function syncSourceMetaUi() {
+    const artist = state.sourceMeta.artist || "未提供";
+    const characters = normalizeCharactersText(state.sourceMeta.characters) || "未提供";
+    const postUrl = state.sourceMeta.postUrl || "";
+    const artistNode = $("source-artist");
+    const charactersNode = $("source-characters");
+    const postUrlNode = $("source-post-url");
+    if (artistNode) artistNode.textContent = artist;
+    if (charactersNode) charactersNode.textContent = characters;
+    if (postUrlNode) {
+        postUrlNode.textContent = postUrl || "未提供";
+        postUrlNode.href = postUrl || "#";
+        postUrlNode.classList.toggle("disabled", !postUrl);
+        postUrlNode.tabIndex = postUrl ? 0 : -1;
+        postUrlNode.setAttribute("aria-disabled", String(!postUrl));
+    }
+    const useArtistBtn = $("use-artist-text-btn");
+    const useCharactersBtn = $("use-characters-text-btn");
+    if (useArtistBtn) useArtistBtn.disabled = !state.sourceMeta.artist;
+    if (useCharactersBtn) useCharactersBtn.disabled = !state.sourceMeta.characters;
+}
+
+function applyStripeTextPreset(value) {
+    const text = String(value || "").trim();
+    if (!text) return;
+    state.stripeText = text;
+    $("stripe-text").value = text;
+    const layer = selectedLayer();
+    if (layer) {
+        applyControlsToLayer(layer);
+        render();
+    }
 }
 
 function selectedLayer() { return state.layers.find(x => x.id === state.selectedId) || null; }
@@ -161,6 +199,7 @@ function syncControlsFromSelected() {
     if ($("reveal-color")) $("reveal-color").value = state.revealColor;
     if ($("reveal-radius")) $("reveal-radius").value = String(state.revealRadius ?? 50);
     syncRevealUIFromState();
+    syncSourceMetaUi();
     updateModePanels();
     syncStats();
 }
@@ -197,6 +236,7 @@ async function loadImageFile(file) {
         state.sourceFile = file;
         state.image = img;
         state.imageUrl = url;
+        state.sourceMeta.imageName = file.name;
         state.layers = [];
         state.selectedId = null;
         state.nextId = 1;
@@ -266,16 +306,6 @@ function addLayer(rect) {
         revealOpacity: state.revealOpacity
     };
     applyControlsToLayer(layer);
-    if (layer.fillMode === "stripe" && state.image) {
-        if (layer.stripeOrientation === "horizontal") {
-            layer.x = 0;
-            layer.width = state.image.width;
-        } else {
-            layer.y = 0;
-            layer.height = state.image.height;
-        }
-        normalizeLayer(layer);
-    }
 
     state.layers.push(layer);
     selectLayer(layer.id);
@@ -299,8 +329,6 @@ function drawStripe(layer) {
     const x = layer.x * state.zoom, y = layer.y * state.zoom, w = layer.width * state.zoom, h = layer.height * state.zoom;
     ctx.save();
     ctx.globalAlpha = layer.opacity;
-    ctx.fillStyle = "#fff";
-    ctx.fillRect(x, y, w, h);
     ctx.fillStyle = "#000";
     ctx.font = `700 ${Math.max(10, layer.stripeFontSize * state.zoom)}px "${layer.stripeFontFamily}"`;
     ctx.textAlign = "center";
@@ -435,8 +463,6 @@ function drawStripeOnContext(targetCtx, layer, scale) {
     const x = layer.x * scale, y = layer.y * scale, w = layer.width * scale, h = layer.height * scale;
     targetCtx.save();
     targetCtx.globalAlpha = layer.opacity;
-    targetCtx.fillStyle = "#fff";
-    targetCtx.fillRect(x, y, w, h);
     targetCtx.fillStyle = "#000";
     targetCtx.font = `700 ${Math.max(10, layer.stripeFontSize * scale)}px "${layer.stripeFontFamily}"`;
     targetCtx.textAlign = "center";
@@ -757,12 +783,6 @@ $("fill-mode").addEventListener("change", event => {
     setFillMode(event.target.value);
     render();
 });
-document.querySelectorAll(".mode-switch").forEach(node => {
-    node.addEventListener("click", () => {
-        setFillMode(node.dataset.mode);
-        render();
-    });
-});
 $("stripe-text").addEventListener("input", event => {
     state.stripeText = event.target.value;
     const layer = selectedLayer();
@@ -782,6 +802,14 @@ $("stripe-orientation").addEventListener("change", event => {
     state.stripeOrientation = event.target.value;
     const layer = selectedLayer();
     if (layer) { applyControlsToLayer(layer); render(); }
+});
+$("use-artist-text-btn").addEventListener("click", () => {
+    applyStripeTextPreset(state.sourceMeta.artist);
+    log("已将作者填入白条文字");
+});
+$("use-characters-text-btn").addEventListener("click", () => {
+    applyStripeTextPreset(normalizeCharactersText(state.sourceMeta.characters));
+    log("已将角色填入白条文字");
 });
 
 $("reveal-opacity").addEventListener("input", event => {
@@ -1041,6 +1069,18 @@ async function bootstrap() {
     const params = new URLSearchParams(window.location.search);
     const imageUrl = params.get("image_url");
     const imageName = params.get("image_name");
+    const artist = params.get("artist") || "";
+    const characters = params.get("characters") || "";
+    const postUrl = params.get("post_url") || "";
+    state.sourceMeta.artist = artist;
+    state.sourceMeta.characters = characters;
+    state.sourceMeta.postUrl = postUrl;
+    state.sourceMeta.imageName = imageName || "";
+    if (artist) {
+        applyStripeTextPreset(artist);
+        log(`已带入来源作者: ${artist}`);
+    }
+    syncSourceMetaUi();
     if (imageUrl) await loadImageFromUrl(imageUrl, imageName);
 }
 

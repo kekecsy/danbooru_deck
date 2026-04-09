@@ -166,6 +166,53 @@ button:disabled{
     padding-top:10px;
     border-top:1px solid rgba(74,53,25,.1)
 }
+.meta-stack{
+    display:flex;
+    flex-direction:column;
+    gap:10px
+}
+.meta-row{
+    display:flex;
+    flex-direction:column;
+    gap:6px
+}
+.meta-label{
+    font-size:12px;
+    font-weight:700;
+    color:var(--muted)
+}
+.meta-value-wrap{
+    display:flex;
+    align-items:flex-start;
+    gap:8px;
+    flex-wrap:wrap
+}
+.meta-value,.meta-link{
+    display:block;
+    min-width:0;
+    padding:8px 10px;
+    border-radius:12px;
+    background:#fff;
+    border:1px solid var(--line);
+    color:var(--ink);
+    font-size:12px;
+    line-height:1.45;
+    word-break:break-word;
+    flex:1
+}
+.meta-link{
+    text-decoration:none
+}
+.meta-link:hover{
+    color:var(--accent2)
+}
+.meta-link.disabled{
+    color:var(--muted);
+    pointer-events:none
+}
+.meta-action{
+    flex:none
+}
 .mode-panel .field:first-of-type{
     margin-top:0
 }

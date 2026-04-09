@@ -146,7 +146,7 @@ def render_image_fill(size: Tuple[int, int], source: Image.Image) -> Image.Image
 
 def render_stripe_fill(size: Tuple[int, int], operation: Dict[str, Any]) -> Image.Image:
     width, height = size
-    overlay = Image.new("RGBA", size, (255, 255, 255, 255))
+    overlay = Image.new("RGBA", size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
     text = str(operation.get("stripeText") or "该信息已被管理员撤回")

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Mosaic Web Studio</title>
-    <link rel="stylesheet" href="./static/style.css">
+    <link rel="stylesheet" href="./static/style.css?v=20260409-3">
 </head>
 <body>
     <div class="app">
@@ -36,13 +36,33 @@
             </section>
 
             <section class="card">
-                <h2>绘制</h2>
-                <div class="mode-switches" aria-label="fill mode quick switch">
-                    <button type="button" class="mode-switch active" data-mode="mosaic">默认马赛克</button>
-                    <button type="button" class="mode-switch" data-mode="stripe">白条文字</button>
-                    <button type="button" class="mode-switch" data-mode="image">贴图填充</button>
-                    <button type="button" class="mode-switch" data-mode="reveal">显示遮罩</button>
+                <h2>来源信息</h2>
+                <div class="meta-stack">
+                    <div class="meta-row">
+                        <span class="meta-label">作者</span>
+                        <div class="meta-value-wrap">
+                            <span id="source-artist" class="meta-value">未提供</span>
+                            <button id="use-artist-text-btn" type="button" class="ghost meta-action">填入白条</button>
+                        </div>
+                    </div>
+                    <div class="meta-row">
+                        <span class="meta-label">角色</span>
+                        <div class="meta-value-wrap">
+                            <span id="source-characters" class="meta-value">未提供</span>
+                            <button id="use-characters-text-btn" type="button" class="ghost meta-action">填入白条</button>
+                        </div>
+                    </div>
+                    <div class="meta-row">
+                        <span class="meta-label">原帖</span>
+                        <div class="meta-value-wrap">
+                            <a id="source-post-url" class="meta-link" href="#" target="_blank" rel="noopener noreferrer">未提供</a>
+                        </div>
+                    </div>
                 </div>
+            </section>
+
+            <section class="card">
+                <h2>绘制</h2>
                 <div class="field">
                     <label for="fill-mode">打码方式</label>
                     <select id="fill-mode">
@@ -62,9 +82,9 @@
                 </div>
 
                 <div id="panel-mode-stripe" class="mode-panel hidden">
-                    <p class="mode-hint">白条会沿选定方向贯穿整张图，可改文字与字体。</p>
+                    <p class="mode-hint">像普通打码一样拖拽决定文字范围，背景透明，只保留文字本身。</p>
                     <div class="field">
-                        <label for="opacity-range-stripe">白条透明度 <span id="opacity-text-stripe">100%</span></label>
+                        <label for="opacity-range-stripe">文字透明度 <span id="opacity-text-stripe">100%</span></label>
                         <input id="opacity-range-stripe" type="range" min="10" max="100" value="100">
                     </div>
                     <div class="field">
@@ -191,7 +211,7 @@
                         <ol class="tips">
                             <li>拖拽画布创建矩形区域。</li>
                             <li>点击区域可移动，拖边角可缩放。</li>
-                            <li>白条模式会自动横向或纵向贯穿整张图。</li>
+                            <li>白条模式同样按你拖拽的矩形范围生效。</li>
                         </ol>
                     </div>
                 </div>
@@ -202,6 +222,6 @@
         </main>
     </div>
 
-    <script src="./static/app.js" defer></script>
+    <script src="./static/app.js?v=20260409-3" defer></script>
 </body>
 </html>
