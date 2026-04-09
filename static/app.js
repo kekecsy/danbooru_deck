@@ -2,6 +2,7 @@
     const ITEMS_PER_PAGE = 30;
     const DEFAULT_SERVER_BASE = 'http://127.0.0.1:8000';
     const SERVER_BASE = window.location.protocol === 'file:' ? DEFAULT_SERVER_BASE : window.location.origin;
+    const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif']);
 
     const gallery = document.getElementById('image-gallery');
     const galleryTitle = document.getElementById('gallery-title');
@@ -11,6 +12,17 @@
     const pageNext = document.getElementById('page-next');
     const tabLatest = document.getElementById('tab-latest');
     const tabLocal = document.getElementById('tab-local');
+    const localDateControls = document.getElementById('local-date-controls');
+    const localDatePrev = document.getElementById('local-date-prev');
+    const localDateNext = document.getElementById('local-date-next');
+    const localDateToday = document.getElementById('local-date-today');
+    const localDateTrigger = document.getElementById('local-date-trigger');
+    const localDateHint = document.getElementById('local-date-hint');
+    const localDatePanel = document.getElementById('local-date-panel');
+    const calendarMonthPrev = document.getElementById('calendar-month-prev');
+    const calendarMonthNext = document.getElementById('calendar-month-next');
+    const calendarMonthLabel = document.getElementById('calendar-month-label');
+    const calendarGrid = document.getElementById('calendar-grid');
     const charSearch = document.getElementById('char-search');
     const logBox = document.getElementById('log-box');
     const btnStart = document.getElementById('btn-start');
@@ -37,11 +49,26 @@
         latest: [],
         local: [],
         activeTab: 'latest',
-        currentPage: 1
+        currentPage: 1,
+        availableDates: [],
+        selectedDate: '',
+        today: '',
+        calendarYear: 0,
+        calendarMonth: 0
     };
+
     let currentViewerIndex = -1;
 
-    const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif']);
+    function buildUrl(path) {
+        if (!path) return '';
+        if (/^https?:\/\//i.test(path)) return path;
+        if (path.startsWith('/')) return `${SERVER_BASE}${path}`;
+        return `${SERVER_BASE}/${path}`;
+    }
+
+    async function apiFetch(path, options) {
+        return fetch(`${SERVER_BASE}${path}`, options);
+    }
 
     function getFileExtension(path) {
         const raw = (path || '').split('?')[0].split('#')[0];
@@ -66,22 +93,11 @@
         return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
     }
 
-    function buildUrl(path) {
-        if (!path) return '';
-        if (/^https?:\/\//i.test(path)) return path;
-        if (path.startsWith('/')) return `${SERVER_BASE}${path}`;
-        return `${SERVER_BASE}/${path}`;
-    }
-
-    async function apiFetch(path, options) {
-        return fetch(`${SERVER_BASE}${path}`, options);
-    }
-
     function appendLog(msg) {
         if (logBox.innerText === '等待任务启动...') {
             logBox.innerText = '';
         }
-        logBox.textContent += msg + '\n';
+        logBox.textContent += `${msg}\n`;
         setTimeout(() => {
             logBox.scrollTop = logBox.scrollHeight;
         }, 10);
@@ -91,7 +107,7 @@
     }
 
     function normalizeImageData(imgData) {
-        const imageSrc = buildUrl(imgData.web_url || imgData.file_url || 'https://via.placeholder.com/300?text=No+Image');
+        const imageSrc = buildUrl(imgData.web_url || imgData.file_url || '');
         const artist = imgData.artist || '未知';
         const filename = imgData.filename || `${artist || 'image'}.png`;
         const localPath = imgData.local_path || '';
@@ -137,6 +153,150 @@
         return items.filter(item => (item.characters || '').toLowerCase().includes(query));
     }
 
+    function getVisibleCards() {
+        return Array.from(gallery.getElementsByClassName('img-card'));
+    }
+
+    function getSelectedDateLabel() {
+        return galleryState.selectedDate || galleryState.today || '';
+    }
+
+    function parseDateParts(dateStr) {
+        if (!dateStr) return null;
+        const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+        if (!match) return null;
+        return {
+            year: Number(match[1]),
+            month: Number(match[2]),
+            day: Number(match[3])
+        };
+    }
+
+    function setCalendarMonthFromDate(dateStr) {
+        const parts = parseDateParts(dateStr);
+        if (!parts) return;
+        galleryState.calendarYear = parts.year;
+        galleryState.calendarMonth = parts.month;
+    }
+
+    function formatDate(year, month, day) {
+        const y = String(year).padStart(4, '0');
+        const m = String(month).padStart(2, '0');
+        const d = String(day).padStart(2, '0');
+        return `${y}-${m}-${d}`;
+    }
+
+    function getAvailableDateSet() {
+        return new Set(galleryState.availableDates);
+    }
+
+    function openCalendarPanel() {
+        if (!galleryState.calendarYear || !galleryState.calendarMonth) {
+            setCalendarMonthFromDate(getSelectedDateLabel());
+        }
+        renderCalendar();
+        localDatePanel.classList.remove('hidden');
+        localDatePanel.setAttribute('aria-hidden', 'false');
+        localDateTrigger.setAttribute('aria-expanded', 'true');
+    }
+
+    function closeCalendarPanel() {
+        localDatePanel.classList.add('hidden');
+        localDatePanel.setAttribute('aria-hidden', 'true');
+        localDateTrigger.setAttribute('aria-expanded', 'false');
+    }
+
+    function renderCalendar() {
+        if (!galleryState.calendarYear || !galleryState.calendarMonth) {
+            setCalendarMonthFromDate(getSelectedDateLabel());
+        }
+
+        const year = galleryState.calendarYear;
+        const month = galleryState.calendarMonth;
+        const availableDateSet = getAvailableDateSet();
+        const selectedDate = getSelectedDateLabel();
+        const today = galleryState.today;
+
+        calendarMonthLabel.textContent = `${year}-${String(month).padStart(2, '0')}`;
+        calendarGrid.innerHTML = '';
+
+        const firstDay = new Date(year, month - 1, 1);
+        const firstWeekday = (firstDay.getDay() + 6) % 7;
+        const daysInMonth = new Date(year, month, 0).getDate();
+        const prevMonthDays = new Date(year, month - 1, 0).getDate();
+
+        const cells = [];
+
+        for (let i = firstWeekday - 1; i >= 0; i -= 1) {
+            cells.push({
+                year: month === 1 ? year - 1 : year,
+                month: month === 1 ? 12 : month - 1,
+                day: prevMonthDays - i,
+                otherMonth: true
+            });
+        }
+
+        for (let day = 1; day <= daysInMonth; day += 1) {
+            cells.push({ year, month, day, otherMonth: false });
+        }
+
+        while (cells.length < 42) {
+            const day = cells.length - (firstWeekday + daysInMonth) + 1;
+            cells.push({
+                year: month === 12 ? year + 1 : year,
+                month: month === 12 ? 1 : month + 1,
+                day,
+                otherMonth: true
+            });
+        }
+
+        cells.forEach(cell => {
+            const dateStr = formatDate(cell.year, cell.month, cell.day);
+            const isAvailable = availableDateSet.has(dateStr);
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = `calendar-day ${cell.otherMonth ? 'other-month' : ''} ${isAvailable ? 'enabled-day' : 'disabled-day'}`.trim();
+            if (dateStr === selectedDate) button.classList.add('selected-day');
+            if (dateStr === today) button.classList.add('today-day');
+            button.textContent = String(cell.day);
+            button.dataset.date = dateStr;
+            button.title = isAvailable ? `查看 ${dateStr} 的图片` : `${dateStr} 没有已下载图片`;
+            button.disabled = !isAvailable;
+            button.addEventListener('click', function() {
+                if (!isAvailable) return;
+                loadGalleryByDate(dateStr);
+                closeCalendarPanel();
+            });
+            calendarGrid.appendChild(button);
+        });
+    }
+
+    function updateLocalDateControls() {
+        const isLocalTab = galleryState.activeTab === 'local';
+        localDateControls.classList.toggle('hidden', !isLocalTab);
+
+        if (!galleryState.availableDates.length) {
+            localDatePrev.disabled = true;
+            localDateNext.disabled = true;
+            localDateToday.disabled = true;
+            localDateTrigger.disabled = true;
+            localDateTrigger.textContent = '暂无日期';
+            localDateHint.textContent = '还没有已下载的日期目录';
+            closeCalendarPanel();
+            return;
+        }
+
+        const currentDate = getSelectedDateLabel();
+        const currentIndex = galleryState.availableDates.indexOf(currentDate);
+        localDateTrigger.disabled = false;
+        localDateTrigger.textContent = currentDate || '选择日期';
+        localDatePrev.disabled = currentIndex < 0 || currentIndex >= galleryState.availableDates.length - 1;
+        localDateNext.disabled = currentIndex <= 0;
+        localDateToday.disabled = !galleryState.today || currentDate === galleryState.today || !galleryState.availableDates.includes(galleryState.today);
+        localDateHint.textContent = `共 ${galleryState.availableDates.length} 个已下载日期`;
+        renderCalendar();
+    }
+
     function createCard(item) {
         const card = document.createElement('div');
         card.className = 'img-card';
@@ -153,7 +313,7 @@
         if (charArray.length) {
             charArray.forEach(char => {
                 const safeChar = char.replace(/"/g, '&quot;');
-                tagsHtml += `<span class="char-tag" data-char="${safeChar}" title="点击复制: ${char}">${char}</span>`;
+                tagsHtml += `<span class="char-tag" data-char="${safeChar}" title="点击复制角色名">${char}</span>`;
             });
         } else {
             tagsHtml = '<span class="char-tag original" data-char="original">original</span>';
@@ -169,16 +329,12 @@
                     ${tagsHtml}
                 </div>
                 <div class="card-actions">
-                    <a href="${item.post_url || '#'}" target="_blank" rel="noopener noreferrer" class="card-link origin">查看原贴</a>
+                    <a href="${item.post_url || '#'}" target="_blank" rel="noopener noreferrer" class="card-link origin">查看原帖</a>
                     <a href="${item.mosaicUrl}" target="_blank" rel="noopener noreferrer" class="card-link edit">编辑打码</a>
                 </div>
             </div>
         `;
         return card;
-    }
-
-    function getVisibleCards() {
-        return Array.from(gallery.getElementsByClassName('img-card'));
     }
 
     function renderGallery() {
@@ -197,13 +353,16 @@
             pageItems.forEach(item => gallery.appendChild(createCard(item)));
         }
 
-        galleryTitle.textContent = galleryState.activeTab === 'latest' ? '最新抓取预览' : '本地已下载';
+        galleryTitle.textContent = galleryState.activeTab === 'latest'
+            ? '最新抓取预览'
+            : `本地已下载${getSelectedDateLabel() ? ` · ${getSelectedDateLabel()}` : ''}`;
         galleryCount.textContent = `共 ${filteredItems.length} 张`;
         pageInfo.textContent = `第 ${galleryState.currentPage} / ${totalPages} 页`;
         pagePrev.disabled = galleryState.currentPage <= 1;
         pageNext.disabled = galleryState.currentPage >= totalPages;
         tabLatest.classList.toggle('active', galleryState.activeTab === 'latest');
         tabLocal.classList.toggle('active', galleryState.activeTab === 'local');
+        updateLocalDateControls();
 
         if (viewerModal.classList.contains('open')) {
             const currentSrc = viewerImage.getAttribute('src');
@@ -220,6 +379,10 @@
     function switchTab(tabName) {
         galleryState.activeTab = tabName;
         galleryState.currentPage = 1;
+        if (tabName === 'local' && getSelectedDateLabel()) {
+            loadGalleryByDate(getSelectedDateLabel());
+            return;
+        }
         renderGallery();
     }
 
@@ -343,7 +506,7 @@
                 })
             });
         } catch (e) {
-            appendLog('启动任务请求失败: ' + e.message);
+            appendLog(`启动任务请求失败: ${e.message}`);
         }
     }
 
@@ -367,7 +530,7 @@
         try {
             await apiFetch('/api/stop', { method: 'POST' });
         } catch (e) {
-            appendLog('强制结束失败: ' + e.message);
+            appendLog(`停止失败: ${e.message}`);
         }
     }
 
@@ -391,24 +554,50 @@
             const data = await res.json();
             appendLog(data.msg || '已尝试打开本地文件');
         } catch (e) {
-            appendLog('打开本地文件失败: ' + e.message);
+            appendLog(`打开本地文件失败: ${e.message}`);
+        }
+    }
+
+    function applyGalleryPayload(data) {
+        galleryState.latest = (data.latest_images || []).map(normalizeImageData).reverse();
+        galleryState.local = (data.local_images || []).map(normalizeImageData);
+        galleryState.availableDates = data.available_dates || [];
+        galleryState.selectedDate = data.selected_date || '';
+        galleryState.today = data.today || '';
+        if (!galleryState.calendarYear || !galleryState.calendarMonth) {
+            setCalendarMonthFromDate(galleryState.selectedDate || galleryState.today);
+        }
+        const selectedParts = parseDateParts(galleryState.selectedDate || galleryState.today);
+        if (selectedParts) {
+            galleryState.calendarYear = selectedParts.year;
+            galleryState.calendarMonth = selectedParts.month;
+        }
+        renderGallery();
+    }
+
+    async function loadGalleryByDate(dateValue) {
+        try {
+            const path = dateValue ? `/api/gallery_data/${encodeURIComponent(dateValue)}` : '/api/gallery_data';
+            const res = await apiFetch(path);
+            if (!res.ok) throw new Error('加载图库数据失败');
+            const data = await res.json();
+            applyGalleryPayload(data);
+        } catch (e) {
+            appendLog(`加载图库失败: ${e.message}`);
         }
     }
 
     async function loadInitialGalleryData() {
-        try {
-            const res = await apiFetch('/api/gallery_data');
-            if (!res.ok) throw new Error('加载图库数据失败');
-            const data = await res.json();
-            galleryState.latest = (data.latest_images || []).map(normalizeImageData).reverse();
-            galleryState.local = (data.local_images || []).map(normalizeImageData);
-            renderGallery();
-        } catch (e) {
-            appendLog('加载图库失败: ' + e.message);
-            if (window.location.protocol === 'file:') {
-                appendLog('当前像是直接打开了 html，请先运行 python main.py，然后访问 http://127.0.0.1:8000');
-            }
+        await loadGalleryByDate('');
+        if (window.location.protocol === 'file:') {
+            appendLog('当前像是直接打开了 html，请先运行 python main.py，然后访问 http://127.0.0.1:8000');
         }
+    }
+
+    function getRelativeAvailableDate(step) {
+        const currentIndex = galleryState.availableDates.indexOf(getSelectedDateLabel());
+        if (currentIndex < 0) return '';
+        return galleryState.availableDates[currentIndex + step] || '';
     }
 
     function setupTagCopyDelegation() {
@@ -430,8 +619,8 @@
                     tag.style.backgroundColor = '';
                     tag.style.color = '';
                 }, 800);
-            }).catch(err => {
-                console.warn('复制失败', err);
+            }).catch(() => {
+                appendLog('复制角色名失败');
             });
         });
     }
@@ -493,6 +682,56 @@
         });
     }
 
+    function setupLocalDatePicker() {
+        localDateTrigger.addEventListener('click', function(event) {
+            event.stopPropagation();
+            if (localDatePanel.classList.contains('hidden')) {
+                openCalendarPanel();
+            } else {
+                closeCalendarPanel();
+            }
+        });
+        localDatePrev.addEventListener('click', function() {
+            const targetDate = getRelativeAvailableDate(1);
+            if (targetDate) loadGalleryByDate(targetDate);
+        });
+        localDateNext.addEventListener('click', function() {
+            const targetDate = getRelativeAvailableDate(-1);
+            if (targetDate) loadGalleryByDate(targetDate);
+        });
+        localDateToday.addEventListener('click', function() {
+            if (galleryState.today && galleryState.availableDates.includes(galleryState.today)) {
+                loadGalleryByDate(galleryState.today);
+                closeCalendarPanel();
+            }
+        });
+        calendarMonthPrev.addEventListener('click', function(event) {
+            event.stopPropagation();
+            if (galleryState.calendarMonth === 1) {
+                galleryState.calendarYear -= 1;
+                galleryState.calendarMonth = 12;
+            } else {
+                galleryState.calendarMonth -= 1;
+            }
+            renderCalendar();
+        });
+        calendarMonthNext.addEventListener('click', function(event) {
+            event.stopPropagation();
+            if (galleryState.calendarMonth === 12) {
+                galleryState.calendarYear += 1;
+                galleryState.calendarMonth = 1;
+            } else {
+                galleryState.calendarMonth += 1;
+            }
+            renderCalendar();
+        });
+        document.addEventListener('click', function(event) {
+            if (localDatePanel.classList.contains('hidden')) return;
+            if (localDateControls.contains(event.target)) return;
+            closeCalendarPanel();
+        });
+    }
+
     window.checkProxy = checkProxy;
     window.startTask = startTask;
     window.pauseTask = pauseTask;
@@ -512,18 +751,21 @@
             }
             if (data.new_images?.length) {
                 galleryState.latest = mergeUniqueByUrl(galleryState.latest, data.new_images);
-                galleryState.local = mergeUniqueByUrl(galleryState.local, data.new_images);
+                if (galleryState.selectedDate === galleryState.today) {
+                    galleryState.local = mergeUniqueByUrl(galleryState.local, data.new_images);
+                }
                 renderGallery();
             }
             updateButtons(data.is_running, data.is_paused);
         } catch (e) {
-            // 静默失败
+            // silent
         }
     }, 1000);
 
     setupTagCopyDelegation();
     setupViewerDelegation();
     setupPaginationAndTabs();
+    setupLocalDatePicker();
     loadInitialGalleryData();
     appendLog('界面已加载。');
 
@@ -531,4 +773,3 @@
         clearInterval(polling);
     });
 })();
-

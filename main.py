@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 from pathlib import Path
 import requests
@@ -82,9 +83,39 @@ def get_folder_name(name):
     return (name.replace(":", "%3A").replace("/", "%2F").replace("!", "_")
             .replace("?", "_").replace("<", "_").replace(">", "_").rstrip('.'))
 
-def build_local_image_library():
+def get_available_date_folders():
+    date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    folders = []
+    for item in Path(base_download_dir).iterdir():
+        if not item.is_dir() or not date_pattern.match(item.name):
+            continue
+        try:
+            datetime.datetime.strptime(item.name, "%Y-%m-%d")
+        except ValueError:
+            continue
+        folders.append(item.name)
+    return sorted(folders, reverse=True)
+
+def resolve_selected_date(requested_date=None):
+    available_dates = get_available_date_folders()
+    if requested_date:
+        try:
+            datetime.datetime.strptime(requested_date, "%Y-%m-%d")
+            if requested_date in available_dates:
+                return requested_date, available_dates
+        except ValueError:
+            pass
+
+    if today_str in available_dates:
+        return today_str, available_dates
+    if available_dates:
+        return available_dates[0], available_dates
+    return today_str, available_dates
+
+def build_local_image_library(selected_date=None):
     library = []
-    current_day_dir = Path(save_dir)
+    resolved_date, _ = resolve_selected_date(selected_date)
+    current_day_dir = Path(base_download_dir) / resolved_date
     viewer_files = [current_day_dir / "viewer_data.json"]
     known_paths = set()
 
@@ -433,9 +464,25 @@ def get_status():
 
 @app.get("/api/gallery_data")
 def get_gallery_data():
+    selected_date, available_dates = resolve_selected_date()
     return {
         "latest_images": [],
-        "local_images": build_local_image_library()
+        "local_images": build_local_image_library(selected_date),
+        "selected_date": selected_date,
+        "available_dates": available_dates,
+        "today": today_str
+    }
+
+@app.get("/api/gallery_data/{date_str}")
+def get_gallery_data_by_date(date_str: str):
+    selected_date, available_dates = resolve_selected_date(date_str)
+    return {
+        "latest_images": [],
+        "local_images": build_local_image_library(selected_date),
+        "selected_date": selected_date,
+        "available_dates": available_dates,
+        "today": today_str,
+        "requested_date": date_str
     }
 
 @app.post("/api/open_local")
