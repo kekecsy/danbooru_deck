@@ -59,13 +59,19 @@ def save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_sna
         "artist_stats": artist_stats,
         "daily_viewer_data": daily_viewer_data
     }
-    with open(runtime_snapshot_path, 'w', encoding='utf-8') as f:
+    temp_path = runtime_snapshot_path + ".tmp"
+    with open(temp_path, 'w', encoding='utf-8') as f:
         json.dump(snapshot, f, ensure_ascii=False, indent=4)
+    os.replace(temp_path, runtime_snapshot_path)
 
 
 def clear_runtime_snapshot(runtime_snapshot_path):
-    if os.path.exists(runtime_snapshot_path):
+    if not os.path.exists(runtime_snapshot_path):
+        return
+    try:
         os.remove(runtime_snapshot_path)
+    except PermissionError:
+        pass
 
 def add_extra_info_to_img(img_path, extra_info):
     exiftool_path = r"./exiftool/exiftool-13.54_64/exiftool(-k).exe"

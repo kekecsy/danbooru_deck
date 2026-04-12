@@ -197,10 +197,24 @@ class ScraperState:
         self.sent_image_count = len(daily_viewer_data)
 
 state = ScraperState()
+scraper_thread = None
 
 def append_log(msg):
-    print(msg)  # 控制台也打印一份
-    state.logs.append(msg)
+    text = str(msg)
+    try:
+        print(text)  # 控制台也打印一份
+    except UnicodeEncodeError:
+        safe_text = text.encode("gbk", errors="replace").decode("gbk")
+        print(safe_text)
+    state.logs.append(text)
+    state.logs = state.logs[-500:]
+
+
+def get_today_save_dir():
+    current_day = datetime.datetime.now().strftime('%Y-%m-%d')
+    target_dir = os.path.join(base_download_dir, current_day)
+    os.makedirs(target_dir, exist_ok=True)
+    return current_day, target_dir, os.path.join(target_dir, "_runtime_snapshot.json")
 
 class StartRequest(BaseModel):
     start_page: int
@@ -243,9 +257,11 @@ def grabber(all_drawer, page_num, filter_tags):
             save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
             return None
 
-    global log_data, artist_stats, daily_viewer_data
+    global log_data, artist_stats, daily_viewer_data, today_str, save_dir, runtime_snapshot_path
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
+
+    today_str, save_dir, runtime_snapshot_path = get_today_save_dir()
 
     proxies = get_proxies_for_url('https://danbooru.donmai.us')
 
@@ -335,6 +351,7 @@ def grabber(all_drawer, page_num, filter_tags):
 
 
 def scraper_task(start_page, end_page):
+    global scraper_thread
     try:
         try:
             with open('./drawer/hot_drawer.txt', 'r', encoding='utf-8') as f:
@@ -352,12 +369,12 @@ def scraper_task(start_page, end_page):
             nu_sets = {"1": set(), "2": set()}
 
         n = start_page
-        append_log(f"▶ 开始抓取，从第 {start_page} 页到第 {end_page} 页")
-        append_log(f"▶ 当前过滤 Tags: {state.filter_tags}")
+        append_log(f"开始抓取，从第 {start_page} 页到第 {end_page} 页")
+        append_log(f"当前过滤 Tags: {state.filter_tags}")
 
         while n <= end_page:
             if not state.is_running: 
-                append_log("⏹ 任务已被强制终止。")
+                append_log("任务已被强制终止。")
                 break
                 
             state.play_event.wait() # 等待暂停恢复
@@ -379,10 +396,11 @@ def scraper_task(start_page, end_page):
             n += 1
     except Exception as e:
         save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
-        append_log(f"❌ 抓取任务异常中断，已写入临时快照: {e}")
+        append_log(f"抓取任务异常中断，已写入临时快照: {e}")
     finally:
         state.is_running = False
-        append_log("✅ 所有页面处理完毕或已结束。")
+        scraper_thread = None
+        append_log("所有页面处理完毕或已结束。")
 
 # ==========================================
 # 4. API 路由定义
@@ -409,6 +427,7 @@ def check_proxy():
 
 @app.post("/api/start")
 def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
+    global scraper_thread
     if state.is_running:
         return {"msg": "爬虫已经在运行中"}
     
@@ -417,20 +436,25 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
     state.play_event.set()
     state.logs = []
     state.sent_image_count = len(daily_viewer_data)
-    
-    background_tasks.add_task(scraper_task, req.start_page, req.end_page)
+
+    scraper_thread = threading.Thread(
+        target=scraper_task,
+        args=(req.start_page, req.end_page),
+        daemon=True
+    )
+    scraper_thread.start()
     return {"msg": "任务已启动"}
 
 @app.post("/api/pause")
 def pause_scraper():
     state.play_event.clear()
-    append_log("\n🔴 任务已暂停（正在等待当前动作完成）...")
+    append_log("任务已暂停（正在等待当前动作完成）...")
     return {"msg": "已暂停"}
 
 @app.post("/api/resume")
 def resume_scraper():
     state.play_event.set()
-    append_log("\n🟢 任务已恢复...")
+    append_log("任务已恢复。")
     return {"msg": "已恢复"}
 
 @app.post("/api/stop")
@@ -438,7 +462,7 @@ def stop_scraper():
     state.is_running = False
     state.play_event.set()
     save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
-    append_log("\n⏹ 已强制结束任务，当前进度已写入临时快照。")
+    append_log("已强制结束任务，当前进度已写入临时快照。")
     return {"msg": "已强制结束任务"}
 
 @app.get("/api/status")

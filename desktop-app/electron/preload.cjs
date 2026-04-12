@@ -1,0 +1,36 @@
+const { contextBridge, ipcRenderer } = require('electron');
+
+contextBridge.exposeInMainWorld('desktopAPI', {
+  app: {
+    getContext: () => ipcRenderer.invoke('app:get-context')
+  },
+  gallery: {
+    getByDate: (date) => ipcRenderer.invoke('gallery:get-by-date', date),
+    openLocalFile: (localPath) => ipcRenderer.invoke('gallery:open-local-file', localPath)
+  },
+  crawler: {
+    ensureService: () => ipcRenderer.invoke('crawler:ensure-service'),
+    start: (payload) => ipcRenderer.invoke('crawler:start', payload),
+    pause: () => ipcRenderer.invoke('crawler:pause'),
+    resume: () => ipcRenderer.invoke('crawler:resume'),
+    stop: () => ipcRenderer.invoke('crawler:stop'),
+    status: () => ipcRenderer.invoke('crawler:status')
+  },
+  external: {
+    open: (url) => ipcRenderer.invoke('external:open', url)
+  },
+  dialog: {
+    selectImage: () => ipcRenderer.invoke('dialog:select-image')
+  },
+  file: {
+    readDataUrl: (targetPath) => ipcRenderer.invoke('file:read-data-url', targetPath),
+    toFileUrl: (targetPath) => ipcRenderer.invoke('file:to-file-url', targetPath),
+    savePng: (suggestedName, uint8Array) => ipcRenderer.invoke('file:save-png', {
+      suggestedName,
+      bytes: Array.from(uint8Array || [])
+    })
+  },
+  preset: {
+    list: () => ipcRenderer.invoke('preset:list')
+  }
+});
