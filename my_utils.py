@@ -3,6 +3,10 @@ import json
 import os
 from requests.utils import get_environ_proxies
 import exiftool
+import sys
+import subprocess
+import tempfile
+import exiftool
 
 def get_proxies_for_url(url):
     proxies = get_environ_proxies(url)
@@ -63,11 +67,6 @@ def clear_runtime_snapshot(runtime_snapshot_path):
     if os.path.exists(runtime_snapshot_path):
         os.remove(runtime_snapshot_path)
 
-
-import subprocess
-
-import exiftool
-
 def add_extra_info_to_img(img_path, extra_info):
     exiftool_path = r"./exiftool/exiftool-13.54_64/exiftool(-k).exe"
     with exiftool.ExifTool(exiftool_path) as et:
@@ -81,6 +80,7 @@ def add_extra_info_to_img(img_path, extra_info):
         # 执行命令
         et.execute(*args)
         print(f"成功为 {img_path} 添加元数据")
+
 
 if __name__ == "__main__":
     # 测试 add_extra_info_to_img

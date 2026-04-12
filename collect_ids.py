@@ -6,7 +6,7 @@ from time import sleep
 import datetime
 import json
 from proxy import get_proxies_for_url
-# --- 配置区 ---
+
 base_download_dir = './hot_pic'
 os.makedirs(base_download_dir, exist_ok=True)
 today_str = datetime.datetime.now().strftime('%Y-%m-%d')
@@ -17,12 +17,9 @@ status_path = os.path.join(base_download_dir, "status.json")
 
 proxies = get_proxies_for_url("https://danbooru.donmai.us")
 
-# --- 配置结束 ---
-
 if not os.path.exists(save_dir):
     os.makedirs(save_dir)
 
-# 加载或初始化全局 Log
 if os.path.exists(log_path):
     try:
         with open(log_path, 'r', encoding='utf-8') as f:
@@ -32,7 +29,6 @@ if os.path.exists(log_path):
 else:
     log_data = {}
 
-# 加载或初始化画师频率统计
 if os.path.exists(stats_path):
     try:
         with open(stats_path, 'r', encoding='utf-8') as f:
@@ -56,9 +52,9 @@ def check_proxy(self):
     try:
         resp = requests.get(
             url,
-            timeout=5,                 # 防止卡死 UI
+            timeout=5,
             allow_redirects=True,
-            proxies=proxies           # 使用代理设置
+            proxies=proxies
         )
 
         if resp.status_code == 200:
@@ -165,31 +161,6 @@ def grabber(all_drawer, page_num,log_callback=None, filter_tags=['furry','futana
             if log_callback:
                 log_callback(msg) # 发送给 GUI
 
-    def download_image(url, folder):
-        if not url: return None
-        filename = url.split('/')[-1]
-        filepath = os.path.join(folder, filename)
-
-        if os.path.exists(filepath):
-            custom_print(f"文件已存在: {filename}")
-            return filename # 返回文件名供记录
-
-        try:
-            custom_print(f"正在下载: {filename} ...")
-            r = requests.get(url, timeout=20, proxies=proxies)
-            if r.status_code == 200:
-                with open(filepath, 'wb') as f:
-                    for chunk in r.iter_content(1024):
-                        f.write(chunk)
-                custom_print(f"下载完成: {filename}")
-                return filename
-            else:
-                custom_print(f"下载失败 (状态码 {r.status_code}): {url}")
-                return None
-        except Exception as e:
-            custom_print(f"下载出错: {e}")
-            return None
-
     global log_data, artist_stats, daily_ids_data
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
@@ -216,7 +187,7 @@ def grabber(all_drawer, page_num,log_callback=None, filter_tags=['furry','futana
 
             if any(tag in test.get('tag_string', '') for tag in filter_tags):
                 custom_print(f"跳过 ID {ids}，包含过滤标签。")
-                continue  # ⬅️ 包含过滤标签，跳过这个 post
+                continue
 
             artist = ""
             if 'tag_string_artist' in test:
@@ -229,7 +200,6 @@ def grabber(all_drawer, page_num,log_callback=None, filter_tags=['furry','futana
             if artist:
                 artist_stats[artist] = artist_stats.get(artist, 0) + 1
                 
-                # 你的原有逻辑：判断是否在库
                 if artist in all_drawer:
                     f_name = get_folder_name(artist)
                     disk_key = folder_to_disk.get(f_name, "2")
