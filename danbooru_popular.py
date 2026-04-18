@@ -10,7 +10,7 @@ from proxy import get_proxies_for_url
 base_download_dir = './hot_pic'
 os.makedirs(base_download_dir, exist_ok=True)
 today_str = datetime.datetime.now().strftime('%Y-%m-%d')
-today_str = "2026-04-13"
+today_str = "2026-04-17"
 save_dir = os.path.join(base_download_dir, today_str)
 stats_path = os.path.join(base_download_dir, "artist_stats.json") # 统计画师频率的文件
 log_path = os.path.join(base_download_dir, "log.json")
@@ -202,17 +202,14 @@ def grabber(all_drawer, page_num,log_callback=None, filter_tags=['furry','futana
         custom_print(f"获取页面失败: {e}")
         return [], {"1": [], "2": []}
 
+
     soup = BeautifulSoup(r.content, "html.parser")
     articles = soup.find_all('article')
     data_ids = [article.get('data-id') for article in articles]
 
     for ids in data_ids:
         if not ids: continue
-        
-        # 即使下载过，我们也可能需要统计画师热度，所以先获取信息
-        # 如果你只希望统计未下载的，可以将 fetch 放在 if ids in log_data 检查之后
-        if ids in log_data:
-            continue
+        if ids in log_data: continue
 
         test = fetch_data_with_retry(ids)
         if test:
@@ -317,7 +314,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--start", type=int, default=1)
-    parser.add_argument("--end", type=int, default=50)
+    parser.add_argument("--end", type=int, default=35)
     args = parser.parse_args()
 
     run(args.start, args.end)
