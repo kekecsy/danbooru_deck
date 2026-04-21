@@ -10,7 +10,7 @@ from proxy import get_proxies_for_url
 base_download_dir = './hot_pic'
 os.makedirs(base_download_dir, exist_ok=True)
 today_str = datetime.datetime.now().strftime('%Y-%m-%d')
-today_str = "2026-04-17"
+today_str = "2026-04-20"
 save_dir = os.path.join(base_download_dir, today_str)
 stats_path = os.path.join(base_download_dir, "artist_stats.json") # 统计画师频率的文件
 log_path = os.path.join(base_download_dir, "log.json")

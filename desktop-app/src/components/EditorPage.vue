@@ -11,6 +11,7 @@ const canvasRef = ref(null);
 const wrapRef = ref(null);
 const presets = ref([]);
 const isDragOver = ref(false);
+const copyStatus = ref('');
 
 const editor = reactive({
   image: null,
@@ -34,6 +35,7 @@ const editor = reactive({
   imageOverlayName: '',
   revealColor: '#000000',
   revealOpacity: 0.8,
+  outputMaxEdge: 1600,
   sourceMeta: {
     artist: '',
     characters: '',
@@ -327,6 +329,14 @@ function zoomIn() {
   render();
 }
 
+function onWheel(event) {
+  if (!event.ctrlKey || !editor.image) return;
+  event.preventDefault();
+  const factor = event.deltaY < 0 ? 1.1 : 0.9;
+  editor.zoom = Math.min(8, Math.max(0.2, editor.zoom * factor));
+  render();
+}
+
 function undoLast() {
   const removed = editor.layers.pop();
   if (removed?.id === editor.selectedId) editor.selectedId = null;
@@ -355,9 +365,10 @@ async function createImage(source) {
 }
 
 async function loadImageFromPath(filePath, meta = {}) {
-  const fileUrl = await window.desktopAPI.file.toFileUrl(filePath);
-  editor.image = await createImage(fileUrl);
-  editor.imageSrc = fileUrl;
+  const dataUrl = await window.desktopAPI.file.readDataUrl(filePath);
+  if (!dataUrl) return;
+  editor.image = await createImage(dataUrl);
+  editor.imageSrc = dataUrl;
   editor.imageName = meta.filename || filePath.split(/[\\/]/).pop() || 'image.png';
   editor.sourceMeta.artist = meta.artist || '';
   editor.sourceMeta.characters = meta.characters || '';
@@ -399,7 +410,7 @@ async function loadPresets() {
   const items = await window.desktopAPI.preset.list();
   presets.value = await Promise.all(items.map(async item => ({
     ...item,
-    thumbUrl: await window.desktopAPI.file.toFileUrl(item.path)
+    thumbUrl: await window.desktopAPI.file.readDataUrl(item.path)
   })));
 }
 
@@ -413,7 +424,6 @@ async function usePreset(item) {
 }
 
 async function exportPng() {
-  if (!editor.image) return;
   const scale = 1;
   const canvas = document.createElement('canvas');
   canvas.width = editor.image.width;
@@ -428,9 +438,29 @@ async function exportPng() {
     }
   }
   drawRevealMask(ctx, editor.layers, scale);
+  const maxEdge = Number(editor.outputMaxEdge) || 0;
+  if (maxEdge > 0) {
+    const currentMax = Math.max(canvas.width, canvas.height);
+    if (currentMax > maxEdge) {
+      const ratio = maxEdge / currentMax;
+      const resized = document.createElement('canvas');
+      resized.width = Math.max(1, Math.round(canvas.width * ratio));
+      resized.height = Math.max(1, Math.round(canvas.height * ratio));
+      resized.getContext('2d').drawImage(canvas, 0, 0, resized.width, resized.height);
+      return resized;
+    }
+  }
+  return canvas;
+}
+
+async function copyToClipboard() {
+  if (!editor.image) return;
+  copyStatus.value = '';
+  const canvas = await exportPng();
   const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
   const bytes = new Uint8Array(await blob.arrayBuffer());
-  await window.desktopAPI.file.savePng(`${(editor.imageName || 'mosaic').replace(/\.[^.]+$/, '')}_mosaic.png`, bytes);
+  const result = await window.desktopAPI.file.copyPng(bytes);
+  copyStatus.value = result?.ok ? '已复制到剪贴板' : '复制失败';
 }
 
 async function openSourcePost() {
@@ -681,7 +711,13 @@ onBeforeUnmount(() => {
         <button class="ghost" @click="clearAll" :disabled="!editor.layers.length">清空</button>
       </div>
 
-      <button @click="exportPng" :disabled="!editor.image">导出 PNG</button>
+      <label class="field-full">
+        <span>复制尺寸上限（像素）</span>
+        <input v-model.number="editor.outputMaxEdge" type="number" min="0" step="100" />
+      </label>
+
+      <button @click="copyToClipboard" :disabled="!editor.image">复制到剪贴板</button>
+      <p v-if="copyStatus" class="inline-note">{{ copyStatus }}</p>
     </aside>
 
     <section class="panel card gallery-panel">
@@ -703,6 +739,7 @@ onBeforeUnmount(() => {
         @dragover="onDragOver"
         @dragleave="onDragLeave"
         @drop="onDrop"
+        @wheel="onWheel"
       >
         <div v-if="!editor.image" class="empty-editor">
           <p>从图库进入，手动选择图片，或把图片拖到这里开始编辑。</p>

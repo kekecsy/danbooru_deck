@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, nativeImage } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
@@ -178,7 +178,7 @@ function getPythonSpawnArgs() {
   return [
     '-u',
     '-c',
-    "import uvicorn; uvicorn.run('main:app', host='127.0.0.1', port=8000, reload=False)"
+    "import uvicorn; uvicorn.run('main:app', host='127.0.0.1', port=8000, reload=False, access_log=False, log_level='warning')"
   ];
 }
 
@@ -330,6 +330,15 @@ ipcMain.handle('file:save-png', async (_event, payload) => {
   if (result.canceled || !result.filePath) return { ok: false, canceled: true };
   fs.writeFileSync(result.filePath, Buffer.from(bytes));
   return { ok: true, canceled: false, filePath: result.filePath };
+});
+
+ipcMain.handle('file:copy-png', async (_event, payload) => {
+  const { bytes } = payload || {};
+  if (!bytes) return { ok: false };
+  const image = nativeImage.createFromBuffer(Buffer.from(bytes));
+  if (image.isEmpty()) return { ok: false };
+  clipboard.writeImage(image);
+  return { ok: true };
 });
 
 ipcMain.handle('preset:list', async () => listPresetFiles());

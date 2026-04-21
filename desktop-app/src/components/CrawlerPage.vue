@@ -32,6 +32,13 @@ const task = ref({
   backendError: '',
   backendTail: []
 });
+const viewer = ref({
+  open: false,
+  source: 'latest',
+  index: 0,
+  imageUrl: '',
+  zoom: 1
+});
 
 const loadingGallery = ref(false);
 let pollTimer = null;
@@ -42,8 +49,7 @@ const filteredLocalImages = computed(() => {
   if (!keyword) return source;
   return source.filter(item =>
     (item.artist || '').toLowerCase().includes(keyword) ||
-    (item.characters || '').toLowerCase().includes(keyword) ||
-    (item.filename || '').toLowerCase().includes(keyword)
+    (item.characters || '').toLowerCase().includes(keyword)
   );
 });
 
@@ -53,8 +59,7 @@ const filteredLatestImages = computed(() => {
   if (!keyword) return source;
   return source.filter(item =>
     (item.artist || '').toLowerCase().includes(keyword) ||
-    (item.characters || '').toLowerCase().includes(keyword) ||
-    (item.filename || '').toLowerCase().includes(keyword)
+    (item.characters || '').toLowerCase().includes(keyword)
   );
 });
 
@@ -76,6 +81,8 @@ const pagedLatestImages = computed(() => {
 const activeItems = computed(() => gallery.value.tab === 'local' ? pagedLocalImages.value : pagedLatestImages.value);
 const activeCount = computed(() => gallery.value.tab === 'local' ? filteredLocalImages.value.length : filteredLatestImages.value.length);
 const activeTotalPages = computed(() => gallery.value.tab === 'local' ? localTotalPages.value : latestTotalPages.value);
+const viewerItems = computed(() => viewer.value.source === 'local' ? filteredLocalImages.value : filteredLatestImages.value);
+const viewerItem = computed(() => viewerItems.value[viewer.value.index] || null);
 const activePage = computed({
   get() {
     return gallery.value.tab === 'local' ? gallery.value.page : task.value.latestPage;
@@ -90,6 +97,10 @@ function appendLog(message) {
   if (!message) return;
   task.value.logs.push(message);
   task.value.logs = task.value.logs.slice(-320);
+}
+
+function splitTags(value) {
+  return String(value || '').split(' ').map(item => item.trim()).filter(Boolean);
 }
 
 function mergeBackendLogs(lines) {
@@ -128,7 +139,8 @@ async function loadGallery(date) {
     const normalizedImages = data.images.map(item => ({
       ...item,
       thumbUrl: '',
-      displayCharacters: (item.characters || '').split(' ').filter(Boolean).join(', ')
+      artistTokens: splitTags(item.artist),
+      characterTokens: splitTags(item.characters)
     }));
     gallery.value.selectedDate = data.selectedDate;
     gallery.value.availableDates = data.availableDates;
@@ -151,7 +163,8 @@ function mergeLatestImages(newItems) {
     postUrl: item.post_url || item.postUrl || '',
     characters: item.tags?.tag_string_character || item.characters || '',
     thumbUrl: '',
-    displayCharacters: (item.tags?.tag_string_character || item.characters || '').split(' ').filter(Boolean).join(', ')
+    artistTokens: splitTags(item.artist),
+    characterTokens: splitTags(item.tags?.tag_string_character || item.characters)
   }));
   const seen = new Set(task.value.latestImages.map(item => item.localPath || item.web_url || item.filename));
   for (const item of incoming) {
@@ -261,6 +274,62 @@ function switchTab(tab) {
   task.value.latestPage = 1;
 }
 
+function applySearch(keyword) {
+  gallery.value.search = keyword || '';
+}
+
+async function openViewer(item, source) {
+  const items = source === 'local' ? filteredLocalImages.value : filteredLatestImages.value;
+  const index = items.findIndex(candidate => (candidate.localPath || candidate.filename) === (item.localPath || item.filename));
+  viewer.value.open = true;
+  viewer.value.source = source;
+  viewer.value.index = Math.max(0, index);
+  viewer.value.zoom = 1;
+  viewer.value.imageUrl = '';
+  if (item?.localPath) {
+    viewer.value.imageUrl = await window.desktopAPI.file.readDataUrl(item.localPath);
+  }
+}
+
+async function syncViewerImage() {
+  viewer.value.zoom = 1;
+  viewer.value.imageUrl = '';
+  if (!viewerItem.value?.localPath) return;
+  viewer.value.imageUrl = await window.desktopAPI.file.readDataUrl(viewerItem.value.localPath);
+}
+
+function closeViewer() {
+  viewer.value.open = false;
+  viewer.value.imageUrl = '';
+  viewer.value.zoom = 1;
+}
+
+async function stepViewer(offset) {
+  if (!viewerItems.value.length) return;
+  const next = Math.min(Math.max(0, viewer.value.index + offset), viewerItems.value.length - 1);
+  if (next === viewer.value.index) return;
+  viewer.value.index = next;
+  await syncViewerImage();
+}
+
+function onViewerWheel(event) {
+  if (!event.ctrlKey) return;
+  event.preventDefault();
+  const factor = event.deltaY < 0 ? 1.1 : 0.9;
+  viewer.value.zoom = Math.min(8, Math.max(0.2, viewer.value.zoom * factor));
+}
+
+async function onKeyDown(event) {
+  if (!viewer.value.open) return;
+  if (event.key === 'Escape') {
+    closeViewer();
+  } else if (event.key === 'ArrowLeft') {
+    await stepViewer(-1);
+  } else if (event.key === 'ArrowRight') {
+    await stepViewer(1);
+  }
+}
+
 watch(() => gallery.value.search, () => {
   gallery.value.page = 1;
   task.value.latestPage = 1;
@@ -287,10 +356,12 @@ onMounted(async () => {
   await ensureService();
   await syncStatus();
   pollTimer = window.setInterval(syncStatus, 1200);
+  window.addEventListener('keydown', onKeyDown);
 });
 
 onBeforeUnmount(() => {
   if (pollTimer) window.clearInterval(pollTimer);
+  window.removeEventListener('keydown', onKeyDown);
 });
 </script>
 
@@ -353,7 +424,7 @@ onBeforeUnmount(() => {
             <button class="nav-chip" :class="{ active: gallery.tab === 'latest' }" @click="switchTab('latest')">最新抓取</button>
             <button class="nav-chip" :class="{ active: gallery.tab === 'local' }" @click="switchTab('local')">本地已下载</button>
           </div>
-          <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色 / 文件名" />
+          <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
         </div>
       </div>
 
@@ -371,11 +442,29 @@ onBeforeUnmount(() => {
       </div>
       <div v-else class="gallery-grid">
         <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card">
-          <img class="thumb" :src="item.thumbUrl" :alt="item.filename" />
+          <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" @click="openViewer(item, gallery.tab)" />
           <div class="card-meta">
-            <strong>{{ item.artist || '未知' }}</strong>
-            <span class="muted">{{ item.displayCharacters || '无角色标签' }}</span>
-            <span class="muted mono">{{ item.filename }}</span>
+            <div class="token-row">
+              <button
+                v-for="token in (item.artistTokens?.length ? item.artistTokens : ['未知'])"
+                :key="`artist-${token}`"
+                class="meta-link author-link token-chip"
+                @click="applySearch(token)"
+              >
+                {{ token }}
+              </button>
+            </div>
+            <div class="token-row">
+              <button
+                v-for="token in item.characterTokens"
+                :key="`character-${token}`"
+                class="meta-link token-chip"
+                @click="applySearch(token)"
+              >
+                {{ token }}
+              </button>
+              <span v-if="!item.characterTokens?.length" class="muted compact-text">无角色标签</span>
+            </div>
           </div>
           <div class="button-row compact">
             <button class="secondary" @click="openOriginal(item)" :disabled="!item.postUrl">原帖</button>
@@ -391,5 +480,31 @@ onBeforeUnmount(() => {
         <button class="secondary" @click="activePage += 1" :disabled="activePage >= activeTotalPages">下一页</button>
       </div>
     </section>
+
+    <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer">
+      <div class="viewer-shell">
+        <div class="viewer-toolbar">
+          <div>
+            <strong>{{ viewerItem?.artist || '未知' }}</strong>
+            <span class="muted compact-text">第 {{ viewer.index + 1 }} / {{ viewerItems.length }} 张</span>
+          </div>
+          <div class="button-row compact viewer-actions">
+            <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
+            <button class="secondary" @click="stepViewer(1)" :disabled="viewer.index >= viewerItems.length - 1">下一张</button>
+            <button class="ghost" @click="closeViewer">关闭</button>
+          </div>
+        </div>
+        <div class="viewer-stage" @wheel="onViewerWheel">
+          <img
+            v-if="viewer.imageUrl"
+            class="viewer-image"
+            :src="viewer.imageUrl"
+            :style="{ transform: `scale(${viewer.zoom})` }"
+            :alt="viewerItem?.filename || 'preview'"
+          />
+        </div>
+        <p class="inline-note">支持左右方向键切换，Ctrl + 滚轮缩放</p>
+      </div>
+    </div>
   </div>
 </template>

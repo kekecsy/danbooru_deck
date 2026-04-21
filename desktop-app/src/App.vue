@@ -1,14 +1,10 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { ref } from 'vue';
 import CrawlerPage from './components/CrawlerPage.vue';
 import EditorPage from './components/EditorPage.vue';
 
 const activePage = ref('crawler');
 const editorSource = ref(null);
-const editorHint = computed(() => {
-  if (editorSource.value?.filename) return `当前图片: ${editorSource.value.filename}`;
-  return '可直接选择本地图片，或从抓图结果进入';
-});
 
 function openEditorWithImage(item) {
   editorSource.value = item;
@@ -28,7 +24,6 @@ function openEditorWithImage(item) {
           打码
         </button>
       </div>
-      <p class="sidebar-note">{{ activePage === 'editor' ? editorHint : '先抓图，再挑图进入打码。' }}</p>
     </aside>
 
     <main class="content">

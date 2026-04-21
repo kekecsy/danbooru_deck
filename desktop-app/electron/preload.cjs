@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     savePng: (suggestedName, uint8Array) => ipcRenderer.invoke('file:save-png', {
       suggestedName,
       bytes: Array.from(uint8Array || [])
+    }),
+    copyPng: (uint8Array) => ipcRenderer.invoke('file:copy-png', {
+      bytes: Array.from(uint8Array || [])
     })
   },
   preset: {
