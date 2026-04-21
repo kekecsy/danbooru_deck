@@ -33,6 +33,16 @@ button {
 button.secondary { background: linear-gradient(135deg, #fbf4eb, #f2e8db); color: var(--ink); }
 button.ghost { background: rgba(182, 84, 52, 0.12); color: var(--accent-deep); }
 button:disabled { opacity: 0.55; cursor: not-allowed; }
+.link-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+.link-button.disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
 
 input, select {
   width: 100%;
@@ -399,6 +409,12 @@ input, select {
   margin-bottom: 10px;
 }
 .meta-item:last-child { margin-bottom: 0; }
+.truncate-text {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 
 .preset-grid {
   display: grid;

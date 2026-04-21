@@ -24,6 +24,7 @@ const editor = reactive({
   mode: null,
   handle: null,
   start: null,
+  current: null,
   draft: null,
   fillMode: 'mosaic',
   opacity: 1,
@@ -239,43 +240,37 @@ async function drawImageLayer(ctx, layer, scale) {
   ctx.restore();
 }
 
-function drawRevealMask(ctx, layers, scale) {
+function drawRevealMask(ctx, layers, scale, globalColor, globalOpacity) {
   const revealLayers = layers.filter(layer => layer.fillMode === 'reveal');
   if (!revealLayers.length) return;
 
-  const groups = new Map();
+  const maskCanvas = document.createElement('canvas');
+  maskCanvas.width = ctx.canvas.width;
+  maskCanvas.height = ctx.canvas.height;
+  const maskCtx = maskCanvas.getContext('2d');
+
+  maskCtx.fillStyle = globalColor;
+  maskCtx.globalAlpha = globalOpacity;
+  maskCtx.fillRect(0, 0, maskCanvas.width, maskCanvas.height);
+
+  maskCtx.globalCompositeOperation = 'destination-out';
+  maskCtx.globalAlpha = 1;
+
   for (const layer of revealLayers) {
-    const color = layer.revealColor || '#000000';
-    const opacity = layer.revealOpacity ?? 0.8;
-    const key = `${color}__${opacity}`;
-    if (!groups.has(key)) groups.set(key, { color, opacity, layers: [] });
-    groups.get(key).layers.push(layer);
+    maskCtx.beginPath();
+    maskCtx.ellipse(
+      (layer.x + layer.width / 2) * scale,
+      (layer.y + layer.height / 2) * scale,
+      (layer.width / 2) * scale,
+      (layer.height / 2) * scale,
+      0,
+      0,
+      Math.PI * 2
+    );
+    maskCtx.fill();
   }
 
-  for (const group of groups.values()) {
-    ctx.save();
-    ctx.fillStyle = group.color;
-    ctx.globalAlpha = group.opacity;
-    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-    ctx.globalCompositeOperation = 'destination-out';
-    ctx.globalAlpha = 1;
-
-    for (const layer of group.layers) {
-      ctx.beginPath();
-      ctx.ellipse(
-        (layer.x + layer.width / 2) * scale,
-        (layer.y + layer.height / 2) * scale,
-        (layer.width / 2) * scale,
-        (layer.height / 2) * scale,
-        0,
-        0,
-        Math.PI * 2
-      );
-      ctx.fill();
-    }
-
-    ctx.restore();
-  }
+  ctx.drawImage(maskCanvas, 0, 0);
 }
 
 async function render() {
@@ -295,7 +290,22 @@ async function render() {
     }
   }
 
-  drawRevealMask(ctx, editor.layers, editor.zoom);
+  drawRevealMask(ctx, editor.layers, editor.zoom, editor.revealColor, editor.revealOpacity);
+
+  if (editor.fillMode === 'reveal' && editor.mode === 'draw' && editor.start && editor.current) {
+    const dx = editor.current.x - editor.start.x;
+    const dy = editor.current.y - editor.start.y;
+    const x = dx >= 0 ? editor.start.x : editor.current.x;
+    const y = dy >= 0 ? editor.start.y : editor.current.y;
+    const w = Math.abs(dx);
+    const h = Math.abs(dy);
+    ctx.save();
+    ctx.setLineDash([8, 6]);
+    ctx.strokeStyle = '#1d7ef3';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x * editor.zoom, y * editor.zoom, w * editor.zoom, h * editor.zoom);
+    ctx.restore();
+  }
 
   if (editor.draft) {
     ctx.save();
@@ -364,12 +374,11 @@ async function createImage(source) {
   });
 }
 
-async function loadImageFromPath(filePath, meta = {}) {
-  const dataUrl = await window.desktopAPI.file.readDataUrl(filePath);
+async function loadImageFromDataUrl(dataUrl, meta = {}) {
   if (!dataUrl) return;
   editor.image = await createImage(dataUrl);
   editor.imageSrc = dataUrl;
-  editor.imageName = meta.filename || filePath.split(/[\\/]/).pop() || 'image.png';
+  editor.imageName = meta.filename || 'image.png';
   editor.sourceMeta.artist = meta.artist || '';
   editor.sourceMeta.characters = meta.characters || '';
   editor.sourceMeta.postUrl = meta.postUrl || '';
@@ -379,6 +388,14 @@ async function loadImageFromPath(filePath, meta = {}) {
   if (editor.sourceMeta.artist) editor.stripeText = editor.sourceMeta.artist;
   await nextTick();
   fitToWindow();
+}
+
+async function loadImageFromPath(filePath, meta = {}) {
+  const dataUrl = await window.desktopAPI.file.readDataUrl(filePath);
+  await loadImageFromDataUrl(dataUrl, {
+    ...meta,
+    filename: meta.filename || filePath.split(/[\\/]/).pop() || 'image.png'
+  });
 }
 
 async function chooseImage() {
@@ -437,7 +454,7 @@ async function exportPng() {
       drawMosaic(ctx, layer, scale);
     }
   }
-  drawRevealMask(ctx, editor.layers, scale);
+  drawRevealMask(ctx, editor.layers, scale, editor.revealColor, editor.revealOpacity);
   const maxEdge = Number(editor.outputMaxEdge) || 0;
   if (maxEdge > 0) {
     const currentMax = Math.max(canvas.width, canvas.height);
@@ -458,12 +475,29 @@ async function copyToClipboard() {
   copyStatus.value = '';
   const canvas = await exportPng();
   const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+  if (!blob) {
+    copyStatus.value = '复制失败';
+    return;
+  }
+  try {
+    if (navigator.clipboard && window.ClipboardItem) {
+      if (!document.hasFocus()) window.focus();
+      if (!document.hasFocus()) throw new Error('窗口未聚焦');
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      copyStatus.value = '已复制到剪贴板';
+      return;
+    }
+  } catch {
+    // Fallback to Electron clipboard below.
+  }
+
   const bytes = new Uint8Array(await blob.arrayBuffer());
   const result = await window.desktopAPI.file.copyPng(bytes);
-  copyStatus.value = result?.ok ? '已复制到剪贴板' : '复制失败';
+  copyStatus.value = result?.ok ? '已复制到剪贴板' : `复制失败${result?.error ? `: ${result.error}` : ''}`;
 }
 
-async function openSourcePost() {
+async function openSourceLink(event) {
+  event.preventDefault();
   if (!editor.sourceMeta.postUrl) return;
   await window.desktopAPI.external.open(editor.sourceMeta.postUrl);
 }
@@ -493,13 +527,23 @@ function onMouseDown(event) {
   editor.selectedId = null;
   editor.mode = 'draw';
   editor.start = imagePoint(point);
-  editor.draft = { x: editor.start.x, y: editor.start.y, width: 0, height: 0 };
+  if (editor.fillMode === 'reveal') {
+    editor.current = { ...editor.start };
+    editor.draft = null;
+  } else {
+    editor.draft = { x: editor.start.x, y: editor.start.y, width: 0, height: 0 };
+  }
   render();
 }
 
 function onMouseMove(event) {
   if (!editor.mode || !editor.image) return;
   const point = imagePoint(canvasPoint(event));
+  if (editor.mode === 'draw' && editor.fillMode === 'reveal') {
+    editor.current = point;
+    render();
+    return;
+  }
   if (editor.mode === 'draw' && editor.draft) {
     editor.draft.width = point.x - editor.start.x;
     editor.draft.height = point.y - editor.start.y;
@@ -533,12 +577,30 @@ function onMouseMove(event) {
 }
 
 function onMouseUp() {
-  if (editor.mode === 'draw' && editor.draft && editor.draft.width > 10 && editor.draft.height > 10) {
-    addLayer({ ...editor.draft });
+  if (editor.mode === 'draw') {
+    if (editor.fillMode === 'reveal' && editor.start && editor.current) {
+      const dx = editor.current.x - editor.start.x;
+      const dy = editor.current.y - editor.start.y;
+      const width = Math.abs(dx);
+      const height = Math.abs(dy);
+      if (width > 10 && height > 10) {
+        const rect = {
+          x: dx >= 0 ? editor.start.x : editor.current.x,
+          y: dy >= 0 ? editor.start.y : editor.current.y,
+          width,
+          height
+        };
+        normalizeLayer(rect);
+        addLayer(rect);
+      }
+    } else if (editor.draft && editor.draft.width > 10 && editor.draft.height > 10) {
+      addLayer({ ...editor.draft });
+    }
   }
   editor.mode = null;
   editor.handle = null;
   editor.start = null;
+  editor.current = null;
   editor.draft = null;
   render();
 }
@@ -583,17 +645,33 @@ async function onDrop(event) {
   await loadDroppedFile(file);
 }
 
+async function onPaste(event) {
+  const items = Array.from(event.clipboardData?.items || []);
+  const imageItem = items.find(item => item.type.startsWith('image/'));
+  if (!imageItem) return;
+  event.preventDefault();
+  const file = imageItem.getAsFile();
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    await loadImageFromDataUrl(reader.result, { filename: file.name || 'clipboard-image.png' });
+  };
+  reader.readAsDataURL(file);
+}
+
 onMounted(async () => {
   await loadPresets();
   window.addEventListener('mousemove', onMouseMove);
   window.addEventListener('mouseup', onMouseUp);
   window.addEventListener('resize', onResize);
+  window.addEventListener('paste', onPaste);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onMouseMove);
   window.removeEventListener('mouseup', onMouseUp);
   window.removeEventListener('resize', onResize);
+  window.removeEventListener('paste', onPaste);
 });
 </script>
 
@@ -614,17 +692,24 @@ onBeforeUnmount(() => {
         <h3>来源信息</h3>
         <div class="meta-item">
           <span>作者</span>
-          <strong>{{ editor.sourceMeta.artist || '未提供' }}</strong>
+          <strong class="truncate-text" :title="editor.sourceMeta.artist || '未提供'">{{ editor.sourceMeta.artist || '未提供' }}</strong>
           <button class="ghost" :disabled="!editor.sourceMeta.artist" @click="useArtistText">填入文字</button>
         </div>
         <div class="meta-item">
           <span>角色</span>
-          <strong>{{ normalizeCharacters(editor.sourceMeta.characters) || '未提供' }}</strong>
+          <strong class="truncate-text" :title="normalizeCharacters(editor.sourceMeta.characters) || '未提供'">{{ normalizeCharacters(editor.sourceMeta.characters) || '未提供' }}</strong>
           <button class="ghost" :disabled="!editor.sourceMeta.characters" @click="useCharactersText">填入文字</button>
         </div>
         <div class="meta-item">
           <span>原帖</span>
-          <button class="secondary" :disabled="!editor.sourceMeta.postUrl" @click="openSourcePost">打开</button>
+          <a
+            class="link-button secondary"
+            :class="{ disabled: !editor.sourceMeta.postUrl }"
+            :href="editor.sourceMeta.postUrl || '#'"
+            @click="openSourceLink"
+          >
+            链接
+          </a>
         </div>
       </section>
 

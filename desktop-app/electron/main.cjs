@@ -333,12 +333,20 @@ ipcMain.handle('file:save-png', async (_event, payload) => {
 });
 
 ipcMain.handle('file:copy-png', async (_event, payload) => {
-  const { bytes } = payload || {};
-  if (!bytes) return { ok: false };
-  const image = nativeImage.createFromBuffer(Buffer.from(bytes));
-  if (image.isEmpty()) return { ok: false };
-  clipboard.writeImage(image);
-  return { ok: true };
+  try {
+    const { bytes } = payload || {};
+    if (!bytes) return { ok: false };
+    const buffer = Buffer.from(bytes);
+    const image = nativeImage.createFromDataURL(`data:image/png;base64,${buffer.toString('base64')}`);
+    if (image.isEmpty()) return { ok: false };
+    clipboard.clear();
+    clipboard.writeImage(image);
+    clipboard.writeBuffer('image/png', buffer);
+    const written = clipboard.readImage();
+    return { ok: !written.isEmpty() };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
 });
 
 ipcMain.handle('preset:list', async () => listPresetFiles());
