@@ -155,6 +155,30 @@ input, select {
   margin-bottom: 10px;
 }
 
+.mode-selector {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.mode-chip {
+  padding: 8px 4px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #fbf4eb, #f2e8db);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+.mode-chip.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+  box-shadow: 0 6px 14px rgba(182, 84, 52, 0.22);
+}
+.mode-chip:hover:not(.active):not(:disabled) {
+  background: linear-gradient(135deg, #f3dfd4, #ebd0c0);
+}
+
 .search-input { width: 260px; }
 
 .gallery-grid {

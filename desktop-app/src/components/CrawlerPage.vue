@@ -10,7 +10,9 @@ const LATEST_PAGE_SIZE = 12;
 const form = ref({
   startPage: 1,
   endPage: 16,
-  tags: 'furry, futanari'
+  tags: 'furry, futanari',
+  mode: 'rank',
+  targetDate: ''
 });
 
 const gallery = ref({
@@ -215,7 +217,9 @@ async function startTask() {
     const result = await window.desktopAPI.crawler.start({
       start_page: Number(form.value.startPage) || 1,
       end_page: Number(form.value.endPage) || 1,
-      tags: form.value.tags || ''
+      tags: form.value.tags || '',
+      mode: form.value.mode || 'rank',
+      target_date: form.value.targetDate || ''
     });
     appendLog(result.msg || '已发送启动抓图请求。');
     await syncStatus();
@@ -371,11 +375,22 @@ onBeforeUnmount(() => {
       <div class="panel-head compact-head">
         <div>
           <h2>抓图任务</h2>
-          <p class="inline-note">左侧负责任务和日志，右侧切换查看本地已下载或最新抓取。</p>
+          <p class="inline-note">选择模式后配置参数，点击启动开始执行。</p>
         </div>
       </div>
 
-      <div class="field-grid">
+      <div class="mode-selector">
+        <button class="mode-chip" :class="{ active: form.mode === 'rank' }" @click="form.mode = 'rank'"
+          title="按 Danbooru 排行榜抓取并下载图片">排行榜</button>
+        <button class="mode-chip" :class="{ active: form.mode === 'popular' }" @click="form.mode = 'popular'"
+          title="按指定日期获取热门帖子并下载">日期热门</button>
+        <button class="mode-chip" :class="{ active: form.mode === 'collect_ids' }" @click="form.mode = 'collect_ids'"
+          title="网不好时只收集 ID，不下载图片">仅收集ID</button>
+        <button class="mode-chip" :class="{ active: form.mode === 'download_ids' }" @click="form.mode = 'download_ids'"
+          title="从已收集的 ID 列表批量下载">按ID下载</button>
+      </div>
+
+      <div class="field-grid" v-if="form.mode !== 'download_ids'">
         <label>
           <span>起始页</span>
           <input v-model.number="form.startPage" type="number" min="1" />
@@ -385,6 +400,10 @@ onBeforeUnmount(() => {
           <input v-model.number="form.endPage" type="number" min="1" />
         </label>
       </div>
+      <label class="field-full" v-if="form.mode === 'popular'">
+        <span>目标日期 <span class="muted compact-text">(留空则用今天)</span></span>
+        <input v-model="form.targetDate" type="date" />
+      </label>
       <label class="field-full">
         <span>过滤标签</span>
         <input v-model="form.tags" type="text" />
