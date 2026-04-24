@@ -4,8 +4,8 @@ import GalleryCalendar from './GalleryCalendar.vue';
 
 const emit = defineEmits(['edit-image']);
 
-const LOCAL_PAGE_SIZE = 24;
-const LATEST_PAGE_SIZE = 18;
+const LOCAL_PAGE_SIZE = 12;
+const LATEST_PAGE_SIZE = 12;
 
 const form = ref({
   startPage: 1,

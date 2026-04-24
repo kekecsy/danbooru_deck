@@ -58,8 +58,9 @@ input, select {
   display: grid;
   grid-template-columns: 320px 1fr;
   gap: 16px;
-  height: 100%;
+  height: 100vh;
   padding: 16px;
+  overflow: hidden;
 }
 
 .shell-compact {
@@ -78,6 +79,9 @@ input, select {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  position: sticky;
+  top: 16px;
+  align-self: start;
 }
 
 .mini-sidebar {
@@ -120,14 +124,14 @@ input, select {
   color: #fff;
   box-shadow: 0 10px 18px rgba(182, 84, 52, 0.18);
 }
-.content { min-width: 0; }
+.content { min-width: 0; overflow-y: auto; max-height: calc(100vh - 32px); }
 .page-grid { display: grid; grid-template-columns: 340px 1fr; gap: 16px; height: 100%; }
-.crawler-layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; height: 100%; }
+.crawler-layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; min-height: 100%; }
 .editor-layout { display: grid; grid-template-columns: 370px 1fr; gap: 14px; height: 100%; }
 .card { padding: 14px; }
 .gallery-panel { display: flex; flex-direction: column; min-height: 0; }
 .editor-side { overflow: auto; }
-.control-panel { display: flex; flex-direction: column; min-height: 0; }
+.control-panel { display: flex; flex-direction: column; min-height: 0; position: sticky; top: 16px; max-height: calc(100vh - 32px); }
 
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .field-grid label, .field-full { display: flex; flex-direction: column; gap: 5px; margin-bottom: 10px; }
@@ -194,7 +198,7 @@ input, select {
   cursor: zoom-in;
 }
 
-.card-meta { display: flex; flex-direction: column; gap: 5px; padding: 10px; }
+.card-meta { display: flex; flex-direction: column; gap: 5px; padding: 10px; flex-grow: 1; justify-content: flex-start; }
 .mono { font-family: Consolas, monospace; font-size: 12px; }
 .token-row {
   display: flex;
@@ -237,20 +241,20 @@ input, select {
   z-index: 30;
   display: grid;
   place-items: center;
-  padding: 24px;
-  background: rgba(28, 20, 12, 0.82);
+  padding: 0;
+  background: rgba(18, 14, 10, 0.95);
 }
 .viewer-shell {
-  width: min(1200px, 100%);
-  height: min(88vh, calc(100vh - 48px));
+  width: 100vw;
+  height: 100vh;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
   padding: 18px;
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 24px;
-  background: rgba(30, 24, 19, 0.96);
+  border: none;
+  border-radius: 0;
+  background: transparent;
 }
 .viewer-toolbar {
   display: flex;
