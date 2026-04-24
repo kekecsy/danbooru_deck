@@ -4,3 +4,4 @@ python-multipart
 Pillow
 requests==2.32.3
 urllib3==1.26.20
+curl_cffi

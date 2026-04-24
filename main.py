@@ -2,8 +2,6 @@ import os
 import re
 import sys
 from pathlib import Path
-import requests
-from bs4 import BeautifulSoup
 from time import sleep
 import datetime
 import json
@@ -16,11 +14,11 @@ from my_utils import (
     clear_runtime_snapshot,
     load_json,
     merge_daily_viewer_data,
-    save_global_data,
     save_runtime_snapshot,
-    save_viewer_data,
     get_proxies_for_url
 )
+import danbooru_api
+from danbooru_data import DanbooruData
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -31,57 +29,26 @@ from pic_web.main import app as mosaic_editor_app
 # ==========================================
 # 1. 爬虫全局配置与初始化
 # ==========================================
-base_download_dir = './hot_pic'
-os.makedirs(base_download_dir, exist_ok=True)
-today_str = datetime.datetime.now().strftime('%Y-%m-%d')
-save_dir = os.path.join(base_download_dir, today_str)
-stats_path = os.path.join(base_download_dir, "artist_stats.json") 
-log_path = os.path.join(base_download_dir, "log.json")
-status_path = os.path.join(base_download_dir, "status.json")
+db_data = DanbooruData()
+base_download_dir = db_data.base_dir
+today_str = db_data.today_str
+save_dir = db_data.save_dir
+
 runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
-
-os.makedirs(save_dir, exist_ok=True)
-os.makedirs('./drawer', exist_ok=True)
-
-log_data = load_json(log_path, {})
-artist_stats = load_json(stats_path, {})
-daily_viewer_data = load_json(os.path.join(save_dir, "viewer_data.json"), [])
 runtime_snapshot = load_json(runtime_snapshot_path, {})
+daily_viewer_data = db_data.load_viewer_data()
+
 if runtime_snapshot:
-    log_data.update(runtime_snapshot.get("log_data", {}))
-    artist_stats.update(runtime_snapshot.get("artist_stats", {}))
+    db_data.log_data.update(runtime_snapshot.get("log_data", {}))
+    db_data.artist_stats.update(runtime_snapshot.get("artist_stats", {}))
     daily_viewer_data = merge_daily_viewer_data(
         daily_viewer_data,
         runtime_snapshot.get("daily_viewer_data", [])
     )
-    save_global_data(log_data, artist_stats, log_path, stats_path)
-    save_viewer_data(daily_viewer_data, save_dir)
+    db_data.save_global_data()
+    db_data.save_viewer_data(daily_viewer_data)
     clear_runtime_snapshot(runtime_snapshot_path)
 
-# 初始化排除列表和画师字典
-if not os.path.exists('./drawer/txtdata.txt'):
-    open('./drawer/txtdata.txt', 'w', encoding='utf-8').close()
-if not os.path.exists('./drawer/disk_drawer.json'):
-    with open('./drawer/disk_drawer.json', 'w', encoding='utf-8') as f:
-        json.dump({"1": [], "2": []}, f, ensure_ascii=False, indent=4)
-if not os.path.exists('./drawer/hot_drawer.txt'):
-    open('./drawer/hot_drawer.txt', 'w', encoding='utf-8').close()
-
-with open('./drawer/txtdata.txt', 'r', encoding='utf-8') as f:
-    txtdata1 = f.read().split('\n')
-with open('./drawer/disk_drawer.json', 'r', encoding='utf-8') as f:
-    disk_drawer = json.load(f)
-
-txtdata2 = disk_drawer.get("1", []) + disk_drawer.get("2", [])
-all_drawer = set(txtdata1 + txtdata2)
-
-folder_to_disk = {}
-for k, v in disk_drawer.items():
-    for folder in v: folder_to_disk[folder] = k
-
-def get_folder_name(name):
-    return (name.replace(":", "%3A").replace("/", "%2F").replace("!", "_")
-            .replace("?", "_").replace("<", "_").replace(">", "_").rstrip('.'))
 
 def get_available_date_folders():
     date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -162,21 +129,7 @@ def build_local_image_library(selected_date=None):
 
     return library
 
-def fetch_data_with_retry(ids, retries=5, delay=3):
-    url = f'https://danbooru.donmai.us/posts/{ids}.json'
-    attempt = 0
-    proxies = get_proxies_for_url(url)
-    while attempt < retries:
-        try:
-            response = requests.get(url, timeout=10, proxies=proxies)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            attempt += 1
-            append_log(f"请求ID {ids} 失败 ({attempt}/{retries}): {e}")
-            save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
-            sleep(delay)
-    return None
+
 
 # ==========================================
 # 2. FastAPI 后端与状态管理
@@ -227,125 +180,96 @@ class OpenLocalRequest(BaseModel):
 # ==========================================
 # 3. 核心爬虫逻辑 (融入了打断检测)
 # ==========================================
-def grabber(all_drawer, page_num, filter_tags):
-    def download_image(url, folder, proxies={}):
-        if not url: return None
-        filename = url.split('/')[-1]
-        filepath = os.path.join(folder, filename)
+def grabber(db_data, page_num, filter_tags):
+    global daily_viewer_data, today_str, save_dir, runtime_snapshot_path
+    
+    current_day = datetime.datetime.now().strftime('%Y-%m-%d')
+    if db_data.today_str != current_day:
+        # 如果运行跨天，更新全局 db_data 实例指向新的一天
+        db_data.__init__(current_day)
+        daily_viewer_data = db_data.load_viewer_data()
+        today_str = db_data.today_str
+        save_dir = db_data.save_dir
+        runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
 
-        if os.path.exists(filepath):
-            append_log(f"文件已存在: {filename}")
-            return filename
-
-        try:
-            state.play_event.wait() # 【关键点】下载前检查是否暂停
-            if not state.is_running: return None
-
-            append_log(f"正在下载: {filename} ...")
-            r = requests.get(url, timeout=20, proxies=proxies)
-            if r.status_code == 200:
-                with open(filepath, 'wb') as f:
-                    for chunk in r.iter_content(1024):
-                        f.write(chunk)
-                append_log(f"下载完成: {filename}")
-                return filename
-            else:
-                append_log(f"下载失败 (状态码 {r.status_code}): {url}")
-                return None
-        except Exception as e:
-            append_log(f"下载出错: {e}")
-            save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
-            return None
-
-    global log_data, artist_stats, daily_viewer_data, today_str, save_dir, runtime_snapshot_path
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
 
-    today_str, save_dir, runtime_snapshot_path = get_today_save_dir()
-
-    proxies = get_proxies_for_url('https://danbooru.donmai.us')
-
-    state.play_event.wait() # 【关键点】获取页面前检查是否暂停
+    state.play_event.wait() # 获取页面前检查是否暂停
     if not state.is_running: return [], page_need_update
 
     try:
         append_log(f"正在获取第 {page_num} 页...")
-        r = requests.get(f'https://danbooru.donmai.us/posts?d=1&page={page_num}&tags=order%3Arank', timeout=15, proxies=proxies)
-        r.raise_for_status()
+        posts = danbooru_api.get_posts_by_rank(page_num)
     except Exception as e:
         append_log(f"获取页面失败: {e}")
-        save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
+        save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
         return [], {"1": [], "2": []}
 
-    soup = BeautifulSoup(r.content, "html.parser")
-    articles = soup.find_all('article')
-    data_ids = [article.get('data-id') for article in articles]
-
-    for ids in data_ids:
+    for post in posts:
         if not state.is_running: break # 任务终止时跳出
-        state.play_event.wait() # 【关键点】处理每个 ID 前检查是否暂停
+        state.play_event.wait() # 处理每个 ID 前检查是否暂停
 
-        if not ids: continue
-        if ids in log_data: continue
+        ids = str(post.get('id'))
+        if not ids or ids in db_data.log_data:
+            continue
 
-        test = fetch_data_with_retry(ids)
-        if test:
-            # 动态过滤 Tag
-            if any(tag in test.get('tag_string', '') for tag in filter_tags):
-                append_log(f"跳过 ID {ids}，包含过滤标签。")
-                continue
+        tag_string = post.get('tag_string', '')
+        if any(tag in tag_string for tag in filter_tags):
+            append_log(f"跳过 ID {ids}，包含过滤标签。")
+            continue
 
-            artist = ""
-            if 'tag_string_artist' in test:
-                drawer_list = test['tag_string_artist'].split(' ')
-                drawer_list = [s for s in drawer_list if not s.lower().endswith("(voice_actor)")]
-                if len(drawer_list) >= 1:
-                    artist = ' '.join(drawer_list)
+        artist = ""
+        if 'tag_string_artist' in post:
+            drawer_list = post['tag_string_artist'].split(' ')
+            drawer_list = [s for s in drawer_list if not s.lower().endswith("(voice_actor)")]
+            if len(drawer_list) >= 1:
+                artist = ' '.join(drawer_list)
 
-            image_url = test.get('file_url') or test.get('large_file_url')
-            saved_filename = None
+        image_url = post.get('file_url') or post.get('large_file_url')
+        if not image_url:
+            continue
 
-            if image_url:
-                saved_filename = download_image(image_url, save_dir, proxies)
-                if saved_filename:
-                    log_data[ids] = image_url
-                    save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
-                    sleep(1)
-                else:
-                    append_log(f"跳过 ID {ids}，下载失败。")
-                    continue
+        state.play_event.wait() # 下载前检查是否暂停
+        if not state.is_running: break
+
+        saved_filename = danbooru_api.download_image(image_url, save_dir, append_log)
+        if saved_filename:
+            db_data.log_data[ids] = image_url
+            save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
+            sleep(1)
+        else:
+            append_log(f"跳过 ID {ids}，下载失败。")
+            continue
+
+        if artist:
+            db_data.artist_stats[artist] = db_data.artist_stats.get(artist, 0) + 1
+            if artist in db_data.all_drawer:
+                disk_key = db_data.get_disk_key(artist)
+                page_need_update[disk_key].append(artist)
             else:
-                continue
+                new_hot_artists.append(artist)
 
-            if artist:
-                artist_stats[artist] = artist_stats.get(artist, 0) + 1
-                if artist in all_drawer:
-                    f_name = get_folder_name(artist)
-                    disk_key = folder_to_disk.get(f_name, "2")
-                    page_need_update[disk_key].append(artist)
-                else:
-                    new_hot_artists.append(artist)
+        if saved_filename and artist:
+            post_url = f"https://danbooru.donmai.us/posts/{ids}"
+            web_url = f"/images/{today_str}/{saved_filename}"
+            daily_viewer_data.append({
+                "artist": artist,
+                "filename": saved_filename,
+                "local_path": os.path.join(save_dir, saved_filename),
+                "post_url": post_url,
+                "web_url": web_url,
+                "tags": {
+                    "tag_string_general": post.get('tag_string_general', ''),
+                    "tag_string_character": post.get('tag_string_character', ''),
+                    "tag_string_copyright": post.get('tag_string_copyright', ''),
+                    "tag_string_artist": post.get('tag_string_artist', '')
+                }
+            })
+            save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
 
-            if saved_filename and artist:
-                post_url = f"https://danbooru.donmai.us/posts/{ids}"
-                web_url = f"/images/{today_str}/{saved_filename}"
-                daily_viewer_data.append({
-                    "artist": artist,
-                    "filename": saved_filename,
-                    "local_path": os.path.join(save_dir, saved_filename),
-                    "post_url": post_url,
-                    "web_url": web_url,
-                    "tags": {
-                        "tag_string_general": test.get('tag_string_general', ''),
-                        "tag_string_character": test.get('tag_string_character', ''),
-                        "tag_string_copyright": test.get('tag_string_copyright', ''),
-                        "tag_string_artist": test.get('tag_string_artist', '')
-                    }
-                })
-                save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
-
-    save_global_data(log_data, artist_stats, log_path, stats_path)
-    save_viewer_data(daily_viewer_data, save_dir)
+    db_data.save_global_data()
+    db_data.save_viewer_data(daily_viewer_data)
     clear_runtime_snapshot(runtime_snapshot_path)
     return new_hot_artists, page_need_update
 
@@ -353,20 +277,8 @@ def grabber(all_drawer, page_num, filter_tags):
 def scraper_task(start_page, end_page):
     global scraper_thread
     try:
-        try:
-            with open('./drawer/hot_drawer.txt', 'r', encoding='utf-8') as f:
-                output = f.read().split('\n')
-                output = [x for x in output if x] # 清理空行
-        except:
-            output = []
-
-        need_update_json_path = './drawer/need_update.json'
-        if os.path.exists(need_update_json_path):
-            with open(need_update_json_path, 'r', encoding='utf-8') as f:
-                temp_nu = json.load(f)
-                nu_sets = {"1": set(temp_nu.get("1", [])), "2": set(temp_nu.get("2", []))}
-        else:
-            nu_sets = {"1": set(), "2": set()}
+        output = db_data.load_hot_drawer()
+        nu_sets = db_data.load_need_update()
 
         n = start_page
         append_log(f"开始抓取，从第 {start_page} 页到第 {end_page} 页")
@@ -380,22 +292,18 @@ def scraper_task(start_page, end_page):
             state.play_event.wait() # 等待暂停恢复
             
             append_log(f"--- 正在处理大页码 第 {n} 页 ---")
-            o, n_u_dict = grabber(all_drawer, n, state.filter_tags)
+            o, n_u_dict = grabber(db_data, n, state.filter_tags)
             
-            output = list(set(output + o) - all_drawer)
+            output = list(set(output + o) - db_data.all_drawer)
             for k in ["1", "2"]:
                 nu_sets[k].update(n_u_dict[k])
             
-            with open('./drawer/hot_drawer.txt', 'w', encoding='utf-8') as f:
-                f.write('\n'.join(list(set(output))))
-                
-            final_nu = {k: sorted(list(v)) for k, v in nu_sets.items()}
-            with open(need_update_json_path, 'w', encoding='utf-8') as f:
-                json.dump(final_nu, f, ensure_ascii=False, indent=4)
+            db_data.save_hot_drawer(list(set(output)))
+            db_data.save_need_update(nu_sets)
                 
             n += 1
     except Exception as e:
-        save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
+        save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
         append_log(f"抓取任务异常中断，已写入临时快照: {e}")
     finally:
         state.is_running = False
@@ -408,9 +316,9 @@ def scraper_task(start_page, end_page):
 @app.get("/api/proxy_check")
 def check_proxy():
     url = "https://danbooru.donmai.us"
-    proxies = get_proxies_for_url(url)
+    proxies = danbooru_api.PROXIES
     try:
-        resp = requests.get(url, timeout=5, allow_redirects=True, proxies=proxies)
+        resp = danbooru_api.requests.get(url, timeout=5, headers=danbooru_api.HEADERS, proxies=proxies, impersonate="chrome120")
         if resp.status_code == 200:
             if proxies:
                 return {"status": "success", "msg": "代理可用（已连通）", "color": "green"}
@@ -418,10 +326,6 @@ def check_proxy():
                 return {"status": "warning", "msg": "直连可用（未使用代理）", "color": "orange"}
         else:
             return {"status": "error", "msg": f"访问异常 ({resp.status_code})", "color": "red"}
-    except requests.exceptions.ProxyError:
-        return {"status": "error", "msg": "代理错误", "color": "red"}
-    except requests.exceptions.Timeout:
-        return {"status": "error", "msg": "连接超时", "color": "red"}
     except Exception as e:
         return {"status": "error", "msg": f"无法访问: {str(e)}", "color": "red"}
 
@@ -461,7 +365,7 @@ def resume_scraper():
 def stop_scraper():
     state.is_running = False
     state.play_event.set()
-    save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_snapshot_path)
+    save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
     append_log("已强制结束任务，当前进度已写入临时快照。")
     return {"msg": "已强制结束任务"}
 

@@ -163,10 +163,23 @@ function listPresetFiles() {
 }
 
 function getPythonCommand() {
+  const configPath = path.join(repoRoot, 'env_config.json');
+  try {
+    if (fs.existsSync(configPath)) {
+      const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      if (config.python_path && fs.existsSync(config.python_path)) {
+        return { command: config.python_path, args: [] };
+      }
+    }
+  } catch (err) {
+    console.error('读取 env_config.json 失败:', err);
+  }
+
   if (process.env.WEB_MOSAIC_PYTHON) {
     return { command: process.env.WEB_MOSAIC_PYTHON, args: [] };
   }
   const candidates = [
+    { command: path.join('D:', 'Anaconda3', 'envs', 'pic_web', 'python.exe'), args: [] },
     { command: path.join('D:', 'anaconda', 'python.exe'), args: [] },
     { command: 'python', args: [] },
     { command: 'py', args: ['-3'] }
