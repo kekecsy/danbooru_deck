@@ -27,8 +27,8 @@ function openEditorWithImage(item) {
     </aside>
 
     <main class="content">
-      <CrawlerPage v-if="activePage === 'crawler'" @edit-image="openEditorWithImage" />
-      <EditorPage v-else :source-item="editorSource" @back="activePage = 'crawler'" />
+      <CrawlerPage v-show="activePage === 'crawler'" @edit-image="openEditorWithImage" />
+      <EditorPage v-if="activePage === 'editor'" :source-item="editorSource" @back="activePage = 'crawler'" />
     </main>
   </div>
 </template>

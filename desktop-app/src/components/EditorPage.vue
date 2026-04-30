@@ -192,10 +192,25 @@ function drawStripe(ctx, layer, scale) {
   const h = layer.height * scale;
   ctx.save();
   ctx.globalAlpha = layer.opacity;
-  ctx.fillStyle = '#000';
+  
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+  ctx.beginPath();
+  if (ctx.roundRect) {
+    ctx.roundRect(x, y, w, h, Math.min(12 * scale, w / 2, h / 2));
+  } else {
+    ctx.rect(x, y, w, h);
+  }
+  ctx.fill();
+
+  ctx.fillStyle = '#ffffff';
   ctx.font = `700 ${Math.max(10, layer.stripeFontSize * scale)}px "${layer.stripeFontFamily}"`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
+  ctx.shadowBlur = 4 * scale;
+  ctx.shadowOffsetX = 1 * scale;
+  ctx.shadowOffsetY = 1 * scale;
+
   if (layer.stripeOrientation === 'vertical') {
     const chars = Array.from(layer.stripeText || '');
     const line = layer.stripeFontSize * scale * 1.1;

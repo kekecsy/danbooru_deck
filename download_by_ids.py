@@ -4,6 +4,7 @@ import argparse
 from time import sleep
 import danbooru_api
 from danbooru_data import DanbooruData
+import json
 
 # --- 主下载逻辑 ---
 def download_by_ids(post_ids, filter_tags=None):

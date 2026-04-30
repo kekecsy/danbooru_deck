@@ -501,28 +501,26 @@ onBeforeUnmount(() => {
     </section>
 
     <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer">
-      <div class="viewer-shell">
-        <div class="viewer-toolbar">
-          <div>
-            <strong>{{ viewerItem?.artist || '未知' }}</strong>
-            <span class="muted compact-text">第 {{ viewer.index + 1 }} / {{ viewerItems.length }} 张</span>
-          </div>
-          <div class="button-row compact viewer-actions">
-            <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
-            <button class="secondary" @click="stepViewer(1)" :disabled="viewer.index >= viewerItems.length - 1">下一张</button>
-            <button class="ghost" @click="closeViewer">关闭</button>
-          </div>
+      <div class="viewer-toolbar">
+        <div>
+          <strong>{{ viewerItem?.artist || '未知' }}</strong>
+          <span class="muted compact-text" style="color: #ccc;">第 {{ viewer.index + 1 }} / {{ viewerItems.length }} 张</span>
         </div>
-        <div class="viewer-stage" @wheel="onViewerWheel">
+        <div class="button-row compact viewer-actions">
+          <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
+          <button class="secondary" @click="stepViewer(1)" :disabled="viewer.index >= viewerItems.length - 1">下一张</button>
+          <button class="ghost" @click="closeViewer" style="color: #fff; border: 1px solid rgba(255,255,255,0.2);">关闭</button>
+        </div>
+      </div>
+      <div class="viewer-stage" @wheel="onViewerWheel" @click.self="closeViewer">
+        <div class="viewer-image-wrap" :style="{ zoom: viewer.zoom }">
           <img
             v-if="viewer.imageUrl"
             class="viewer-image"
             :src="viewer.imageUrl"
-            :style="{ transform: `scale(${viewer.zoom})` }"
             :alt="viewerItem?.filename || 'preview'"
           />
         </div>
-        <p class="inline-note">支持左右方向键切换，Ctrl + 滚轮缩放</p>
       </div>
     </div>
   </div>
