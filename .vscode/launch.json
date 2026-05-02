@@ -11,6 +11,14 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal"
+        },
+        {
+            "name": "Python 调试程序: danbooru_popular_range.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal",
+            "args": ["--start-date", "2026-05-01", "--end-date", "2026-05-07"]
         }
     ]
 }

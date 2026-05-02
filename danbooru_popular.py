@@ -1,4 +1,4 @@
-# danbooru_hot.py
+# danbooru_popular.py
 import os
 from time import sleep
 import datetime
@@ -7,7 +7,7 @@ import danbooru_api
 from danbooru_data import DanbooruData
 
 # 如果需要固定日期，修改这个变量
-TODAY_STR = "2026-04-29"
+# TODAY_STR = "2026-05-01"
 
 def get_frequency_level(count):
     if count >= 10: return "High (高频)"
