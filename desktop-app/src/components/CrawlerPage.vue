@@ -12,7 +12,9 @@ const form = ref({
   endPage: 16,
   tags: 'furry, futanari',
   mode: 'rank',
-  targetDate: ''
+  targetDate: '',
+  startDate: '',
+  endDate: ''
 });
 
 const gallery = ref({
@@ -129,7 +131,15 @@ function mergeBackendLogs(lines) {
 
 async function hydrateThumbs(items) {
   await Promise.all(items.map(async item => {
-    if (item.thumbUrl || !item.localPath) return;
+    if (item.thumbUrl) return;
+    
+    const webUrl = item.web_url || item.webUrl;
+    if (webUrl) {
+      item.thumbUrl = `http://127.0.0.1:8000${webUrl}`;
+      return;
+    }
+
+    if (!item.localPath) return;
     item.thumbUrl = await window.desktopAPI.file.readDataUrl(item.localPath);
   }));
 }
@@ -219,7 +229,9 @@ async function startTask() {
       end_page: Number(form.value.endPage) || 1,
       tags: form.value.tags || '',
       mode: form.value.mode || 'rank',
-      target_date: form.value.targetDate || ''
+      target_date: form.value.targetDate || '',
+      start_date: form.value.startDate || '',
+      end_date: form.value.endDate || ''
     });
     appendLog(result.msg || '已发送启动抓图请求。');
     await syncStatus();
@@ -268,6 +280,11 @@ async function openOriginal(item) {
   await window.desktopAPI.external.open(item.postUrl);
 }
 
+async function openHostsHint() {
+  alert("提示：请修改 hosts 解决连接问题。\n路径：C:\\Windows\\System32\\drivers\\etc\\hosts\n\n请在记事本中打开，在文件末尾添加以下内容：\n104.26.11.39 danbooru.donmai.us");
+  await window.desktopAPI.external.open('file:///C:/Windows/System32/drivers/etc/');
+}
+
 function editItem(item) {
   emit('edit-image', item);
 }
@@ -290,6 +307,13 @@ async function openViewer(item, source) {
   viewer.value.index = Math.max(0, index);
   viewer.value.zoom = 1;
   viewer.value.imageUrl = '';
+  
+  const webUrl = item?.web_url || item?.webUrl;
+  if (webUrl) {
+    viewer.value.imageUrl = `http://127.0.0.1:8000${webUrl}`;
+    return;
+  }
+  
   if (item?.localPath) {
     viewer.value.imageUrl = await window.desktopAPI.file.readDataUrl(item.localPath);
   }
@@ -298,7 +322,15 @@ async function openViewer(item, source) {
 async function syncViewerImage() {
   viewer.value.zoom = 1;
   viewer.value.imageUrl = '';
-  if (!viewerItem.value?.localPath) return;
+  if (!viewerItem.value) return;
+
+  const webUrl = viewerItem.value.web_url || viewerItem.value.webUrl;
+  if (webUrl) {
+    viewer.value.imageUrl = `http://127.0.0.1:8000${webUrl}`;
+    return;
+  }
+
+  if (!viewerItem.value.localPath) return;
   viewer.value.imageUrl = await window.desktopAPI.file.readDataUrl(viewerItem.value.localPath);
 }
 
@@ -377,6 +409,7 @@ onBeforeUnmount(() => {
           <h2>抓图任务</h2>
           <p class="inline-note">选择模式后配置参数，点击启动开始执行。</p>
         </div>
+        <button class="ghost" @click="openHostsHint" style="margin-left: auto; color: #ff9800;">无法连接？修改Hosts教程</button>
       </div>
 
       <div class="mode-selector">
@@ -384,6 +417,8 @@ onBeforeUnmount(() => {
           title="按 Danbooru 排行榜抓取并下载图片">排行榜</button>
         <button class="mode-chip" :class="{ active: form.mode === 'popular' }" @click="form.mode = 'popular'"
           title="按指定日期获取热门帖子并下载">日期热门</button>
+        <button class="mode-chip" :class="{ active: form.mode === 'popular_range' }" @click="form.mode = 'popular_range'"
+          title="按指定日期范围获取热门帖子并下载">日期范围热门</button>
         <button class="mode-chip" :class="{ active: form.mode === 'collect_ids' }" @click="form.mode = 'collect_ids'"
           title="网不好时只收集 ID，不下载图片">仅收集ID</button>
         <button class="mode-chip" :class="{ active: form.mode === 'download_ids' }" @click="form.mode = 'download_ids'"
@@ -404,6 +439,16 @@ onBeforeUnmount(() => {
         <span>目标日期 <span class="muted compact-text">(留空则用今天)</span></span>
         <input v-model="form.targetDate" type="date" />
       </label>
+      <div class="field-grid" v-if="form.mode === 'popular_range'">
+        <label>
+          <span>起始日期</span>
+          <input v-model="form.startDate" type="date" />
+        </label>
+        <label>
+          <span>结束日期</span>
+          <input v-model="form.endDate" type="date" />
+        </label>
+      </div>
       <label class="field-full">
         <span>过滤标签</span>
         <input v-model="form.tags" type="text" />

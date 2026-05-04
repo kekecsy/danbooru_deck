@@ -148,6 +148,10 @@ class ScraperState:
         self.logs = []
         self.filter_tags = []
         self.sent_image_count = len(daily_viewer_data)
+        self.mode = "rank"
+        self.target_date = ""
+        self.start_date = ""
+        self.end_date = ""
 
 state = ScraperState()
 scraper_thread = None
@@ -173,6 +177,10 @@ class StartRequest(BaseModel):
     start_page: int
     end_page: int
     tags: str
+    mode: str = "rank"
+    target_date: str = ""
+    start_date: str = ""
+    end_date: str = ""
 
 class OpenLocalRequest(BaseModel):
     local_path: str
@@ -183,14 +191,15 @@ class OpenLocalRequest(BaseModel):
 def grabber(db_data, page_num, filter_tags):
     global daily_viewer_data, today_str, save_dir, runtime_snapshot_path
     
-    current_day = datetime.datetime.now().strftime('%Y-%m-%d')
-    if db_data.today_str != current_day:
-        # 如果运行跨天，更新全局 db_data 实例指向新的一天
-        db_data.__init__(current_day)
-        daily_viewer_data = db_data.load_viewer_data()
-        today_str = db_data.today_str
-        save_dir = db_data.save_dir
-        runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
+    if state.mode == 'rank':
+        current_day = datetime.datetime.now().strftime('%Y-%m-%d')
+        if db_data.today_str != current_day:
+            # 如果运行跨天，更新全局 db_data 实例指向新的一天
+            db_data.__init__(current_day)
+            daily_viewer_data = db_data.load_viewer_data()
+            today_str = db_data.today_str
+            save_dir = db_data.save_dir
+            runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
 
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
@@ -199,8 +208,12 @@ def grabber(db_data, page_num, filter_tags):
     if not state.is_running: return [], page_need_update
 
     try:
-        append_log(f"正在获取第 {page_num} 页...")
-        posts = danbooru_api.get_posts_by_rank(page_num)
+        if state.mode in ['popular', 'popular_range']:
+            append_log(f"正在获取热门 第 {page_num} 页 ({db_data.today_str})...")
+            posts = danbooru_api.get_popular_posts(db_data.today_str, page_num)
+        else:
+            append_log(f"正在获取排行榜 第 {page_num} 页...")
+            posts = danbooru_api.get_posts_by_rank(page_num)
     except Exception as e:
         append_log(f"获取页面失败: {e}")
         save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
@@ -277,31 +290,58 @@ def grabber(db_data, page_num, filter_tags):
 def scraper_task(start_page, end_page):
     global scraper_thread
     try:
-        output = db_data.load_hot_drawer()
-        nu_sets = db_data.load_need_update()
-
-        n = start_page
         append_log(f"开始抓取，从第 {start_page} 页到第 {end_page} 页")
-        append_log(f"当前过滤 Tags: {state.filter_tags}")
+        append_log(f"当前模式: {state.mode}, 过滤 Tags: {state.filter_tags}")
 
-        while n <= end_page:
-            if not state.is_running: 
-                append_log("任务已被强制终止。")
-                break
+        date_list = []
+        if state.mode == 'popular_range':
+            start_dt = datetime.datetime.strptime(state.start_date, "%Y-%m-%d")
+            end_dt = datetime.datetime.strptime(state.end_date, "%Y-%m-%d")
+            delta = datetime.timedelta(days=1)
+            curr = start_dt
+            while curr <= end_dt:
+                date_list.append(curr.strftime("%Y-%m-%d"))
+                curr += delta
+        elif state.mode == 'popular' and state.target_date:
+            date_list = [state.target_date]
+        else:
+            date_list = [datetime.datetime.now().strftime('%Y-%m-%d')]
+
+        for target_date in date_list:
+            if not state.is_running: break
+            
+            if state.mode in ['popular', 'popular_range']:
+                append_log(f"\n========== 正在处理日期：{target_date} ==========")
+            
+            db_data.__init__(target_date)
+            global daily_viewer_data, today_str, save_dir, runtime_snapshot_path
+            daily_viewer_data = db_data.load_viewer_data()
+            today_str = db_data.today_str
+            save_dir = db_data.save_dir
+            runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
+
+            output = db_data.load_hot_drawer()
+            nu_sets = db_data.load_need_update()
+
+            n = start_page
+            while n <= end_page:
+                if not state.is_running: 
+                    append_log("任务已被强制终止。")
+                    break
+                    
+                state.play_event.wait() # 等待暂停恢复
                 
-            state.play_event.wait() # 等待暂停恢复
-            
-            append_log(f"--- 正在处理大页码 第 {n} 页 ---")
-            o, n_u_dict = grabber(db_data, n, state.filter_tags)
-            
-            output = list(set(output + o) - db_data.all_drawer)
-            for k in ["1", "2"]:
-                nu_sets[k].update(n_u_dict[k])
-            
-            db_data.save_hot_drawer(list(set(output)))
-            db_data.save_need_update(nu_sets)
+                append_log(f"--- 正在处理大页码 第 {n} 页 ---")
+                o, n_u_dict = grabber(db_data, n, state.filter_tags)
                 
-            n += 1
+                output = list(set(output + o) - db_data.all_drawer)
+                for k in ["1", "2"]:
+                    nu_sets[k].update(n_u_dict[k])
+                
+                db_data.save_hot_drawer(list(set(output)))
+                db_data.save_need_update(nu_sets)
+                    
+                n += 1
     except Exception as e:
         save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
         append_log(f"抓取任务异常中断，已写入临时快照: {e}")
@@ -336,6 +376,10 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
         return {"msg": "爬虫已经在运行中"}
     
     state.filter_tags = [t.strip() for t in req.tags.split(',') if t.strip()]
+    state.mode = req.mode
+    state.target_date = req.target_date
+    state.start_date = req.start_date
+    state.end_date = req.end_date
     state.is_running = True
     state.play_event.set()
     state.logs = []

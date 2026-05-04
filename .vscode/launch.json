@@ -18,7 +18,7 @@
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal",
-            "args": ["--start-date", "2026-05-01", "--end-date", "2026-05-07"]
+            "args": ["--start_date", "2024-02-01", "--end_date", "2024-02-05"]
         }
     ]
 }
