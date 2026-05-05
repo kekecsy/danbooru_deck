@@ -5,9 +5,9 @@ import datetime
 import json
 import danbooru_api
 from danbooru_data import DanbooruData
-
+import time
 # 如果需要固定日期，修改这个变量
-TODAY_STR = "2026-05-03"
+TODAY_STR = "2026-05-04"
 
 def get_frequency_level(count):
     if count >= 10: return "High (高频)"
@@ -115,7 +115,7 @@ def run(page_start=1, page_end=50):
         db_data.save_need_update(nu_sets)
             
         n += 1
-
+        time.sleep(2)  # 每页处理完后稍微休息一下，保护 IP 不被封禁
     print("所有页面处理完毕。")
 
 

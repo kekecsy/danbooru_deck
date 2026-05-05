@@ -18,7 +18,6 @@ const form = ref({
 });
 
 const gallery = ref({
-  tab: 'latest',
   selectedDate: '',
   availableDates: [],
   today: '',
@@ -31,14 +30,11 @@ const task = ref({
   isRunning: false,
   isPaused: false,
   logs: ['桌面端已启动。'],
-  latestImages: [],
-  latestPage: 1,
   backendError: '',
   backendTail: []
 });
 const viewer = ref({
   open: false,
-  source: 'latest',
   index: 0,
   imageUrl: '',
   zoom: 1
@@ -57,18 +53,7 @@ const filteredLocalImages = computed(() => {
   );
 });
 
-const filteredLatestImages = computed(() => {
-  const keyword = gallery.value.search.trim().toLowerCase();
-  const source = task.value.latestImages;
-  if (!keyword) return source;
-  return source.filter(item =>
-    (item.artist || '').toLowerCase().includes(keyword) ||
-    (item.characters || '').toLowerCase().includes(keyword)
-  );
-});
-
 const localTotalPages = computed(() => Math.max(1, Math.ceil(filteredLocalImages.value.length / LOCAL_PAGE_SIZE)));
-const latestTotalPages = computed(() => Math.max(1, Math.ceil(filteredLatestImages.value.length / LATEST_PAGE_SIZE)));
 
 const pagedLocalImages = computed(() => {
   const page = Math.min(gallery.value.page, localTotalPages.value);
@@ -76,24 +61,17 @@ const pagedLocalImages = computed(() => {
   return filteredLocalImages.value.slice(start, start + LOCAL_PAGE_SIZE);
 });
 
-const pagedLatestImages = computed(() => {
-  const page = Math.min(task.value.latestPage, latestTotalPages.value);
-  const start = (page - 1) * LATEST_PAGE_SIZE;
-  return filteredLatestImages.value.slice(start, start + LATEST_PAGE_SIZE);
-});
-
-const activeItems = computed(() => gallery.value.tab === 'local' ? pagedLocalImages.value : pagedLatestImages.value);
-const activeCount = computed(() => gallery.value.tab === 'local' ? filteredLocalImages.value.length : filteredLatestImages.value.length);
-const activeTotalPages = computed(() => gallery.value.tab === 'local' ? localTotalPages.value : latestTotalPages.value);
-const viewerItems = computed(() => viewer.value.source === 'local' ? filteredLocalImages.value : filteredLatestImages.value);
+const activeItems = computed(() => pagedLocalImages.value);
+const activeCount = computed(() => filteredLocalImages.value.length);
+const activeTotalPages = computed(() => localTotalPages.value);
+const viewerItems = computed(() => filteredLocalImages.value);
 const viewerItem = computed(() => viewerItems.value[viewer.value.index] || null);
 const activePage = computed({
   get() {
-    return gallery.value.tab === 'local' ? gallery.value.page : task.value.latestPage;
+    return gallery.value.page;
   },
   set(value) {
-    if (gallery.value.tab === 'local') gallery.value.page = value;
-    else task.value.latestPage = value;
+    gallery.value.page = value;
   }
 });
 
@@ -158,9 +136,6 @@ async function loadGallery(date) {
     gallery.value.availableDates = data.availableDates;
     gallery.value.today = data.today;
     gallery.value.images = normalizedImages;
-    if (!task.value.latestImages.length && data.selectedDate === data.today) {
-      task.value.latestImages = normalizedImages.map(item => ({ ...item }));
-    }
     gallery.value.page = 1;
     await hydrateThumbs(pagedLocalImages.value);
   } finally {
@@ -168,30 +143,11 @@ async function loadGallery(date) {
   }
 }
 
-function mergeLatestImages(newItems) {
-  const incoming = newItems.map(item => ({
-    ...item,
-    localPath: item.local_path || item.localPath || '',
-    postUrl: item.post_url || item.postUrl || '',
-    characters: item.tags?.tag_string_character || item.characters || '',
-    thumbUrl: '',
-    artistTokens: splitTags(item.artist),
-    characterTokens: splitTags(item.tags?.tag_string_character || item.characters)
-  }));
-  const seen = new Set(task.value.latestImages.map(item => item.localPath || item.web_url || item.filename));
-  for (const item of incoming) {
-    const key = item.localPath || item.web_url || item.filename;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    task.value.latestImages.unshift(item);
-  }
-  task.value.latestImages = task.value.latestImages.slice(0, 120);
-  task.value.latestPage = 1;
-}
-
 async function syncStatus() {
   try {
     const status = await window.desktopAPI.crawler.status();
+    const wasRunning = task.value.isRunning;
+    
     task.value.isRunning = !!status.is_running;
     task.value.isPaused = !!status.is_paused;
     task.value.backendError = status.backendError || '';
@@ -200,11 +156,13 @@ async function syncStatus() {
     (status.new_logs || []).forEach(appendLog);
 
     if (status.new_images?.length) {
-      mergeLatestImages(status.new_images);
-      await hydrateThumbs(pagedLatestImages.value);
       if (gallery.value.selectedDate === gallery.value.today) {
         await loadGallery(gallery.value.today);
       }
+    }
+
+    if (wasRunning && !task.value.isRunning) {
+      await loadGallery(gallery.value.selectedDate);
     }
   } catch (error) {
     task.value.backendError = error.message;
@@ -289,21 +247,14 @@ function editItem(item) {
   emit('edit-image', item);
 }
 
-function switchTab(tab) {
-  gallery.value.tab = tab;
-  gallery.value.page = 1;
-  task.value.latestPage = 1;
-}
-
 function applySearch(keyword) {
   gallery.value.search = keyword || '';
 }
 
-async function openViewer(item, source) {
-  const items = source === 'local' ? filteredLocalImages.value : filteredLatestImages.value;
+async function openViewer(item) {
+  const items = filteredLocalImages.value;
   const index = items.findIndex(candidate => (candidate.localPath || candidate.filename) === (item.localPath || item.filename));
   viewer.value.open = true;
-  viewer.value.source = source;
   viewer.value.index = Math.max(0, index);
   viewer.value.zoom = 1;
   viewer.value.imageUrl = '';
@@ -366,24 +317,15 @@ async function onKeyDown(event) {
   }
 }
 
-watch(() => gallery.value.search, () => {
+watch(gallery.search, () => {
   gallery.value.page = 1;
-  task.value.latestPage = 1;
 });
 
 watch(localTotalPages, total => {
   if (gallery.value.page > total) gallery.value.page = total;
 });
 
-watch(latestTotalPages, total => {
-  if (task.value.latestPage > total) task.value.latestPage = total;
-});
-
 watch(pagedLocalImages, async items => {
-  await hydrateThumbs(items);
-});
-
-watch(pagedLatestImages, async items => {
   await hydrateThumbs(items);
 });
 
@@ -477,36 +419,28 @@ onBeforeUnmount(() => {
     <section class="panel card gallery-panel">
       <div class="gallery-head">
         <div>
-          <h2>{{ gallery.tab === 'local' ? '本地已下载' : '最新抓取' }}</h2>
+          <h2>本地已下载</h2>
           <p class="inline-note">
-            共 {{ activeCount }} 张
-            <template v-if="gallery.tab === 'local'">，当前日期 {{ gallery.selectedDate || '未选择' }}</template>
+            共 {{ activeCount }} 张，当前日期 {{ gallery.selectedDate || '未选择' }}
           </p>
         </div>
         <div class="gallery-tools">
-          <div class="mini-nav">
-            <button class="nav-chip" :class="{ active: gallery.tab === 'latest' }" @click="switchTab('latest')">最新抓取</button>
-            <button class="nav-chip" :class="{ active: gallery.tab === 'local' }" @click="switchTab('local')">本地已下载</button>
-          </div>
           <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
         </div>
       </div>
 
       <GalleryCalendar
-        v-if="gallery.tab === 'local'"
         :available-dates="gallery.availableDates"
         :selected-date="gallery.selectedDate"
         :today="gallery.today"
         @select="loadGallery"
       />
 
-      <div v-if="gallery.tab === 'local' && loadingGallery" class="gallery-empty">正在读取图库...</div>
-      <div v-else-if="!activeItems.length" class="gallery-empty">
-        {{ gallery.tab === 'local' ? '当前日期没有图片' : '等待新的抓取结果...' }}
-      </div>
+      <div v-if="loadingGallery" class="gallery-empty">正在读取图库...</div>
+      <div v-else-if="!activeItems.length" class="gallery-empty">当前日期没有图片</div>
       <div v-else class="gallery-grid">
         <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card">
-          <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" @click="openViewer(item, gallery.tab)" />
+          <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" @click="openViewer(item)" />
           <div class="card-meta">
             <div class="token-row">
               <button

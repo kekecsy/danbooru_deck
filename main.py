@@ -65,6 +65,10 @@ def get_available_date_folders():
 
 def resolve_selected_date(requested_date=None):
     available_dates = get_available_date_folders()
+    if today_str not in available_dates:
+        available_dates.insert(0, today_str)
+        available_dates = sorted(available_dates, reverse=True)
+
     if requested_date:
         try:
             datetime.datetime.strptime(requested_date, "%Y-%m-%d")
@@ -148,10 +152,6 @@ class ScraperState:
         self.logs = []
         self.filter_tags = []
         self.sent_image_count = len(daily_viewer_data)
-        self.mode = "rank"
-        self.target_date = ""
-        self.start_date = ""
-        self.end_date = ""
 
 state = ScraperState()
 scraper_thread = None
@@ -177,8 +177,8 @@ class StartRequest(BaseModel):
     start_page: int
     end_page: int
     tags: str
-    mode: str = "rank"
-    target_date: str = ""
+    mode: str = "rank"  # rank | collect_ids | download_ids | popular | popular_range
+    target_date: str = ""  # popular 模式用，可指定日期
     start_date: str = ""
     end_date: str = ""
 
@@ -188,160 +188,337 @@ class OpenLocalRequest(BaseModel):
 # ==========================================
 # 3. 核心爬虫逻辑 (融入了打断检测)
 # ==========================================
-def grabber(db_data, page_num, filter_tags):
+def _ensure_today(db_data_inst):
+    """如果跨天，更新全局变量"""
     global daily_viewer_data, today_str, save_dir, runtime_snapshot_path
-    
-    if state.mode == 'rank':
-        current_day = datetime.datetime.now().strftime('%Y-%m-%d')
-        if db_data.today_str != current_day:
-            # 如果运行跨天，更新全局 db_data 实例指向新的一天
-            db_data.__init__(current_day)
-            daily_viewer_data = db_data.load_viewer_data()
-            today_str = db_data.today_str
-            save_dir = db_data.save_dir
-            runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
+    current_day = datetime.datetime.now().strftime('%Y-%m-%d')
+    if db_data_inst.today_str != current_day:
+        db_data_inst.__init__(current_day)
+        daily_viewer_data = db_data_inst.load_viewer_data()
+        today_str = db_data_inst.today_str
+        save_dir = db_data_inst.save_dir
+        runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
+        state.sent_image_count = len(daily_viewer_data)
 
-    page_need_update = {"1": [], "2": []}
-    new_hot_artists = []
+def _process_post(post, db_data_inst, filter_tags, do_download=True):
+    """处理单个 post：过滤、提取画师、可选下载。返回 (ids, artist, saved_filename) 或 None"""
+    global daily_viewer_data
+    ids = str(post.get('id'))
+    if not ids or ids in db_data_inst.log_data:
+        return None
 
-    state.play_event.wait() # 获取页面前检查是否暂停
-    if not state.is_running: return [], page_need_update
+    tag_string = post.get('tag_string', '')
+    if any(tag in tag_string for tag in filter_tags):
+        append_log(f"跳过 ID {ids}，包含过滤标签。")
+        return None
 
-    try:
-        if state.mode in ['popular', 'popular_range']:
-            append_log(f"正在获取热门 第 {page_num} 页 ({db_data.today_str})...")
-            posts = danbooru_api.get_popular_posts(db_data.today_str, page_num)
-        else:
-            append_log(f"正在获取排行榜 第 {page_num} 页...")
-            posts = danbooru_api.get_posts_by_rank(page_num)
-    except Exception as e:
-        append_log(f"获取页面失败: {e}")
-        save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
-        return [], {"1": [], "2": []}
+    artist = ""
+    if 'tag_string_artist' in post:
+        drawer_list = post['tag_string_artist'].split(' ')
+        drawer_list = [s for s in drawer_list if not s.lower().endswith("(voice_actor)")]
+        if drawer_list:
+            artist = ' '.join(drawer_list)
 
-    for post in posts:
-        if not state.is_running: break # 任务终止时跳出
-        state.play_event.wait() # 处理每个 ID 前检查是否暂停
-
-        ids = str(post.get('id'))
-        if not ids or ids in db_data.log_data:
-            continue
-
-        tag_string = post.get('tag_string', '')
-        if any(tag in tag_string for tag in filter_tags):
-            append_log(f"跳过 ID {ids}，包含过滤标签。")
-            continue
-
-        artist = ""
-        if 'tag_string_artist' in post:
-            drawer_list = post['tag_string_artist'].split(' ')
-            drawer_list = [s for s in drawer_list if not s.lower().endswith("(voice_actor)")]
-            if len(drawer_list) >= 1:
-                artist = ' '.join(drawer_list)
-
+    saved_filename = None
+    if do_download:
         image_url = post.get('file_url') or post.get('large_file_url')
         if not image_url:
-            continue
+            return None
 
-        state.play_event.wait() # 下载前检查是否暂停
-        if not state.is_running: break
+        state.play_event.wait()
+        if not state.is_running:
+            return None
 
         saved_filename = danbooru_api.download_image(image_url, save_dir, append_log)
         if saved_filename:
-            db_data.log_data[ids] = image_url
-            save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
+            db_data_inst.log_data[ids] = image_url
+            save_runtime_snapshot(db_data_inst.log_data, db_data_inst.artist_stats, daily_viewer_data, runtime_snapshot_path)
             sleep(1)
         else:
             append_log(f"跳过 ID {ids}，下载失败。")
+            return None
+
+    return ids, artist, saved_filename
+
+def _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists):
+    """更新画师统计并归类"""
+    if not artist:
+        return
+    db_data_inst.artist_stats[artist] = db_data_inst.artist_stats.get(artist, 0) + 1
+    if artist in db_data_inst.all_drawer:
+        disk_key = db_data_inst.get_disk_key(artist)
+        page_need_update[disk_key].append(artist)
+    else:
+        new_hot_artists.append(artist)
+
+def _append_viewer(ids, artist, saved_filename, post):
+    """往 daily_viewer_data 追加一条记录"""
+    global daily_viewer_data
+    if not (saved_filename and artist):
+        return
+    post_url = f"https://danbooru.donmai.us/posts/{ids}"
+    web_url = f"/images/{today_str}/{saved_filename}"
+    daily_viewer_data.append({
+        "artist": artist,
+        "filename": saved_filename,
+        "local_path": os.path.join(save_dir, saved_filename),
+        "post_url": post_url,
+        "web_url": web_url,
+        "tags": {
+            "tag_string_general": post.get('tag_string_general', ''),
+            "tag_string_character": post.get('tag_string_character', ''),
+            "tag_string_copyright": post.get('tag_string_copyright', ''),
+            "tag_string_artist": post.get('tag_string_artist', '')
+        }
+    })
+    save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
+
+# --- mode: rank (原有默认模式) ---
+def grabber_rank(db_data_inst, page_num, filter_tags):
+    global daily_viewer_data
+    _ensure_today(db_data_inst)
+    page_need_update = {"1": [], "2": []}
+    new_hot_artists = []
+
+    state.play_event.wait()
+    if not state.is_running:
+        return [], page_need_update
+
+    try:
+        append_log(f"[Rank] 正在获取第 {page_num} 页...")
+        posts = danbooru_api.get_posts_by_rank(page_num)
+    except Exception as e:
+        append_log(f"获取页面失败: {e}")
+        save_runtime_snapshot(db_data_inst.log_data, db_data_inst.artist_stats, daily_viewer_data, runtime_snapshot_path)
+        return [], {"1": [], "2": []}
+
+    for post in posts:
+        if not state.is_running:
+            break
+        state.play_event.wait()
+        result = _process_post(post, db_data_inst, filter_tags, do_download=True)
+        if not result:
             continue
+        ids, artist, saved_filename = result
+        _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists)
+        _append_viewer(ids, artist, saved_filename, post)
 
-        if artist:
-            db_data.artist_stats[artist] = db_data.artist_stats.get(artist, 0) + 1
-            if artist in db_data.all_drawer:
-                disk_key = db_data.get_disk_key(artist)
-                page_need_update[disk_key].append(artist)
-            else:
-                new_hot_artists.append(artist)
-
-        if saved_filename and artist:
-            post_url = f"https://danbooru.donmai.us/posts/{ids}"
-            web_url = f"/images/{today_str}/{saved_filename}"
-            daily_viewer_data.append({
-                "artist": artist,
-                "filename": saved_filename,
-                "local_path": os.path.join(save_dir, saved_filename),
-                "post_url": post_url,
-                "web_url": web_url,
-                "tags": {
-                    "tag_string_general": post.get('tag_string_general', ''),
-                    "tag_string_character": post.get('tag_string_character', ''),
-                    "tag_string_copyright": post.get('tag_string_copyright', ''),
-                    "tag_string_artist": post.get('tag_string_artist', '')
-                }
-            })
-            save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
-
-    db_data.save_global_data()
-    db_data.save_viewer_data(daily_viewer_data)
+    db_data_inst.save_global_data()
+    db_data_inst.save_viewer_data(daily_viewer_data)
     clear_runtime_snapshot(runtime_snapshot_path)
     return new_hot_artists, page_need_update
 
+# --- mode: popular (按日期热门) ---
+def grabber_popular(db_data_inst, page_num, filter_tags, target_date):
+    global daily_viewer_data, today_str, save_dir, runtime_snapshot_path
+    page_need_update = {"1": [], "2": []}
+    new_hot_artists = []
+    
+    # Ensure globals point to the right target date
+    if db_data_inst.today_str != target_date:
+        db_data_inst.__init__(target_date)
+        
+    today_str = db_data_inst.today_str
+    save_dir = db_data_inst.save_dir
+    runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
+    
+    daily_viewer_data = db_data_inst.load_viewer_data()
+    state.sent_image_count = len(daily_viewer_data)
 
-def scraper_task(start_page, end_page):
+    state.play_event.wait()
+    if not state.is_running:
+        return [], page_need_update
+
+    try:
+        append_log(f"[Popular] 正在获取 {target_date} 第 {page_num} 页...")
+        posts = danbooru_api.get_popular_posts(target_date, page_num)
+    except Exception as e:
+        append_log(f"获取页面失败: {e}")
+        return [], {"1": [], "2": []}
+
+    for post in posts:
+        if not state.is_running:
+            break
+        state.play_event.wait()
+        result = _process_post(post, db_data_inst, filter_tags, do_download=True)
+        if not result:
+            continue
+        ids, artist, saved_filename = result
+        _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists)
+        _append_viewer(ids, artist, saved_filename, post)
+
+    db_data_inst.save_global_data()
+    db_data_inst.save_viewer_data(daily_viewer_data)
+    return new_hot_artists, page_need_update
+
+# --- mode: collect_ids (只收集 ID 不下载) ---
+def grabber_collect_ids(db_data_inst, page_num, filter_tags):
+    _ensure_today(db_data_inst)
+    page_need_update = {"1": [], "2": []}
+    new_hot_artists = []
+    daily_ids_data = db_data_inst.load_ids_data()
+
+    state.play_event.wait()
+    if not state.is_running:
+        return [], page_need_update
+
+    try:
+        append_log(f"[CollectIDs] 正在获取第 {page_num} 页...")
+        posts = danbooru_api.get_posts_by_rank(page_num)
+    except Exception as e:
+        append_log(f"获取页面失败: {e}")
+        return [], {"1": [], "2": []}
+
+    for post in posts:
+        if not state.is_running:
+            break
+        state.play_event.wait()
+        result = _process_post(post, db_data_inst, filter_tags, do_download=False)
+        if not result:
+            continue
+        ids, artist, _ = result
+        _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists)
+        if artist:
+            daily_ids_data.append(ids)
+
+    db_data_inst.save_global_data()
+    daily_ids_data = list(set(daily_ids_data))
+    db_data_inst.save_ids_data(daily_ids_data)
+    append_log(f"[CollectIDs] 当前已收集 {len(daily_ids_data)} 个 ID")
+    return new_hot_artists, page_need_update
+
+# --- mode: download_ids (从已收集的 IDs 批量下载) ---
+def task_download_ids(db_data_inst, filter_tags):
+    global daily_viewer_data
+    _ensure_today(db_data_inst)
+    daily_viewer_data = db_data_inst.load_viewer_data()
+    state.sent_image_count = len(daily_viewer_data)
+    ids_data = db_data_inst.load_ids_data()
+
+    if not ids_data:
+        append_log("[DownloadIDs] 没有已收集的 ID，请先用「仅收集ID」模式收集。")
+        return
+
+    append_log(f"[DownloadIDs] 开始下载，共 {len(ids_data)} 个 ID")
+    success_count = 0
+
+    for pid_str in ids_data:
+        if not state.is_running:
+            append_log("任务已被强制终止。")
+            break
+        state.play_event.wait()
+
+        if pid_str in db_data_inst.log_data:
+            continue
+
+        append_log(f"[DownloadIDs] 正在处理 ID: {pid_str}")
+        post_data = danbooru_api.fetch_data_with_retry(pid_str)
+        if not post_data:
+            append_log(f"ID {pid_str} 获取数据失败，跳过")
+            continue
+
+        if filter_tags:
+            tag_string = post_data.get('tag_string', '')
+            if any(tag in tag_string for tag in filter_tags):
+                append_log(f"跳过 ID {pid_str}，包含过滤标签。")
+                continue
+
+        image_url = post_data.get('file_url') or post_data.get('large_file_url')
+        if not image_url:
+            continue
+
+        state.play_event.wait()
+        if not state.is_running:
+            break
+
+        saved_filename = danbooru_api.download_image(image_url, save_dir, append_log)
+        if not saved_filename:
+            append_log(f"ID {pid_str} 下载失败，跳过")
+            continue
+
+        db_data_inst.log_data[pid_str] = image_url
+        success_count += 1
+
+        artist = ""
+        if 'tag_string_artist' in post_data:
+            artist_list = post_data['tag_string_artist'].split()
+            artist_list = [a for a in artist_list if not a.lower().endswith("(voice_actor)")]
+            if artist_list:
+                artist = ' '.join(artist_list)
+
+        if artist:
+            db_data_inst.artist_stats[artist] = db_data_inst.artist_stats.get(artist, 0) + 1
+
+        _append_viewer(pid_str, artist, saved_filename, post_data)
+        save_runtime_snapshot(db_data_inst.log_data, db_data_inst.artist_stats, daily_viewer_data, runtime_snapshot_path)
+
+    db_data_inst.save_global_data()
+    db_data_inst.save_viewer_data(daily_viewer_data)
+    clear_runtime_snapshot(runtime_snapshot_path)
+    append_log(f"[DownloadIDs] 完成，成功下载 {success_count} 张图片。")
+
+
+def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="", end_date=""):
     global scraper_thread
     try:
-        append_log(f"开始抓取，从第 {start_page} 页到第 {end_page} 页")
-        append_log(f"当前模式: {state.mode}, 过滤 Tags: {state.filter_tags}")
-
-        date_list = []
-        if state.mode == 'popular_range':
-            start_dt = datetime.datetime.strptime(state.start_date, "%Y-%m-%d")
-            end_dt = datetime.datetime.strptime(state.end_date, "%Y-%m-%d")
-            delta = datetime.timedelta(days=1)
-            curr = start_dt
-            while curr <= end_dt:
-                date_list.append(curr.strftime("%Y-%m-%d"))
-                curr += delta
-        elif state.mode == 'popular' and state.target_date:
-            date_list = [state.target_date]
+        if mode == "download_ids":
+            # download_ids 不需要翻页，直接按 IDs 列表走
+            task_download_ids(db_data, state.filter_tags)
         else:
-            date_list = [datetime.datetime.now().strftime('%Y-%m-%d')]
-
-        for target_date in date_list:
-            if not state.is_running: break
-            
-            if state.mode in ['popular', 'popular_range']:
-                append_log(f"\n========== 正在处理日期：{target_date} ==========")
-            
-            db_data.__init__(target_date)
-            global daily_viewer_data, today_str, save_dir, runtime_snapshot_path
-            daily_viewer_data = db_data.load_viewer_data()
-            today_str = db_data.today_str
-            save_dir = db_data.save_dir
-            runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
-
             output = db_data.load_hot_drawer()
             nu_sets = db_data.load_need_update()
 
-            n = start_page
-            while n <= end_page:
-                if not state.is_running: 
-                    append_log("任务已被强制终止。")
-                    break
-                    
-                state.play_event.wait() # 等待暂停恢复
+            date_list = []
+            if mode == "popular_range":
+                from datetime import datetime, timedelta
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                delta = timedelta(days=1)
+                curr = start_dt
+                while curr <= end_dt:
+                    date_list.append(curr.strftime("%Y-%m-%d"))
+                    curr += delta
+            elif mode == "popular" and target_date:
+                date_list = [target_date]
+            else:
+                date_list = [db_data.today_str]
+
+            mode_label = {"rank": "Rank", "popular": "Popular", "collect_ids": "CollectIDs", "popular_range": "PopularRange"}.get(mode, mode)
+            append_log(f"开始抓取 [{mode_label}]，从第 {start_page} 页到第 {end_page} 页")
+            append_log(f"当前过滤 Tags: {state.filter_tags}")
+
+            for pop_date in date_list:
+                if not state.is_running: break
                 
-                append_log(f"--- 正在处理大页码 第 {n} 页 ---")
-                o, n_u_dict = grabber(db_data, n, state.filter_tags)
+                if mode in ["popular", "popular_range"]:
+                    append_log(f"\n========== 正在处理日期：{pop_date} ==========")
+                    pop_db = DanbooruData(pop_date)
+                else:
+                    pop_db = db_data
                 
-                output = list(set(output + o) - db_data.all_drawer)
-                for k in ["1", "2"]:
-                    nu_sets[k].update(n_u_dict[k])
-                
-                db_data.save_hot_drawer(list(set(output)))
-                db_data.save_need_update(nu_sets)
-                    
-                n += 1
+                n = start_page
+                while n <= end_page:
+                    if not state.is_running: 
+                        append_log("任务已被强制终止。")
+                        break
+                    state.play_event.wait()
+                    append_log(f"--- 正在处理第 {n} 页 ---")
+
+                    if mode in ["popular", "popular_range"]:
+                        o, n_u_dict = grabber_popular(pop_db, n, state.filter_tags, pop_date)
+                    elif mode == "collect_ids":
+                        o, n_u_dict = grabber_collect_ids(pop_db, n, state.filter_tags)
+                    else:
+                        o, n_u_dict = grabber_rank(pop_db, n, state.filter_tags)
+
+                    output = list(set(output + o) - pop_db.all_drawer)
+                    for k in ["1", "2"]:
+                        nu_sets[k].update(n_u_dict[k])
+
+                    pop_db.save_hot_drawer(list(set(output)))
+                    pop_db.save_need_update(nu_sets)
+                    n += 1
+
     except Exception as e:
         save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
         append_log(f"抓取任务异常中断，已写入临时快照: {e}")
@@ -376,10 +553,6 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
         return {"msg": "爬虫已经在运行中"}
     
     state.filter_tags = [t.strip() for t in req.tags.split(',') if t.strip()]
-    state.mode = req.mode
-    state.target_date = req.target_date
-    state.start_date = req.start_date
-    state.end_date = req.end_date
     state.is_running = True
     state.play_event.set()
     state.logs = []
@@ -387,12 +560,12 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
 
     scraper_thread = threading.Thread(
         target=scraper_task,
-        args=(req.start_page, req.end_page),
+        args=(req.start_page, req.end_page, req.mode, req.target_date, req.start_date, req.end_date),
         daemon=True
     )
     scraper_thread.start()
-    return {"msg": "任务已启动"}
-
+    mode_labels = {"rank": "排行抓取", "popular": "Popular热门", "popular_range": "日期范围热门", "collect_ids": "仅收集ID", "download_ids": "按ID下载"}
+    return {"msg": f"{mode_labels.get(req.mode, '任务')}已启动"}
 @app.post("/api/pause")
 def pause_scraper():
     state.play_event.clear()
