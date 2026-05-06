@@ -1,21 +1,42 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue';
 import GalleryCalendar from './GalleryCalendar.vue';
 
 const emit = defineEmits(['edit-image']);
 
-const LOCAL_PAGE_SIZE = 12;
-const LATEST_PAGE_SIZE = 12;
+const LOCAL_PAGE_SIZE = 25;
+const LATEST_PAGE_SIZE = 25;
+
+const savedHabitsStr = localStorage.getItem('crawlerHabits') || '{}';
+const habits = JSON.parse(savedHabitsStr);
 
 const form = ref({
-  startPage: 1,
-  endPage: 16,
-  tags: 'furry, futanari',
-  mode: 'rank',
+  startPage: habits.rank_start || 1,
+  endPage: habits.rank_end || 16,
+  tags: habits.tags || 'furry, futanari',
+  mode: habits.mode || 'rank',
   targetDate: '',
   startDate: '',
   endDate: ''
 });
+
+watch(() => form.value.mode, (newMode) => {
+  if (['rank', 'collect_ids'].includes(newMode)) {
+    form.value.startPage = habits[`${newMode}_start`] || 1;
+    form.value.endPage = habits[`${newMode}_end`] || 16;
+  } else if (['popular', 'popular_range'].includes(newMode)) {
+    form.value.startPage = habits[`${newMode}_start`] || 1;
+    form.value.endPage = habits[`${newMode}_end`] || 35;
+  }
+});
+
+watch(form, (newForm) => {
+  habits.mode = newForm.mode;
+  habits.tags = newForm.tags;
+  habits[`${newForm.mode}_start`] = newForm.startPage;
+  habits[`${newForm.mode}_end`] = newForm.endPage;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+}, { deep: true });
 
 const gallery = ref({
   selectedDate: '',
@@ -31,7 +52,8 @@ const task = ref({
   isPaused: false,
   logs: ['桌面端已启动。'],
   backendError: '',
-  backendTail: []
+  backendTail: [],
+  showLogs: false
 });
 const viewer = ref({
   open: false,
@@ -40,8 +62,27 @@ const viewer = ref({
   zoom: 1
 });
 
+const toast = ref({
+  show: false,
+  msg: '',
+  type: 'info'
+});
+
+function showToast(msg, type = 'info') {
+  toast.value = { show: true, msg, type };
+  setTimeout(() => { toast.value.show = false; }, 3000);
+}
+
 const loadingGallery = ref(false);
 let pollTimer = null;
+const logBodyRef = ref(null);
+
+watch(() => task.value.logs.length, async () => {
+  if (task.value.showLogs && logBodyRef.value) {
+    await nextTick();
+    logBodyRef.value.scrollTop = logBodyRef.value.scrollHeight;
+  }
+});
 
 const filteredLocalImages = computed(() => {
   const keyword = gallery.value.search.trim().toLowerCase();
@@ -130,7 +171,7 @@ async function loadGallery(date) {
       ...item,
       thumbUrl: '',
       artistTokens: splitTags(item.artist),
-      characterTokens: splitTags(item.characters)
+      characterTokens: Array.isArray(item.characters) ? item.characters : splitTags(item.characters)
     }));
     gallery.value.selectedDate = data.selectedDate;
     gallery.value.availableDates = data.availableDates;
@@ -162,6 +203,11 @@ async function syncStatus() {
     }
 
     if (wasRunning && !task.value.isRunning) {
+      if (status.backendError || task.value.backendError) {
+        showToast("抓取任务异常停止！", "error");
+      } else {
+        showToast("抓取任务已完成！", "success");
+      }
       await loadGallery(gallery.value.selectedDate);
     }
   } catch (error) {
@@ -238,8 +284,13 @@ async function openOriginal(item) {
   await window.desktopAPI.external.open(item.postUrl);
 }
 
-async function openHostsHint() {
-  alert("提示：请修改 hosts 解决连接问题。\n路径：C:\\Windows\\System32\\drivers\\etc\\hosts\n\n请在记事本中打开，在文件末尾添加以下内容：\n104.26.11.39 danbooru.donmai.us");
+const hostsModal = ref({ open: false });
+
+function openHostsHint() {
+  hostsModal.value.open = true;
+}
+
+async function openHostsFolder() {
   await window.desktopAPI.external.open('file:///C:/Windows/System32/drivers/etc/');
 }
 
@@ -249,6 +300,41 @@ function editItem(item) {
 
 function applySearch(keyword) {
   gallery.value.search = keyword || '';
+}
+
+const translationFileInput = ref(null);
+
+function importTranslationFile() {
+  translationFileInput.value?.click();
+}
+
+function onTranslationFileSelected(event) {
+  const file = event.target.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async (e) => {
+    try {
+      const data = JSON.parse(e.target.result);
+      const res = await fetch('http://127.0.0.1:8000/api/import_translation', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ translations: data })
+      });
+      const json = await res.json();
+      if (json.ok) {
+        showToast("翻译包导入成功，重新加载中...", "success");
+        await loadGallery(gallery.value.selectedDate);
+      } else {
+        showToast("翻译包导入失败: " + json.msg, "error");
+      }
+    } catch (err) {
+      showToast("解析JSON或请求失败: " + err.message, "error");
+      console.error("Import error:", err);
+    } finally {
+      event.target.value = '';
+    }
+  };
+  reader.readAsText(file);
 }
 
 async function openViewer(item) {
@@ -289,6 +375,23 @@ function closeViewer() {
   viewer.value.open = false;
   viewer.value.imageUrl = '';
   viewer.value.zoom = 1;
+}
+
+function getLogType(line) {
+  if (!line) return 'log-info';
+  const text = line.toLowerCase();
+  if (text.includes('失败') || text.includes('错误') || text.includes('error') || text.includes('异常')) return 'log-error';
+  if (text.includes('成功') || text.includes('完成') || text.includes('finish')) return 'log-success';
+  if (text.includes('跳过') || text.includes('skip')) return 'log-warn';
+  return 'log-info';
+}
+
+function getLogIcon(line) {
+  const type = getLogType(line);
+  if (type === 'log-error') return '×';
+  if (type === 'log-success') return '✓';
+  if (type === 'log-warn') return '！';
+  return '›';
 }
 
 async function stepViewer(offset) {
@@ -341,6 +444,17 @@ onBeforeUnmount(() => {
   if (pollTimer) window.clearInterval(pollTimer);
   window.removeEventListener('keydown', onKeyDown);
 });
+
+const modeDescription = computed(() => {
+  switch (form.value.mode) {
+    case 'rank': return '获取当日 Danbooru 排行榜最受欢迎的图片并自动下载。';
+    case 'popular': return '根据指定日期，获取 Explore 页面当天的热门图片。';
+    case 'popular_range': return '设定起始与结束日期，批量抓取这段时间内所有的热门图片。';
+    case 'collect_ids': return '网络状况不佳时的极速模式：仅拉取列表和元数据，不下载图片本体。';
+    case 'download_ids': return '从已收集的 ID 列表中进行批量下载，常用于断点续传或集中补全。';
+    default: return '选择模式后配置参数，点击启动开始执行。';
+  }
+});
 </script>
 
 <template>
@@ -349,7 +463,7 @@ onBeforeUnmount(() => {
       <div class="panel-head compact-head">
         <div>
           <h2>抓图任务</h2>
-          <p class="inline-note">选择模式后配置参数，点击启动开始执行。</p>
+          <p class="inline-note">{{ modeDescription }}</p>
         </div>
         <button class="ghost" @click="openHostsHint" style="margin-left: auto; color: #ff9800;">无法连接？修改Hosts教程</button>
       </div>
@@ -377,7 +491,7 @@ onBeforeUnmount(() => {
           <input v-model.number="form.endPage" type="number" min="1" />
         </label>
       </div>
-      <label class="field-full" v-if="form.mode === 'popular'">
+      <label class="field-full" v-if="['popular', 'download_ids'].includes(form.mode)">
         <span>目标日期 <span class="muted compact-text">(留空则用今天)</span></span>
         <input v-model="form.targetDate" type="date" />
       </label>
@@ -410,9 +524,27 @@ onBeforeUnmount(() => {
 
       <p v-if="task.backendError" class="error-text">{{ task.backendError }}</p>
 
-      <div class="log-panel">
-        <h3>实时日志</h3>
-        <pre>{{ task.logs.join('\n') }}</pre>
+      <div class="modern-log-wrapper" :class="{ 'is-expanded': task.showLogs }">
+        <div class="modern-log-header" @click="task.showLogs = !task.showLogs">
+          <div class="log-header-left">
+            <span class="status-dot" :class="{ 'is-active': task.isRunning }"></span>
+            <span class="log-title">运行动态</span>
+          </div>
+          <div class="log-header-right">
+            <span class="log-count" v-if="task.logs.length">{{ task.logs.length }} 条记录</span>
+            <svg class="chevron" :class="{ 'is-rotated': task.showLogs }" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </div>
+        </div>
+        <transition name="log-expand">
+          <div class="modern-log-body" v-show="task.showLogs" ref="logBodyRef">
+            <div class="modern-log-line" v-for="(log, i) in task.logs" :key="i" :class="getLogType(log)">
+              <span class="log-icon">{{ getLogIcon(log) }}</span>
+              <span class="log-text">{{ log }}</span>
+            </div>
+          </div>
+        </transition>
       </div>
     </section>
 
@@ -426,6 +558,8 @@ onBeforeUnmount(() => {
         </div>
         <div class="gallery-tools">
           <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
+          <button class="secondary" @click="importTranslationFile" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">导入翻译字典</button>
+          <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
         </div>
       </div>
 
@@ -488,6 +622,7 @@ onBeforeUnmount(() => {
         <div class="button-row compact viewer-actions">
           <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
           <button class="secondary" @click="stepViewer(1)" :disabled="viewer.index >= viewerItems.length - 1">下一张</button>
+          <button @click="editItem(viewerItem)" style="background: linear-gradient(135deg, var(--accent), var(--accent-deep)); border: none; color: white;">编辑图片</button>
           <button class="ghost" @click="closeViewer" style="color: #fff; border: 1px solid rgba(255,255,255,0.2);">关闭</button>
         </div>
       </div>
@@ -502,5 +637,207 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <!-- Toast Notification -->
+    <div v-if="toast.show" class="toast-overlay" :class="toast.type">
+      {{ toast.msg }}
+    </div>
+
+    <!-- Hosts Modal -->
+    <div v-if="hostsModal.open" class="viewer-overlay" @click.self="hostsModal.open = false" style="z-index: 10000; display: flex; justify-content: center; align-items: center;">
+      <div class="card panel" style="width: 480px; max-width: 90vw; background: rgba(255, 255, 255, 0.95); box-shadow: 0 20px 50px rgba(0,0,0,0.3); display: flex; flex-direction: column; gap: 14px;">
+        <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">修复连接问题 (修改 Hosts)</h3>
+        <p style="margin: 0; font-size: 13px;">请在记事本中打开以下路径的文件：</p>
+        <code style="background: rgba(0,0,0,0.05); padding: 6px 10px; border-radius: 6px; font-size: 12px; user-select: all;">C:\Windows\System32\drivers\etc\hosts</code>
+        <p style="margin: 0; font-size: 13px;">并在文件最末尾添加以下内容（可直接全选复制）：</p>
+        <textarea readonly style="width: 100%; height: 60px; font-family: Consolas, monospace; font-size: 13px; resize: none; background: rgba(0,0,0,0.03); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 10px; outline: none; cursor: text;" onfocus="this.select()">104.26.11.39 danbooru.donmai.us</textarea>
+        <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
+          <button @click="openHostsFolder" class="secondary">打开目录</button>
+          <button @click="hostsModal.open = false" style="min-width: 80px;">确定</button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
+
+<style scoped>
+/* Modern Log UI */
+.modern-log-wrapper {
+  margin-top: 12px;
+  background: rgba(26, 20, 15, 0.96);
+  border-radius: 16px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  box-shadow: 0 8px 32px rgba(87, 58, 25, 0.15);
+  display: flex;
+  flex-direction: column;
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  /* Use a reasonable max height so it fits the viewport */
+  max-height: calc(100vh - 280px);
+}
+
+.modern-log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  cursor: pointer;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 100%);
+  user-select: none;
+  border-radius: 16px;
+  transition: background 0.2s;
+}
+.modern-log-wrapper.is-expanded .modern-log-header {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+.modern-log-header:hover {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.02) 100%);
+}
+
+.log-header-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #666;
+  box-shadow: 0 0 0 2px rgba(102, 102, 102, 0.2);
+}
+.status-dot.is-active {
+  background: #51cf66;
+  box-shadow: 0 0 0 2px rgba(81, 207, 102, 0.2);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(81, 207, 102, 0.4); }
+  70% { box-shadow: 0 0 0 6px rgba(81, 207, 102, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(81, 207, 102, 0); }
+}
+
+.log-title {
+  color: #fff;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.5px;
+}
+
+.log-header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.log-count {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(0, 0, 0, 0.3);
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.1);
+}
+
+.chevron {
+  color: rgba(255, 255, 255, 0.5);
+  transition: transform 0.3s ease;
+}
+.chevron.is-rotated {
+  transform: rotate(180deg);
+}
+
+.modern-log-body {
+  padding: 0 16px 16px 16px;
+  overflow-y: auto;
+  /* Allow it to flex but bound the height */
+  flex: 1 1 auto;
+}
+
+.modern-log-body::-webkit-scrollbar {
+  width: 6px;
+}
+.modern-log-body::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 3px;
+}
+
+.modern-log-line {
+  display: flex;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.4;
+  word-break: break-all;
+  animation: slideIn 0.2s ease-out forwards;
+}
+.modern-log-line:last-child {
+  border-bottom: none;
+}
+
+.log-icon {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  font-weight: bold;
+}
+
+.log-info { color: #d4d4d4; }
+.log-info .log-icon { color: #4dabf7; }
+
+.log-success { color: #d4d4d4; }
+.log-success .log-text { color: #8ce99a; font-weight: bold; }
+.log-success .log-icon { color: #51cf66; }
+
+.log-error { color: #ffa8a8; font-weight: bold; }
+.log-error .log-icon { color: #ff6b6b; }
+
+.log-warn { color: #ffec99; }
+.log-warn .log-icon { color: #fcc419; }
+
+/* Transitions */
+.log-expand-enter-active, .log-expand-leave-active {
+  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  overflow: hidden;
+}
+.log-expand-enter-from, .log-expand-leave-to {
+  opacity: 0;
+  transform: translateY(-10px);
+}
+.log-expand-enter-to, .log-expand-leave-from {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(-5px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.toast-overlay {
+  position: fixed;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 12px 24px;
+  border-radius: 999px;
+  font-weight: 700;
+  font-size: 14px;
+  z-index: 10000;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+  animation: fadeInDown 0.3s ease-out;
+  pointer-events: none;
+}
+.toast-overlay.success { background: rgba(212, 237, 218, 0.95); color: #155724; border: 1px solid #c3e6cb; }
+.toast-overlay.error { background: rgba(248, 215, 218, 0.95); color: #721c24; border: 1px solid #f5c6cb; }
+.toast-overlay.info { background: rgba(209, 236, 241, 0.95); color: #0c5460; border: 1px solid #bee5eb; }
+
+@keyframes fadeInDown {
+  from { opacity: 0; transform: translate(-50%, -15px); }
+  to { opacity: 1; transform: translate(-50%, 0); }
+}
+</style>

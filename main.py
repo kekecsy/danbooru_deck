@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pic_web.main import app as mosaic_editor_app
+from translator import translator
 
 # ==========================================
 # 1. 爬虫全局配置与初始化
@@ -65,10 +66,6 @@ def get_available_date_folders():
 
 def resolve_selected_date(requested_date=None):
     available_dates = get_available_date_folders()
-    if today_str not in available_dates:
-        available_dates.insert(0, today_str)
-        available_dates = sorted(available_dates, reverse=True)
-
     if requested_date:
         try:
             datetime.datetime.strptime(requested_date, "%Y-%m-%d")
@@ -104,13 +101,23 @@ def build_local_image_library(selected_date=None):
                 web_url = f"/images/{day_folder}/{filename}"
             local_key = os.path.join(day_folder, filename).replace("\\", "/")
             known_paths.add(local_key)
+            tags_dict = item.get("tags") or {}
+            characters_str = tags_dict.get("tag_string_character", "")
+            
+            translated_chars = []
+            for c in characters_str.split():
+                c = c.strip()
+                if c:
+                    translated_chars.append(translator.translate(c))
+
             library.append({
                 "artist": item.get("artist") or "未知",
                 "filename": filename,
                 "local_path": item.get("local_path") or os.path.join(base_download_dir, day_folder, filename),
                 "post_url": item.get("post_url") or "#",
                 "web_url": web_url,
-                "tags": item.get("tags") or {}
+                "tags": tags_dict,
+                "characters": translated_chars
             })
 
     if current_day_dir.exists():
@@ -128,7 +135,8 @@ def build_local_image_library(selected_date=None):
                 "local_path": str(image_path),
                 "post_url": "#",
                 "web_url": f"/images/{current_day_dir.name}/{image_path.name}",
-                "tags": {}
+                "tags": {},
+                "characters": []
             })
 
     return library
@@ -138,7 +146,18 @@ def build_local_image_library(selected_date=None):
 # ==========================================
 # 2. FastAPI 后端与状态管理
 # ==========================================
+from fastapi.middleware.cors import CORSMiddleware
+
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.mount("/images", StaticFiles(directory="hot_pic"), name="images")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/mosaic", mosaic_editor_app)
@@ -177,13 +196,14 @@ class StartRequest(BaseModel):
     start_page: int
     end_page: int
     tags: str
-    mode: str = "rank"  # rank | collect_ids | download_ids | popular | popular_range
+    mode: str = "rank"  # rank | collect_ids | download_ids | popular
     target_date: str = ""  # popular 模式用，可指定日期
-    start_date: str = ""
-    end_date: str = ""
 
 class OpenLocalRequest(BaseModel):
     local_path: str
+
+class TranslationImportRequest(BaseModel):
+    translations: dict
 
 # ==========================================
 # 3. 核心爬虫逻辑 (融入了打断检测)
@@ -198,7 +218,6 @@ def _ensure_today(db_data_inst):
         today_str = db_data_inst.today_str
         save_dir = db_data_inst.save_dir
         runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
-        state.sent_image_count = len(daily_viewer_data)
 
 def _process_post(post, db_data_inst, filter_tags, do_download=True):
     """处理单个 post：过滤、提取画师、可选下载。返回 (ids, artist, saved_filename) 或 None"""
@@ -310,20 +329,10 @@ def grabber_rank(db_data_inst, page_num, filter_tags):
 
 # --- mode: popular (按日期热门) ---
 def grabber_popular(db_data_inst, page_num, filter_tags, target_date):
-    global daily_viewer_data, today_str, save_dir, runtime_snapshot_path
+    global daily_viewer_data
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
-    
-    # Ensure globals point to the right target date
-    if db_data_inst.today_str != target_date:
-        db_data_inst.__init__(target_date)
-        
-    today_str = db_data_inst.today_str
-    save_dir = db_data_inst.save_dir
-    runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
-    
     daily_viewer_data = db_data_inst.load_viewer_data()
-    state.sent_image_count = len(daily_viewer_data)
 
     state.play_event.wait()
     if not state.is_running:
@@ -392,7 +401,6 @@ def task_download_ids(db_data_inst, filter_tags):
     global daily_viewer_data
     _ensure_today(db_data_inst)
     daily_viewer_data = db_data_inst.load_viewer_data()
-    state.sent_image_count = len(daily_viewer_data)
     ids_data = db_data_inst.load_ids_data()
 
     if not ids_data:
@@ -458,7 +466,7 @@ def task_download_ids(db_data_inst, filter_tags):
     append_log(f"[DownloadIDs] 完成，成功下载 {success_count} 张图片。")
 
 
-def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="", end_date=""):
+def scraper_task(start_page, end_page, mode="rank", target_date=""):
     global scraper_thread
     try:
         if mode == "download_ids":
@@ -468,57 +476,35 @@ def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="
             output = db_data.load_hot_drawer()
             nu_sets = db_data.load_need_update()
 
-            date_list = []
-            if mode == "popular_range":
-                from datetime import datetime, timedelta
-                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-                delta = timedelta(days=1)
-                curr = start_dt
-                while curr <= end_dt:
-                    date_list.append(curr.strftime("%Y-%m-%d"))
-                    curr += delta
-            elif mode == "popular" and target_date:
-                date_list = [target_date]
-            else:
-                date_list = [db_data.today_str]
-
-            mode_label = {"rank": "Rank", "popular": "Popular", "collect_ids": "CollectIDs", "popular_range": "PopularRange"}.get(mode, mode)
+            n = start_page
+            mode_label = {"rank": "Rank", "popular": "Popular", "collect_ids": "CollectIDs"}.get(mode, mode)
             append_log(f"开始抓取 [{mode_label}]，从第 {start_page} 页到第 {end_page} 页")
             append_log(f"当前过滤 Tags: {state.filter_tags}")
 
-            for pop_date in date_list:
-                if not state.is_running: break
-                
-                if mode in ["popular", "popular_range"]:
-                    append_log(f"\n========== 正在处理日期：{pop_date} ==========")
+            while n <= end_page:
+                if not state.is_running: 
+                    append_log("任务已被强制终止。")
+                    break
+                state.play_event.wait()
+                append_log(f"--- 正在处理第 {n} 页 ---")
+
+                if mode == "popular":
+                    # popular 模式需要使用指定的日期
+                    pop_date = target_date or db_data.today_str
                     pop_db = DanbooruData(pop_date)
+                    o, n_u_dict = grabber_popular(pop_db, n, state.filter_tags, pop_date)
+                elif mode == "collect_ids":
+                    o, n_u_dict = grabber_collect_ids(db_data, n, state.filter_tags)
                 else:
-                    pop_db = db_data
-                
-                n = start_page
-                while n <= end_page:
-                    if not state.is_running: 
-                        append_log("任务已被强制终止。")
-                        break
-                    state.play_event.wait()
-                    append_log(f"--- 正在处理第 {n} 页 ---")
+                    o, n_u_dict = grabber_rank(db_data, n, state.filter_tags)
 
-                    if mode in ["popular", "popular_range"]:
-                        o, n_u_dict = grabber_popular(pop_db, n, state.filter_tags, pop_date)
-                    elif mode == "collect_ids":
-                        o, n_u_dict = grabber_collect_ids(pop_db, n, state.filter_tags)
-                    else:
-                        o, n_u_dict = grabber_rank(pop_db, n, state.filter_tags)
+                output = list(set(output + o) - db_data.all_drawer)
+                for k in ["1", "2"]:
+                    nu_sets[k].update(n_u_dict[k])
 
-                    output = list(set(output + o) - pop_db.all_drawer)
-                    for k in ["1", "2"]:
-                        nu_sets[k].update(n_u_dict[k])
-
-                    pop_db.save_hot_drawer(list(set(output)))
-                    pop_db.save_need_update(nu_sets)
-                    n += 1
-
+                db_data.save_hot_drawer(list(set(output)))
+                db_data.save_need_update(nu_sets)
+                n += 1
     except Exception as e:
         save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
         append_log(f"抓取任务异常中断，已写入临时快照: {e}")
@@ -560,12 +546,13 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
 
     scraper_thread = threading.Thread(
         target=scraper_task,
-        args=(req.start_page, req.end_page, req.mode, req.target_date, req.start_date, req.end_date),
+        args=(req.start_page, req.end_page, req.mode, req.target_date),
         daemon=True
     )
     scraper_thread.start()
-    mode_labels = {"rank": "排行抓取", "popular": "Popular热门", "popular_range": "日期范围热门", "collect_ids": "仅收集ID", "download_ids": "按ID下载"}
+    mode_labels = {"rank": "排行抓取", "popular": "Popular热门", "collect_ids": "仅收集ID", "download_ids": "按ID下载"}
     return {"msg": f"{mode_labels.get(req.mode, '任务')}已启动"}
+
 @app.post("/api/pause")
 def pause_scraper():
     state.play_event.clear()
@@ -652,6 +639,14 @@ def read_root():
         with open("index.html", "r", encoding="utf-8") as f:
             return HTMLResponse(content=f.read())
     return HTMLResponse(content="<h1>找不到 index.html</h1>")
+
+@app.post("/api/import_translation")
+def api_import_translation(req: TranslationImportRequest):
+    try:
+        translator.update_custom_dict(req.translations)
+        return {"ok": True, "msg": "导入成功"}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
 
 if __name__ == "__main__":
     import uvicorn

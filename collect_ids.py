@@ -1,4 +1,4 @@
-# danbooru_hot.py
+# 当前网不是很好的时候用于收集ids，等网好了再去用download_by_ids.py下载
 import os
 from time import sleep
 import datetime
