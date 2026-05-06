@@ -9,6 +9,8 @@ const LATEST_PAGE_SIZE = 25;
 
 const savedHabitsStr = localStorage.getItem('crawlerHabits') || '{}';
 const habits = JSON.parse(savedHabitsStr);
+const savedSearchFavoritesStr = localStorage.getItem('crawlerSearchFavorites') || '[]';
+const searchFavorites = ref(JSON.parse(savedSearchFavoritesStr));
 
 const form = ref({
   startPage: habits.rank_start || 1,
@@ -36,6 +38,10 @@ watch(form, (newForm) => {
   habits[`${newForm.mode}_start`] = newForm.startPage;
   habits[`${newForm.mode}_end`] = newForm.endPage;
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+}, { deep: true });
+
+watch(searchFavorites, (value) => {
+  localStorage.setItem('crawlerSearchFavorites', JSON.stringify(value || []));
 }, { deep: true });
 
 const gallery = ref({
@@ -68,6 +74,24 @@ const toast = ref({
   type: 'info'
 });
 
+const translationEditor = ref({
+  open: false,
+  loading: false,
+  saving: false,
+  originalKey: '',
+  key: '',
+  chineseName: '',
+  sourceHint: '',
+  sourceHintZh: ''
+});
+
+const tagContextMenu = ref({
+  open: false,
+  x: 0,
+  y: 0,
+  entry: null
+});
+
 function showToast(msg, type = 'info') {
   toast.value = { show: true, msg, type };
   setTimeout(() => { toast.value.show = false; }, 3000);
@@ -85,13 +109,10 @@ watch(() => task.value.logs.length, async () => {
 });
 
 const filteredLocalImages = computed(() => {
-  const keyword = gallery.value.search.trim().toLowerCase();
+  const keyword = normalizeSearchText(gallery.value.search);
   const source = gallery.value.images;
   if (!keyword) return source;
-  return source.filter(item =>
-    (item.artist || '').toLowerCase().includes(keyword) ||
-    (item.characters || '').toLowerCase().includes(keyword)
-  );
+  return source.filter(item => String(item.searchIndex || '').includes(keyword));
 });
 
 const localTotalPages = computed(() => Math.max(1, Math.ceil(filteredLocalImages.value.length / LOCAL_PAGE_SIZE)));
@@ -124,6 +145,49 @@ function appendLog(message) {
 
 function splitTags(value) {
   return String(value || '').split(' ').map(item => item.trim()).filter(Boolean);
+}
+
+function normalizeSearchText(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/[()]/g, ' ')
+    .replace(/\s+/g, ' ');
+}
+
+function buildSearchIndex(item, characterEntries) {
+  const parts = [
+    item.artist,
+    item.filename
+  ];
+
+  characterEntries.forEach(entry => {
+    parts.push(
+      entry.name,
+      entry.key,
+      entry.matched_key,
+      entry.source_hint,
+      entry.source_hint_zh
+    );
+  });
+
+  return normalizeSearchText(parts.filter(Boolean).join(' '));
+}
+
+function getCharacterEntries(item) {
+  if (Array.isArray(item.character_entries)) return item.character_entries;
+  if (Array.isArray(item.characterEntries)) return item.characterEntries;
+  if (Array.isArray(item.characters)) {
+    return item.characters.map(name => ({
+      key: '',
+      matched_key: '',
+      name: String(name || ''),
+      source_hint: '',
+      source_hint_zh: ''
+    }));
+  }
+  return [];
 }
 
 function mergeBackendLogs(lines) {
@@ -167,12 +231,19 @@ async function loadGallery(date) {
   loadingGallery.value = true;
   try {
     const data = await window.desktopAPI.gallery.getByDate(date || gallery.value.selectedDate);
-    const normalizedImages = data.images.map(item => ({
-      ...item,
-      thumbUrl: '',
-      artistTokens: splitTags(item.artist),
-      characterTokens: Array.isArray(item.characters) ? item.characters : splitTags(item.characters)
-    }));
+    const normalizedImages = data.images.map(item => {
+      const characterEntries = getCharacterEntries(item);
+      return {
+        ...item,
+        thumbUrl: '',
+        artistTokens: splitTags(item.artist),
+        characterEntries,
+        characterTokens: characterEntries.length
+          ? characterEntries.map(entry => entry?.name).filter(Boolean)
+          : (Array.isArray(item.characters) ? item.characters : splitTags(item.characters)),
+        searchIndex: buildSearchIndex(item, characterEntries)
+      };
+    });
     gallery.value.selectedDate = data.selectedDate;
     gallery.value.availableDates = data.availableDates;
     gallery.value.today = data.today;
@@ -300,6 +371,103 @@ function editItem(item) {
 
 function applySearch(keyword) {
   gallery.value.search = keyword || '';
+  closeTagContextMenu();
+}
+
+function openTagContextMenu(event, entry) {
+  event.preventDefault();
+  tagContextMenu.value = {
+    open: true,
+    x: event.clientX,
+    y: event.clientY,
+    entry
+  };
+}
+
+function closeTagContextMenu() {
+  if (!tagContextMenu.value.open) return;
+  tagContextMenu.value.open = false;
+}
+
+async function editFromContextMenu() {
+  const entry = tagContextMenu.value.entry;
+  closeTagContextMenu();
+  if (!entry) return;
+  await openTranslationEditor(entry);
+}
+
+function saveCurrentSearch() {
+  const keyword = gallery.value.search.trim();
+  if (!keyword) return;
+  if (searchFavorites.value.includes(keyword)) return;
+  searchFavorites.value = [keyword, ...searchFavorites.value].slice(0, 16);
+  showToast('已收藏搜索词', 'success');
+}
+
+function removeSearchFavorite(keyword) {
+  searchFavorites.value = searchFavorites.value.filter(item => item !== keyword);
+}
+
+async function openTranslationEditor(entry) {
+  const rawKey = entry?.key || entry?.matched_key || entry?.name || '';
+  if (!rawKey) return;
+  translationEditor.value.open = true;
+  translationEditor.value.loading = true;
+  translationEditor.value.originalKey = rawKey;
+  translationEditor.value.key = rawKey;
+  translationEditor.value.chineseName = entry?.name || '';
+  translationEditor.value.sourceHint = entry?.source_hint || '';
+  translationEditor.value.sourceHintZh = entry?.source_hint_zh || '';
+
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/translation_entry/${encodeURIComponent(rawKey)}`);
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.msg || '读取失败');
+    const loaded = json.entry || {};
+    translationEditor.value.key = loaded.matched_key || rawKey;
+    translationEditor.value.chineseName = loaded.chinese_name || entry?.name || '';
+    translationEditor.value.sourceHint = loaded.source_hint || '';
+    translationEditor.value.sourceHintZh = loaded.source_hint_zh || '';
+  } catch (error) {
+    showToast(`读取翻译条目失败: ${error.message}`, 'error');
+  } finally {
+    translationEditor.value.loading = false;
+  }
+}
+
+function closeTranslationEditor() {
+  translationEditor.value.open = false;
+}
+
+async function saveTranslationEditor() {
+  const payload = {
+    key: translationEditor.value.key.trim(),
+    chinese_name: translationEditor.value.chineseName.trim(),
+    source_hint: translationEditor.value.sourceHint.trim(),
+    source_hint_zh: translationEditor.value.sourceHintZh.trim()
+  };
+  if (!payload.key) {
+    showToast('角色键不能为空', 'error');
+    return;
+  }
+
+  translationEditor.value.saving = true;
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/translation_entry', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const json = await res.json();
+    if (!json.ok) throw new Error(json.msg || '保存失败');
+    showToast('翻译条目已保存', 'success');
+    closeTranslationEditor();
+    await loadGallery(gallery.value.selectedDate);
+  } catch (error) {
+    showToast(`保存失败: ${error.message}`, 'error');
+  } finally {
+    translationEditor.value.saving = false;
+  }
 }
 
 const translationFileInput = ref(null);
@@ -410,6 +578,10 @@ function onViewerWheel(event) {
 }
 
 async function onKeyDown(event) {
+  if (tagContextMenu.value.open && event.key === 'Escape') {
+    closeTagContextMenu();
+    return;
+  }
   if (!viewer.value.open) return;
   if (event.key === 'Escape') {
     closeViewer();
@@ -433,16 +605,20 @@ watch(pagedLocalImages, async items => {
 });
 
 onMounted(async () => {
-  await loadGallery();
   await ensureService();
+  await loadGallery();
   await syncStatus();
   pollTimer = window.setInterval(syncStatus, 1200);
   window.addEventListener('keydown', onKeyDown);
+  window.addEventListener('click', closeTagContextMenu);
+  window.addEventListener('scroll', closeTagContextMenu, true);
 });
 
 onBeforeUnmount(() => {
   if (pollTimer) window.clearInterval(pollTimer);
   window.removeEventListener('keydown', onKeyDown);
+  window.removeEventListener('click', closeTagContextMenu);
+  window.removeEventListener('scroll', closeTagContextMenu, true);
 });
 
 const modeDescription = computed(() => {
@@ -557,7 +733,16 @@ const modeDescription = computed(() => {
           </p>
         </div>
         <div class="gallery-tools">
-          <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
+          <div class="search-row">
+            <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索角色 / 作品来源 / 来源翻译" />
+            <button class="secondary" @click="saveCurrentSearch" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">收藏关键词</button>
+          </div>
+          <div v-if="searchFavorites.length" class="token-row favorite-row">
+            <template v-for="keyword in searchFavorites" :key="keyword">
+              <button class="meta-link favorite-chip" @click="applySearch(keyword)">{{ keyword }}</button>
+              <button class="meta-link remove-chip" @click="removeSearchFavorite(keyword)">删除 {{ keyword }}</button>
+            </template>
+          </div>
           <button class="secondary" @click="importTranslationFile" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">导入翻译字典</button>
           <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
         </div>
@@ -587,8 +772,21 @@ const modeDescription = computed(() => {
               </button>
             </div>
             <div class="token-row">
+              <template v-for="entry in item.characterEntries" :key="`character-${entry.key || entry.name}`">
+                <button class="meta-link token-chip" @click="applySearch(entry.name)" @contextmenu="openTagContextMenu($event, entry)">
+                  {{ entry.name }}
+                </button>
+                <button
+                  v-if="entry.source_hint || entry.source_hint_zh"
+                  class="meta-link source-chip"
+                  @click="applySearch(entry.source_hint_zh || entry.source_hint)"
+                  @contextmenu="openTagContextMenu($event, entry)"
+                >
+                  {{ entry.source_hint_zh || entry.source_hint }}
+                </button>
+              </template>
               <button
-                v-for="token in item.characterTokens"
+                v-for="token in (!item.characterEntries?.length ? item.characterTokens : [])"
                 :key="`character-${token}`"
                 class="meta-link token-chip"
                 @click="applySearch(token)"
@@ -641,6 +839,40 @@ const modeDescription = computed(() => {
     <!-- Toast Notification -->
     <div v-if="toast.show" class="toast-overlay" :class="toast.type">
       {{ toast.msg }}
+    </div>
+
+    <div
+      v-if="tagContextMenu.open"
+      class="tag-context-menu"
+      :style="{ left: `${tagContextMenu.x}px`, top: `${tagContextMenu.y}px` }"
+    >
+      <button class="tag-context-item" @click="editFromContextMenu">编辑翻译</button>
+    </div>
+
+    <div v-if="translationEditor.open" class="viewer-overlay" @click.self="closeTranslationEditor" style="z-index: 10001; display: flex; justify-content: center; align-items: center;">
+      <div class="card panel translation-modal">
+        <h3 style="margin: 0;">编辑角色翻译</h3>
+        <label class="field-full">
+          <span>角色键</span>
+          <input v-model="translationEditor.key" type="text" :disabled="translationEditor.loading || translationEditor.saving" />
+        </label>
+        <label class="field-full">
+          <span>角色中文名</span>
+          <input v-model="translationEditor.chineseName" type="text" :disabled="translationEditor.loading || translationEditor.saving" />
+        </label>
+        <label class="field-full">
+          <span>来源标识</span>
+          <input v-model="translationEditor.sourceHint" type="text" :disabled="translationEditor.loading || translationEditor.saving" />
+        </label>
+        <label class="field-full">
+          <span>来源翻译</span>
+          <input v-model="translationEditor.sourceHintZh" type="text" :disabled="translationEditor.loading || translationEditor.saving" />
+        </label>
+        <div class="button-row">
+          <button @click="saveTranslationEditor" :disabled="translationEditor.loading || translationEditor.saving">保存</button>
+          <button class="secondary" @click="closeTranslationEditor" :disabled="translationEditor.saving">关闭</button>
+        </div>
+      </div>
     </div>
 
     <!-- Hosts Modal -->
@@ -835,6 +1067,13 @@ const modeDescription = computed(() => {
 .toast-overlay.success { background: rgba(212, 237, 218, 0.95); color: #155724; border: 1px solid #c3e6cb; }
 .toast-overlay.error { background: rgba(248, 215, 218, 0.95); color: #721c24; border: 1px solid #f5c6cb; }
 .toast-overlay.info { background: rgba(209, 236, 241, 0.95); color: #0c5460; border: 1px solid #bee5eb; }
+.translation-modal {
+  width: min(520px, 92vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(255, 250, 243, 0.98);
+}
 
 @keyframes fadeInDown {
   from { opacity: 0; transform: translate(-50%, -15px); }

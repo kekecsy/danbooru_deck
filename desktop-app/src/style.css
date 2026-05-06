@@ -171,6 +171,12 @@ input, select {
   align-items: flex-end;
   gap: 10px;
 }
+.search-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  align-items: center;
+}
 .compact-head {
   margin-bottom: 10px;
 }
@@ -270,6 +276,45 @@ input, select {
 .meta-link:disabled {
   color: var(--muted);
   cursor: default;
+}
+.favorite-row {
+  justify-content: flex-end;
+}
+.favorite-chip {
+  background: rgba(109,139,87,0.14);
+  border-color: rgba(109,139,87,0.25);
+  color: #4d6841;
+}
+.remove-chip {
+  background: rgba(0,0,0,0.04);
+}
+.source-chip {
+  background: rgba(77,104,65,0.12);
+  border-color: rgba(77,104,65,0.22);
+  color: #4d6841;
+}
+.tag-context-menu {
+  position: fixed;
+  z-index: 10002;
+  min-width: 140px;
+  padding: 6px;
+  border: 1px solid rgba(74,53,25,0.12);
+  border-radius: 10px;
+  background: rgba(255,250,243,0.98);
+  box-shadow: 0 12px 28px rgba(87,58,25,0.18);
+}
+.tag-context-item {
+  width: 100%;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  font-size: 12px;
+  font-weight: 600;
+}
+.tag-context-item:hover {
+  background: rgba(243,223,212,0.9);
 }
 .author-link {
   color: var(--ink);

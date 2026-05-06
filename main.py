@@ -80,6 +80,15 @@ def resolve_selected_date(requested_date=None):
         return available_dates[0], available_dates
     return today_str, available_dates
 
+def build_character_entries(characters_str):
+    entries = []
+    for raw_tag in characters_str.split():
+        tag = raw_tag.strip()
+        if not tag:
+            continue
+        entries.append(translator.describe(tag))
+    return entries
+
 def build_local_image_library(selected_date=None):
     library = []
     resolved_date, _ = resolve_selected_date(selected_date)
@@ -104,11 +113,8 @@ def build_local_image_library(selected_date=None):
             tags_dict = item.get("tags") or {}
             characters_str = tags_dict.get("tag_string_character", "")
             
-            translated_chars = []
-            for c in characters_str.split():
-                c = c.strip()
-                if c:
-                    translated_chars.append(translator.translate(c))
+            character_entries = build_character_entries(characters_str)
+            translated_chars = [entry.get("name", "") for entry in character_entries if entry.get("name")]
 
             library.append({
                 "artist": item.get("artist") or "未知",
@@ -117,7 +123,8 @@ def build_local_image_library(selected_date=None):
                 "post_url": item.get("post_url") or "#",
                 "web_url": web_url,
                 "tags": tags_dict,
-                "characters": translated_chars
+                "characters": translated_chars,
+                "character_entries": character_entries
             })
 
     if current_day_dir.exists():
@@ -136,7 +143,8 @@ def build_local_image_library(selected_date=None):
                 "post_url": "#",
                 "web_url": f"/images/{current_day_dir.name}/{image_path.name}",
                 "tags": {},
-                "characters": []
+                "characters": [],
+                "character_entries": []
             })
 
     return library
@@ -204,6 +212,12 @@ class OpenLocalRequest(BaseModel):
 
 class TranslationImportRequest(BaseModel):
     translations: dict
+
+class TranslationEntryUpdateRequest(BaseModel):
+    key: str
+    chinese_name: str = ""
+    source_hint: str = ""
+    source_hint_zh: str = ""
 
 # ==========================================
 # 3. 核心爬虫逻辑 (融入了打断检测)
@@ -645,6 +659,25 @@ def api_import_translation(req: TranslationImportRequest):
     try:
         translator.update_custom_dict(req.translations)
         return {"ok": True, "msg": "导入成功"}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+@app.get("/api/translation_entry/{tag}")
+def get_translation_entry(tag: str):
+    try:
+        return {"ok": True, "entry": translator.get_entry_for_edit(tag)}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+@app.post("/api/translation_entry")
+def set_translation_entry(req: TranslationEntryUpdateRequest):
+    try:
+        entry = translator.set_custom_entry(req.key, {
+            "chinese_name": req.chinese_name,
+            "source_hint": req.source_hint,
+            "source_hint_zh": req.source_hint_zh
+        })
+        return {"ok": True, "entry": entry}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
