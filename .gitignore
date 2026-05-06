@@ -3,3 +3,4 @@ __pycache__
 drawer
 exiftool
 desktop-app/node_modules
+desktop-app/dist/assets

@@ -100,6 +100,12 @@ function showToast(msg, type = 'info') {
 const loadingGallery = ref(false);
 let pollTimer = null;
 const logBodyRef = ref(null);
+const thumbUrlCache = new Map();
+let pendingGalleryReload = false;
+let lastGalleryReloadAt = 0;
+const GALLERY_RELOAD_COOLDOWN_MS = 4000;
+const IDLE_POLL_MS = 10000;
+const ACTIVE_POLL_MS = 2500;
 
 watch(() => task.value.logs.length, async () => {
   if (task.value.showLogs && logBodyRef.value) {
@@ -190,6 +196,20 @@ function getCharacterEntries(item) {
   return [];
 }
 
+function normalizeGalleryItem(item) {
+  const characterEntries = getCharacterEntries(item);
+  return {
+    ...item,
+    thumbUrl: item.thumbUrl || '',
+    artistTokens: splitTags(item.artist),
+    characterEntries,
+    characterTokens: characterEntries.length
+      ? characterEntries.map(entry => entry?.name).filter(Boolean)
+      : (Array.isArray(item.characters) ? item.characters : splitTags(item.characters)),
+    searchIndex: buildSearchIndex(item, characterEntries)
+  };
+}
+
 function mergeBackendLogs(lines) {
   const normalized = (lines || []).filter(Boolean);
   if (!normalized.length) return;
@@ -223,36 +243,55 @@ async function hydrateThumbs(items) {
     }
 
     if (!item.localPath) return;
-    item.thumbUrl = await window.desktopAPI.file.readDataUrl(item.localPath);
+    if (thumbUrlCache.has(item.localPath)) {
+      item.thumbUrl = thumbUrlCache.get(item.localPath);
+      return;
+    }
+    const dataUrl = await window.desktopAPI.file.readDataUrl(item.localPath);
+    if (!dataUrl) return;
+    thumbUrlCache.set(item.localPath, dataUrl);
+    item.thumbUrl = dataUrl;
   }));
 }
 
 async function loadGallery(date) {
+  if (loadingGallery.value) return;
   loadingGallery.value = true;
   try {
     const data = await window.desktopAPI.gallery.getByDate(date || gallery.value.selectedDate);
-    const normalizedImages = data.images.map(item => {
-      const characterEntries = getCharacterEntries(item);
-      return {
-        ...item,
-        thumbUrl: '',
-        artistTokens: splitTags(item.artist),
-        characterEntries,
-        characterTokens: characterEntries.length
-          ? characterEntries.map(entry => entry?.name).filter(Boolean)
-          : (Array.isArray(item.characters) ? item.characters : splitTags(item.characters)),
-        searchIndex: buildSearchIndex(item, characterEntries)
-      };
-    });
+    const normalizedImages = data.images.map(normalizeGalleryItem);
     gallery.value.selectedDate = data.selectedDate;
     gallery.value.availableDates = data.availableDates;
     gallery.value.today = data.today;
     gallery.value.images = normalizedImages;
     gallery.value.page = 1;
+    lastGalleryReloadAt = Date.now();
     await hydrateThumbs(pagedLocalImages.value);
   } finally {
     loadingGallery.value = false;
   }
+}
+
+async function requestGalleryReload(date) {
+  const now = Date.now();
+  if (loadingGallery.value || now - lastGalleryReloadAt < GALLERY_RELOAD_COOLDOWN_MS) {
+    pendingGalleryReload = true;
+    return;
+  }
+  pendingGalleryReload = false;
+  await loadGallery(date);
+}
+
+function getPollDelay() {
+  return task.value.isRunning ? ACTIVE_POLL_MS : IDLE_POLL_MS;
+}
+
+function scheduleNextStatusPoll(delay = getPollDelay()) {
+  if (pollTimer) window.clearTimeout(pollTimer);
+  pollTimer = window.setTimeout(async () => {
+    await syncStatus();
+    scheduleNextStatusPoll();
+  }, delay);
 }
 
 async function syncStatus() {
@@ -269,7 +308,7 @@ async function syncStatus() {
 
     if (status.new_images?.length) {
       if (gallery.value.selectedDate === gallery.value.today) {
-        await loadGallery(gallery.value.today);
+        await requestGalleryReload(gallery.value.today);
       }
     }
 
@@ -280,6 +319,9 @@ async function syncStatus() {
         showToast("抓取任务已完成！", "success");
       }
       await loadGallery(gallery.value.selectedDate);
+    }
+    if (pendingGalleryReload && !loadingGallery.value && Date.now() - lastGalleryReloadAt >= GALLERY_RELOAD_COOLDOWN_MS) {
+      await requestGalleryReload(gallery.value.selectedDate);
     }
   } catch (error) {
     task.value.backendError = error.message;
@@ -520,7 +562,14 @@ async function openViewer(item) {
   }
   
   if (item?.localPath) {
-    viewer.value.imageUrl = await window.desktopAPI.file.readDataUrl(item.localPath);
+    if (thumbUrlCache.has(item.localPath)) {
+      viewer.value.imageUrl = thumbUrlCache.get(item.localPath);
+    } else {
+      const dataUrl = await window.desktopAPI.file.readDataUrl(item.localPath);
+      if (!dataUrl) return;
+      thumbUrlCache.set(item.localPath, dataUrl);
+      viewer.value.imageUrl = dataUrl;
+    }
   }
 }
 
@@ -536,7 +585,14 @@ async function syncViewerImage() {
   }
 
   if (!viewerItem.value.localPath) return;
-  viewer.value.imageUrl = await window.desktopAPI.file.readDataUrl(viewerItem.value.localPath);
+  if (thumbUrlCache.has(viewerItem.value.localPath)) {
+    viewer.value.imageUrl = thumbUrlCache.get(viewerItem.value.localPath);
+  } else {
+    const dataUrl = await window.desktopAPI.file.readDataUrl(viewerItem.value.localPath);
+    if (!dataUrl) return;
+    thumbUrlCache.set(viewerItem.value.localPath, dataUrl);
+    viewer.value.imageUrl = dataUrl;
+  }
 }
 
 function closeViewer() {
@@ -608,17 +664,15 @@ onMounted(async () => {
   await ensureService();
   await loadGallery();
   await syncStatus();
-  pollTimer = window.setInterval(syncStatus, 1200);
+  scheduleNextStatusPoll();
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('click', closeTagContextMenu);
-  window.addEventListener('scroll', closeTagContextMenu, true);
 });
 
 onBeforeUnmount(() => {
-  if (pollTimer) window.clearInterval(pollTimer);
+  if (pollTimer) window.clearTimeout(pollTimer);
   window.removeEventListener('keydown', onKeyDown);
   window.removeEventListener('click', closeTagContextMenu);
-  window.removeEventListener('scroll', closeTagContextMenu, true);
 });
 
 const modeDescription = computed(() => {
@@ -714,7 +768,7 @@ const modeDescription = computed(() => {
           </div>
         </div>
         <transition name="log-expand">
-          <div class="modern-log-body" v-show="task.showLogs" ref="logBodyRef">
+          <div v-if="task.showLogs" class="modern-log-body" ref="logBodyRef">
             <div class="modern-log-line" v-for="(log, i) in task.logs" :key="i" :class="getLogType(log)">
               <span class="log-icon">{{ getLogIcon(log) }}</span>
               <span class="log-text">{{ log }}</span>
@@ -759,7 +813,7 @@ const modeDescription = computed(() => {
       <div v-else-if="!activeItems.length" class="gallery-empty">当前日期没有图片</div>
       <div v-else class="gallery-grid">
         <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card">
-          <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" @click="openViewer(item)" />
+          <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @click="openViewer(item)" />
           <div class="card-meta">
             <div class="token-row">
               <button
