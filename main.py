@@ -108,7 +108,16 @@ def build_local_image_library(selected_date=None):
             for c in characters_str.split():
                 c = c.strip()
                 if c:
-                    translated_chars.append(translator.translate(c))
+                    info = translator.get_tag_info(c)
+                    chinese_name = info.get("chinese_name") or translator._format_tag(c)
+                    hint = info.get("source_hint", "")
+                    alias = translator.get_source_hint_alias(hint) if hint else ""
+                    
+                    # 组合成一个包含搜索元数据的字符串，前端显示时会截取
+                    meta = chinese_name
+                    if hint: meta += f" [{hint}]"
+                    if alias: meta += f" [{alias}]"
+                    translated_chars.append(meta)
 
             library.append({
                 "artist": item.get("artist") or "未知",

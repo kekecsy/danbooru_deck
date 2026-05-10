@@ -32,12 +32,20 @@ function loadLocalCustomDict() {
 }
 
 function translateTags(tagString) {
-  if (!tagString) return '';
+  if (!tagString) return [];
   const dict = loadLocalCustomDict();
+  const aliases = dict["__source_hint_aliases__"] || {};
   return tagString.split(' ').map(tag => {
     const entry = dict[tag];
-    return (entry && entry.has_chinese && entry.chinese_name) ? entry.chinese_name : tag;
-  }).join(' ');
+    const chinese_name = (entry && entry.has_chinese && entry.chinese_name) ? entry.chinese_name : tag;
+    const hint = (entry && entry.source_hint) ? entry.source_hint : '';
+    const alias = (hint && aliases[hint]) ? aliases[hint] : '';
+    
+    let meta = chinese_name;
+    if (hint) meta += ` [${hint}]`;
+    if (alias) meta += ` [${alias}]`;
+    return meta;
+  });
 }
 
 function createWindow() {

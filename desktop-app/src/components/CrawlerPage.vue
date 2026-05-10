@@ -705,7 +705,7 @@ const modeDescription = computed(() => {
                 class="meta-link token-chip"
                 @click="applySearch(token)"
               >
-                {{ token }}
+                {{ token.includes(' [') ? token.split(' [')[0] : token }}
               </button>
               <span v-if="!item.characterTokens?.length" class="muted compact-text">无角色标签</span>
             </div>
