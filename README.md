@@ -46,16 +46,15 @@ pip install -r requirements.txt
 ```
 
 ### 3. 指定 Python 解释器
-为了确保桌面端能够自动拉起后台服务，你需要在项目根目录下创建（或修改）`env_config.json` 文件：
-
+为了确保桌面端能够自动拉起后台服务，你需要在项目根目录下创建`env_config.json` 文件，例如：
 ```json
 {
-  "python_path": "C:\\你的Python安装路径\\python.exe"
+    "python_path": "D:\\Anaconda3\\envs\\pic_web\\python.exe"
 }
 ```
-*提示：如果你使用 Conda，可以通过 `where python` 命令查看当前环境的解释器路径。*
+*提示：使用 Conda，可以通过 `where python` 命令查看当前环境的解释器路径，一般时给出路径的第一个，注意Windows下的两个斜杆。*
 
-### 4. 前端开发环境 (可选)
+### 4. 前端开发环境
 如果你需要自行编译或修改前端代码：
 1.  安装 [Node.js](https://nodejs.org/) (推荐 18+)。
 2.  进入前端目录安装依赖：
@@ -64,8 +63,8 @@ pip install -r requirements.txt
     npm install
     ```
 
-### 5. 核心外部组件
-*   **FFMPEG (必备)**：转换动图功能强依赖 FFMPEG。
+### 5. 外部组件
+*   **FFMPEG**：转换动图功能强依赖 FFMPEG。
     *   请从 [FFMPEG 官网](https://ffmpeg.org/download.html) 下载。
     *   将 `ffmpeg.exe` 所在的 `bin` 文件夹路径添加到系统的 **环境变量 Path** 中。
     *   验证：在终端输入 `ffmpeg -version` 应当有正常输出。
@@ -73,16 +72,20 @@ pip install -r requirements.txt
 ## 运行与使用
 
 ### 快速启动
-直接运行 `desktop-app` 编译后的程序，或在开发环境下启动：
-1.  **启动后端**（桌面端通常会自动尝试拉起，如需手动启动排查）：
-    ```bash
-    python main.py
-    ```
-2.  **启动桌面端**：
-    ```bash
-    cd desktop-app
-    npm run dev
-    ```
+
+#### 方式1：直接运行 `desktop-app` 编译后的程序，**启动桌面端**：
+先进入到 `desktop-app` 目录：
+```bash
+cd desktop-app
+```
+第一次运行时，需要先编译前端代码：
+```bash
+npm run build
+```
+编译完成后，运行以下命令启动桌面应用：
+```bash
+npm run dev
+```
 
 ## 项目结构
 
