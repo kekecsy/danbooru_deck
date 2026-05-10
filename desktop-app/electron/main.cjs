@@ -18,6 +18,28 @@ let crawlerStartPromise = null;
 let crawlerStdout = [];
 let crawlerLastError = '';
 
+let localCustomDict = null;
+function loadLocalCustomDict() {
+  const dictPath = path.join(repoRoot, 'custom_translation.json');
+  if (!localCustomDict && fs.existsSync(dictPath)) {
+    try {
+      localCustomDict = JSON.parse(fs.readFileSync(dictPath, 'utf-8'));
+    } catch (e) {
+      localCustomDict = {};
+    }
+  }
+  return localCustomDict || {};
+}
+
+function translateTags(tagString) {
+  if (!tagString) return '';
+  const dict = loadLocalCustomDict();
+  return tagString.split(' ').map(tag => {
+    const entry = dict[tag];
+    return (entry && entry.has_chinese && entry.chinese_name) ? entry.chinese_name : tag;
+  }).join(' ');
+}
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 1540,
@@ -129,24 +151,30 @@ async function buildGalleryByDate(requestedDate) {
       filename,
       localPath: toAbsolutePath(item.local_path || path.join(dateDir, filename)),
       postUrl: item.post_url || '',
-      characters: item.tags?.tag_string_character || '',
+      characters: translateTags(item.tags?.tag_string_character || ''),
       tags: item.tags || {}
     });
   }
 
   if (fs.existsSync(dateDir)) {
     const extraFiles = fs.readdirSync(dateDir)
-      .filter(name => /\.(jpg|jpeg|png|gif|webp|bmp|avif)$/i.test(name))
+      .filter(name => /\.(jpg|jpeg|png|gif|webp|bmp|avif|zip|mp4|webm)$/i.test(name))
       .sort((a, b) => b.localeCompare(a));
 
     for (const filename of extraFiles) {
       if (knownFiles.has(filename)) continue;
+
+      // Skip GIF if corresponding ZIP exists (converted animations)
+      if (filename.toLowerCase().endsWith('.gif')) {
+        const zipName = filename.slice(0, -4) + '.zip';
+        if (fs.existsSync(path.join(dateDir, zipName))) continue;
+      }
       images.push({
         artist: '未知',
         filename,
         localPath: toAbsolutePath(path.join(dateDir, filename)),
         postUrl: '',
-        characters: '',
+        characters: translateTags(''),
         tags: {}
       });
     }
@@ -367,6 +395,11 @@ ipcMain.handle('file:to-file-url', async (_event, targetPath) => {
 ipcMain.handle('file:to-local-url', async (_event, targetPath) => {
   const resolvedPath = toAbsolutePath(targetPath);
   return resolvedPath ? `local://${encodeURIComponent(resolvedPath)}` : '';
+});
+
+ipcMain.handle('file:exists', async (_event, targetPath) => {
+  const resolvedPath = toAbsolutePath(targetPath);
+  return resolvedPath ? fs.existsSync(resolvedPath) : false;
 });
 
 ipcMain.handle('file:save-png', async (_event, payload) => {

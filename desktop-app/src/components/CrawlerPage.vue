@@ -44,6 +44,7 @@ const gallery = ref({
   today: '',
   images: [],
   search: '',
+  filterFormat: 'all',
   page: 1
 });
 
@@ -86,9 +87,18 @@ watch(() => task.value.logs.length, async () => {
 
 const filteredLocalImages = computed(() => {
   const keyword = gallery.value.search.trim().toLowerCase();
+  const format = gallery.value.filterFormat;
   const source = gallery.value.images;
-  if (!keyword) return source;
+  
   return source.filter(item => {
+    if (format !== 'all') {
+      const ext = (item.filename || '').split('.').pop().toLowerCase();
+      if (format === 'zip' && !['zip', 'gif'].includes(ext)) return false;
+      if (format === 'video' && !['mp4', 'webm', 'avi', 'mov', 'mkv'].includes(ext)) return false;
+      if (format === 'image' && !['jpg', 'jpeg', 'png', 'webp', 'bmp', 'avif'].includes(ext)) return false;
+    }
+
+    if (!keyword) return true;
     const artistMatch = (item.artist || '').toLowerCase().includes(keyword);
     let charMatch = false;
     if (Array.isArray(item.characters)) {
@@ -154,10 +164,35 @@ function mergeBackendLogs(lines) {
   task.value.backendTail = normalized.slice(-80);
 }
 
+function generateFormatPlaceholder(ext) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="300" viewBox="0 0 200 300">
+    <rect width="200" height="300" fill="#2c2e33"/>
+    <text x="100" y="150" font-family="sans-serif" font-size="36" font-weight="bold" fill="#6c707a" text-anchor="middle" dominant-baseline="middle">${ext.toUpperCase()}</text>
+  </svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
 async function hydrateThumbs(items) {
   await Promise.all(items.map(async item => {
     if (item.thumbUrl) return;
     
+    const ext = (item.filename || '').split('.').pop().toLowerCase();
+    
+    if (ext === 'zip' && item.localPath) {
+      const gifPath = item.localPath.replace(/\.zip$/i, '.gif');
+      if (await window.desktopAPI.file.exists(gifPath)) {
+        item.thumbUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+        return;
+      }
+    }
+
+    const isImage = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'avif'].includes(ext);
+
+    if (!isImage) {
+      item.thumbUrl = generateFormatPlaceholder(ext);
+      return;
+    }
+
     if (item.localPath) {
       item.thumbUrl = await window.desktopAPI.file.toLocalUrl(item.localPath);
       return;
@@ -171,8 +206,8 @@ async function hydrateThumbs(items) {
   }));
 }
 
-async function loadGallery(date) {
-  loadingGallery.value = true;
+async function loadGallery(date, silent = false) {
+  if (!silent) loadingGallery.value = true;
   try {
     const data = await window.desktopAPI.gallery.getByDate(date || gallery.value.selectedDate);
     const normalizedImages = data.images.map(item => ({
@@ -188,7 +223,7 @@ async function loadGallery(date) {
     gallery.value.page = 1;
     await hydrateThumbs(pagedLocalImages.value);
   } finally {
-    loadingGallery.value = false;
+    if (!silent) loadingGallery.value = false;
   }
 }
 
@@ -310,6 +345,30 @@ async function openOriginal(item) {
   await window.desktopAPI.external.open(item.postUrl);
 }
 
+async function convertGif(item) {
+  if (!item.localPath) {
+    showToast("找不到本地路径", "error");
+    return;
+  }
+  showToast("正在转换为 GIF...", "info");
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/convert_local_zip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ local_path: item.localPath })
+    });
+    const result = await res.json();
+    if (result.ok) {
+      showToast("转换成功，正在打开...", "success");
+      await window.desktopAPI.gallery.openLocalFile(result.gif_path);
+    } else {
+      showToast("转换失败: " + result.msg, "error");
+    }
+  } catch (err) {
+    showToast("请求失败: " + err.message, "error");
+  }
+}
+
 const hostsModal = ref({ open: false });
 
 function openHostsHint() {
@@ -372,6 +431,14 @@ async function openViewer(item) {
   viewer.value.imageUrl = '';
   
   if (item?.localPath) {
+    const ext = (item.filename || '').split('.').pop().toLowerCase();
+    if (ext === 'zip') {
+      const gifPath = item.localPath.replace(/\.zip$/i, '.gif');
+      if (await window.desktopAPI.file.exists(gifPath)) {
+        viewer.value.imageUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+        return;
+      }
+    }
     viewer.value.imageUrl = await window.desktopAPI.file.toLocalUrl(item.localPath);
     return;
   }
@@ -389,6 +456,14 @@ async function syncViewerImage() {
   if (!viewerItem.value) return;
 
   if (viewerItem.value.localPath) {
+    const ext = (viewerItem.value.filename || '').split('.').pop().toLowerCase();
+    if (ext === 'zip') {
+      const gifPath = viewerItem.value.localPath.replace(/\.zip$/i, '.gif');
+      if (await window.desktopAPI.file.exists(gifPath)) {
+        viewer.value.imageUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+        return;
+      }
+    }
     viewer.value.imageUrl = await window.desktopAPI.file.toLocalUrl(viewerItem.value.localPath);
     return;
   }
@@ -464,8 +539,8 @@ watch(pagedLocalImages, async items => {
 onMounted(async () => {
   await loadGallery();
   await ensureService();
-  // Reload gallery after Python backend is ready so we get the translated tags instead of disk fallback
-  await loadGallery(gallery.value.selectedDate);
+  // 静默加载：Python 后端就绪后在后台刷新翻译，不再显示“正在读取”遮罩，消除闪烁
+  await loadGallery(gallery.value.selectedDate, true);
   await syncStatus();
   pollTimer = window.setInterval(syncStatus, 1200);
   window.addEventListener('keydown', onKeyDown);
@@ -588,6 +663,12 @@ const modeDescription = computed(() => {
           </p>
         </div>
         <div class="gallery-tools">
+          <select v-model="gallery.filterFormat" class="search-input" style="width: auto;">
+            <option value="all">全部格式</option>
+            <option value="image">图片</option>
+            <option value="video">视频</option>
+            <option value="zip">动图ZIP</option>
+          </select>
           <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
           <button class="secondary" @click="importTranslationFile" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">导入翻译字典</button>
           <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
@@ -633,6 +714,7 @@ const modeDescription = computed(() => {
             <button class="secondary" @click="openOriginal(item)" :disabled="!item.postUrl">原帖</button>
             <button class="secondary" @click="openLocal(item)" :disabled="!item.localPath">打开本地</button>
             <button @click="editItem(item)">编辑打码</button>
+            <button v-if="item.filename?.toLowerCase().endsWith('.zip')" class="secondary" @click="convertGif(item)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
           </div>
         </article>
       </div>
@@ -653,6 +735,7 @@ const modeDescription = computed(() => {
         <div class="button-row compact viewer-actions">
           <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
           <button class="secondary" @click="stepViewer(1)" :disabled="viewer.index >= viewerItems.length - 1">下一张</button>
+          <button v-if="viewerItem?.filename?.toLowerCase().endsWith('.zip')" class="secondary" @click="convertGif(viewerItem)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
           <button @click="editItem(viewerItem)" style="background: linear-gradient(135deg, var(--accent), var(--accent-deep)); border: none; color: white;">编辑图片</button>
           <button class="ghost" @click="closeViewer" style="color: #fff; border: 1px solid rgba(255,255,255,0.2);">关闭</button>
         </div>

@@ -23,6 +23,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     selectImage: () => ipcRenderer.invoke('dialog:select-image')
   },
   file: {
+    exists: (targetPath) => ipcRenderer.invoke('file:exists', targetPath),
     readDataUrl: (targetPath) => ipcRenderer.invoke('file:read-data-url', targetPath),
     toFileUrl: (targetPath) => ipcRenderer.invoke('file:to-file-url', targetPath),
     toLocalUrl: (targetPath) => ipcRenderer.invoke('file:to-local-url', targetPath),

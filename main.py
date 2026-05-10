@@ -80,15 +80,6 @@ def resolve_selected_date(requested_date=None):
         return available_dates[0], available_dates
     return today_str, available_dates
 
-def build_character_entries(characters_str):
-    entries = []
-    for raw_tag in characters_str.split():
-        tag = raw_tag.strip()
-        if not tag:
-            continue
-        entries.append(translator.describe(tag))
-    return entries
-
 def build_local_image_library(selected_date=None):
     library = []
     resolved_date, _ = resolve_selected_date(selected_date)
@@ -113,8 +104,11 @@ def build_local_image_library(selected_date=None):
             tags_dict = item.get("tags") or {}
             characters_str = tags_dict.get("tag_string_character", "")
             
-            character_entries = build_character_entries(characters_str)
-            translated_chars = [entry.get("name", "") for entry in character_entries if entry.get("name")]
+            translated_chars = []
+            for c in characters_str.split():
+                c = c.strip()
+                if c:
+                    translated_chars.append(translator.translate(c))
 
             library.append({
                 "artist": item.get("artist") or "未知",
@@ -123,15 +117,18 @@ def build_local_image_library(selected_date=None):
                 "post_url": item.get("post_url") or "#",
                 "web_url": web_url,
                 "tags": tags_dict,
-                "characters": translated_chars,
-                "character_entries": character_entries
+                "characters": translated_chars
             })
 
     if current_day_dir.exists():
         for image_path in sorted(current_day_dir.iterdir(), key=lambda p: p.name, reverse=True):
             if not image_path.is_file():
                 continue
-            if image_path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+            suffix = image_path.suffix.lower()
+            if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+                continue
+            # 跳过已有对应 zip 的 gif（属于已转换的动画），避免重复显示
+            if suffix == ".gif" and image_path.with_suffix(".zip").exists():
                 continue
             local_key = f"{current_day_dir.name}/{image_path.name}"
             if local_key in known_paths:
@@ -143,8 +140,7 @@ def build_local_image_library(selected_date=None):
                 "post_url": "#",
                 "web_url": f"/images/{current_day_dir.name}/{image_path.name}",
                 "tags": {},
-                "characters": [],
-                "character_entries": []
+                "characters": []
             })
 
     return library
@@ -213,19 +209,16 @@ class OpenLocalRequest(BaseModel):
 class TranslationImportRequest(BaseModel):
     translations: dict
 
-class TranslationEntryUpdateRequest(BaseModel):
-    key: str
-    chinese_name: str = ""
-    source_hint: str = ""
-    source_hint_zh: str = ""
+class ConvertLocalZipRequest(BaseModel):
+    local_path: str
 
 # ==========================================
 # 3. 核心爬虫逻辑 (融入了打断检测)
 # ==========================================
-def _ensure_today(db_data_inst):
-    """如果跨天，更新全局变量"""
+def _ensure_today(db_data_inst, target_date=None):
+    """如果跨天或指定了目标日期，更新全局变量"""
     global daily_viewer_data, today_str, save_dir, runtime_snapshot_path
-    current_day = datetime.datetime.now().strftime('%Y-%m-%d')
+    current_day = target_date if target_date else datetime.datetime.now().strftime('%Y-%m-%d')
     if db_data_inst.today_str != current_day:
         db_data_inst.__init__(current_day)
         daily_viewer_data = db_data_inst.load_viewer_data()
@@ -344,9 +337,9 @@ def grabber_rank(db_data_inst, page_num, filter_tags):
 # --- mode: popular (按日期热门) ---
 def grabber_popular(db_data_inst, page_num, filter_tags, target_date):
     global daily_viewer_data
+    _ensure_today(db_data_inst, target_date)
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
-    daily_viewer_data = db_data_inst.load_viewer_data()
 
     state.play_event.wait()
     if not state.is_running:
@@ -662,22 +655,19 @@ def api_import_translation(req: TranslationImportRequest):
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
-@app.get("/api/translation_entry/{tag}")
-def get_translation_entry(tag: str):
+@app.post("/api/convert_local_zip")
+def api_convert_local_zip(req: ConvertLocalZipRequest):
     try:
-        return {"ok": True, "entry": translator.get_entry_for_edit(tag)}
-    except Exception as e:
-        return {"ok": False, "msg": str(e)}
-
-@app.post("/api/translation_entry")
-def set_translation_entry(req: TranslationEntryUpdateRequest):
-    try:
-        entry = translator.set_custom_entry(req.key, {
-            "chinese_name": req.chinese_name,
-            "source_hint": req.source_hint,
-            "source_hint_zh": req.source_hint_zh
-        })
-        return {"ok": True, "entry": entry}
+        from pic_web.main import convert_zip_to_gif
+        target_path = Path(req.local_path).resolve()
+        if not target_path.exists() or target_path.suffix.lower() != '.zip':
+            return {"ok": False, "msg": "无效的 ZIP 文件路径"}
+        
+        output_path = target_path.with_suffix('.gif')
+        if not output_path.exists():
+            convert_zip_to_gif(target_path, output_path)
+            
+        return {"ok": True, "gif_path": str(output_path)}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
