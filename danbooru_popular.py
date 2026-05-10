@@ -7,7 +7,7 @@ import danbooru_api
 from danbooru_data import DanbooruData
 
 # 如果需要固定日期，修改这个变量
-TODAY_STR = "2026-04-23"
+TODAY_STR = "2026-05-09"
 
 
 def get_frequency_level(count):

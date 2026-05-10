@@ -29,7 +29,7 @@ const editor = reactive({
   fillMode: 'mosaic',
   opacity: 1,
   stripeText: '该信息已被管理员撤回',
-  stripeFontFamily: 'Times New Roman',
+  stripeFontFamily: 'Microsoft YaHei',
   stripeFontSize: 26,
   stripeOrientation: 'horizontal',
   imageDataUrl: null,
@@ -91,12 +91,12 @@ function pointInRect(px, py, rect) {
   return px >= rect.x && px <= rect.x + rect.width && py >= rect.y && py <= rect.y + rect.height;
 }
 
-function handles(layer) {
+function handles(layer, customSize = 12) {
   const x = layer.x * editor.zoom;
   const y = layer.y * editor.zoom;
   const w = layer.width * editor.zoom;
   const h = layer.height * editor.zoom;
-  const s = 10;
+  const s = customSize;
   return {
     nw: { x: x - s / 2, y: y - s / 2, s },
     ne: { x: x + w - s / 2, y: y - s / 2, s },
@@ -105,8 +105,8 @@ function handles(layer) {
   };
 }
 
-function findHandle(point, layer) {
-  const map = handles(layer);
+function findHandle(point, layer, hitSize = 30) {
+  const map = handles(layer, hitSize);
   for (const [name, handle] of Object.entries(map)) {
     if (point.x >= handle.x && point.x <= handle.x + handle.s && point.y >= handle.y && point.y <= handle.y + handle.s) {
       return name;
@@ -193,30 +193,32 @@ function drawStripe(ctx, layer, scale) {
   ctx.save();
   ctx.globalAlpha = layer.opacity;
   
-  ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
-  ctx.beginPath();
-  if (ctx.roundRect) {
-    ctx.roundRect(x, y, w, h, Math.min(12 * scale, w / 2, h / 2));
-  } else {
-    ctx.rect(x, y, w, h);
-  }
-  ctx.fill();
+  // Removed background box for watermark style
 
-  ctx.fillStyle = '#ffffff';
-  ctx.font = `700 ${Math.max(10, layer.stripeFontSize * scale)}px "${layer.stripeFontFamily}"`;
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+  ctx.font = `900 ${Math.max(12, layer.stripeFontSize * scale)}px "${layer.stripeFontFamily}"`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.8)';
+  
+  ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
   ctx.shadowBlur = 4 * scale;
-  ctx.shadowOffsetX = 1 * scale;
-  ctx.shadowOffsetY = 1 * scale;
+  ctx.shadowOffsetX = 2 * scale;
+  ctx.shadowOffsetY = 2 * scale;
+
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
+  ctx.lineWidth = Math.max(1, 3 * scale);
+  ctx.lineJoin = 'round';
 
   if (layer.stripeOrientation === 'vertical') {
     const chars = Array.from(layer.stripeText || '');
     const line = layer.stripeFontSize * scale * 1.1;
     const start = y + h / 2 - (chars.length * line) / 2 + line / 2;
-    chars.forEach((char, index) => ctx.fillText(char, x + w / 2, start + index * line));
+    chars.forEach((char, index) => {
+      ctx.strokeText(char, x + w / 2, start + index * line);
+      ctx.fillText(char, x + w / 2, start + index * line);
+    });
   } else {
+    ctx.strokeText(layer.stripeText || '', x + w / 2, y + h / 2);
     ctx.fillText(layer.stripeText || '', x + w / 2, y + h / 2);
   }
   ctx.restore();
@@ -406,7 +408,7 @@ async function loadImageFromDataUrl(dataUrl, meta = {}) {
 }
 
 async function loadImageFromPath(filePath, meta = {}) {
-  const dataUrl = await window.desktopAPI.file.readDataUrl(filePath);
+  const dataUrl = await window.desktopAPI.file.toLocalUrl(filePath);
   await loadImageFromDataUrl(dataUrl, {
     ...meta,
     filename: meta.filename || filePath.split(/[\\/]/).pop() || 'image.png'
@@ -430,7 +432,7 @@ async function loadDroppedFile(file) {
 async function chooseOverlay() {
   const filePath = await window.desktopAPI.dialog.selectImage();
   if (!filePath) return;
-  editor.imageDataUrl = await window.desktopAPI.file.readDataUrl(filePath);
+  editor.imageDataUrl = await window.desktopAPI.file.toLocalUrl(filePath);
   editor.imageOverlayName = filePath.split(/[\\/]/).pop() || '';
   editor.fillMode = 'image';
   const layer = selectedLayer();
@@ -442,12 +444,12 @@ async function loadPresets() {
   const items = await window.desktopAPI.preset.list();
   presets.value = await Promise.all(items.map(async item => ({
     ...item,
-    thumbUrl: await window.desktopAPI.file.readDataUrl(item.path)
+    thumbUrl: await window.desktopAPI.file.toLocalUrl(item.path)
   })));
 }
 
 async function usePreset(item) {
-  editor.imageDataUrl = await window.desktopAPI.file.readDataUrl(item.path);
+  editor.imageDataUrl = await window.desktopAPI.file.toLocalUrl(item.path);
   editor.imageOverlayName = item.name;
   editor.fillMode = 'image';
   const layer = selectedLayer();
@@ -531,11 +533,25 @@ function useCharactersText() {
 function onMouseDown(event) {
   if (!editor.image) return;
   const point = canvasPoint(event);
+  
+  // 1. Check if user clicked a handle of the currently selected layer
+  const active = selectedLayer();
+  if (active) {
+    const handle = findHandle(point, active);
+    if (handle) {
+      editor.handle = handle;
+      editor.mode = 'resize';
+      editor.start = imagePoint(point);
+      return;
+    }
+  }
+
+  // 2. Check if user clicked inside ANY layer
   const hit = topLayerAt(point);
   if (hit) {
     if (editor.selectedId !== hit.id) selectLayer(hit.id);
-    editor.handle = findHandle(point, hit);
-    editor.mode = editor.handle ? 'resize' : 'move';
+    editor.handle = null;
+    editor.mode = 'move';
     editor.start = imagePoint(point);
     return;
   }
@@ -732,7 +748,7 @@ onBeforeUnmount(() => {
         <span>打码方式</span>
         <select v-model="editor.fillMode">
           <option value="mosaic">默认马赛克</option>
-          <option value="stripe">透明背景文字</option>
+          <option value="stripe">文本水印 (无背景)</option>
           <option value="image">贴图填充</option>
           <option value="reveal">显示遮罩</option>
         </select>

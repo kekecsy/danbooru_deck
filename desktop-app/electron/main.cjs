@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, nativeImage, protocol, net } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
@@ -7,7 +7,6 @@ const { spawn } = require('node:child_process');
 const isDev = !app.isPackaged;
 const repoRoot = path.resolve(__dirname, '..', '..');
 const hotPicDir = path.join(repoRoot, 'hot_pic');
-const customTranslationPath = path.join(repoRoot, 'custom_translation.json');
 const presetDirs = [
   path.join(repoRoot, 'pic_web', 'present'),
   path.join(repoRoot, 'mosaic_qt', 'present')
@@ -18,7 +17,6 @@ let crawlerProcess = null;
 let crawlerStartPromise = null;
 let crawlerStdout = [];
 let crawlerLastError = '';
-let lastTranslationSyncMtimeMs = null;
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -56,89 +54,6 @@ function safeReadJson(filePath, fallback) {
   } catch {
     return fallback;
   }
-}
-
-function getTagVariants(tag) {
-  const variants = [tag];
-  const parenSegments = tag.match(/_\([^)]*\)/g) || [];
-
-  if (parenSegments.length >= 2) {
-    const baseName = tag.slice(0, tag.indexOf(parenSegments[0]));
-    const combo = baseName + parenSegments[parenSegments.length - 1];
-    if (combo !== tag && !variants.includes(combo)) variants.push(combo);
-  }
-
-  if (parenSegments.length >= 1) {
-    const baseName = tag.slice(0, tag.indexOf(parenSegments[0]));
-    const lastCombo = baseName + parenSegments[parenSegments.length - 1];
-    if (lastCombo !== tag && !variants.includes(lastCombo)) variants.push(lastCombo);
-  }
-
-  const base = tag.replace(/_\([^)]*\)/g, '').replace(/^_+|_+$/g, '');
-  if (base && base !== tag && !variants.includes(base)) variants.push(base);
-
-  return variants;
-}
-
-function formatTag(tag) {
-  const base = tag.replace(/_\([^)]*\)/g, '').replace(/^_+|_+$/g, '') || tag;
-  return base.replace(/_/g, ' ').replace(/\b\w/g, char => char.toUpperCase());
-}
-
-function translateTag(tag, translationDict) {
-  const normalizedTag = String(tag || '').trim();
-  if (!normalizedTag) return '';
-
-  for (const variant of getTagVariants(normalizedTag)) {
-    const entry = translationDict[variant];
-    if (typeof entry === 'string' && entry) return entry;
-    if (entry?.has_chinese && entry?.chinese_name) return entry.chinese_name;
-  }
-
-  return formatTag(normalizedTag);
-}
-
-function translateCharacterTags(rawCharacters, translationDict) {
-  return String(rawCharacters || '')
-    .split(/\s+/)
-    .map(tag => translateTag(tag, translationDict))
-    .filter(Boolean)
-    .join(' ');
-}
-
-function describeTag(tag, translationDict) {
-  const normalizedTag = String(tag || '').trim();
-  if (!normalizedTag) return { key: '', matched_key: '', name: '', source_hint: '', source_hint_zh: '' };
-
-  for (const variant of getTagVariants(normalizedTag)) {
-    const entry = translationDict[variant];
-    if (!entry) continue;
-    if (typeof entry === 'string') {
-      return { key: normalizedTag, matched_key: variant, name: entry, source_hint: '', source_hint_zh: '' };
-    }
-    return {
-      key: normalizedTag,
-      matched_key: variant,
-      name: entry?.has_chinese && entry?.chinese_name ? entry.chinese_name : formatTag(normalizedTag),
-      source_hint: entry?.source_hint || entry?.hint_source || '',
-      source_hint_zh: entry?.source_hint_zh || entry?.hint_source_zh || ''
-    };
-  }
-
-  return {
-    key: normalizedTag,
-    matched_key: normalizedTag,
-    name: formatTag(normalizedTag),
-    source_hint: '',
-    source_hint_zh: ''
-  };
-}
-
-function buildCharacterEntries(rawCharacters, translationDict) {
-  return String(rawCharacters || '')
-    .split(/\s+/)
-    .map(tag => describeTag(tag, translationDict))
-    .filter(entry => entry.name);
 }
 
 function toAbsolutePath(targetPath) {
@@ -184,7 +99,6 @@ async function buildGalleryByDate(requestedDate) {
         localPath: toAbsolutePath(item.local_path || path.join(hotPicDir, data.selected_date, item.filename)),
         postUrl: item.post_url || '',
         characters: item.characters || '',
-        character_entries: item.character_entries || [],
         tags: item.tags || {}
       }));
       return {
@@ -198,27 +112,24 @@ async function buildGalleryByDate(requestedDate) {
     // Backend unavailable — fall back to local file reading
   }
 
-  // Fallback: read directly from disk and apply the saved custom translation file.
+  // Fallback: read directly from disk (no translation)
   const { selectedDate, availableDates, today } = resolveDate(requestedDate);
   const dateDir = path.join(hotPicDir, selectedDate);
   const viewerPath = path.join(dateDir, 'viewer_data.json');
   const knownFiles = new Set();
   const images = [];
   const viewerData = safeReadJson(viewerPath, []);
-  const translationDict = safeReadJson(customTranslationPath, {});
 
   for (const item of [...viewerData].reverse()) {
     const filename = item.filename;
     if (!filename) continue;
     knownFiles.add(filename);
-    const characterEntries = buildCharacterEntries(item.tags?.tag_string_character, translationDict);
     images.push({
       artist: item.artist || '未知',
       filename,
       localPath: toAbsolutePath(item.local_path || path.join(dateDir, filename)),
       postUrl: item.post_url || '',
-      characters: translateCharacterTags(item.tags?.tag_string_character, translationDict),
-      character_entries: characterEntries,
+      characters: item.tags?.tag_string_character || '',
       tags: item.tags || {}
     });
   }
@@ -236,7 +147,6 @@ async function buildGalleryByDate(requestedDate) {
         localPath: toAbsolutePath(path.join(dateDir, filename)),
         postUrl: '',
         characters: '',
-        character_entries: [],
         tags: {}
       });
     }
@@ -328,35 +238,6 @@ async function apiFetchJson(endpoint, options = {}) {
   return response.json();
 }
 
-async function syncCustomTranslationDict(force = false) {
-  if (!fs.existsSync(customTranslationPath)) {
-    lastTranslationSyncMtimeMs = null;
-    return { ok: false, skipped: true, reason: 'missing' };
-  }
-
-  const stat = fs.statSync(customTranslationPath);
-  if (!force && lastTranslationSyncMtimeMs === stat.mtimeMs) {
-    return { ok: true, skipped: true };
-  }
-
-  const translations = safeReadJson(customTranslationPath, null);
-  if (!translations || typeof translations !== 'object' || Array.isArray(translations)) {
-    return { ok: false, skipped: true, reason: 'invalid' };
-  }
-
-  const result = await apiFetchJson('/api/import_translation', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ translations })
-  });
-
-  if (result?.ok) {
-    lastTranslationSyncMtimeMs = stat.mtimeMs;
-  }
-
-  return result;
-}
-
 async function waitForCrawlerReady(retries = 40) {
   for (let i = 0; i < retries; i += 1) {
     try {
@@ -372,11 +253,6 @@ async function waitForCrawlerReady(retries = 40) {
 async function ensureCrawlerService() {
   try {
     await apiFetchJson('/api/status');
-    try {
-      await syncCustomTranslationDict();
-    } catch (error) {
-      crawlerLastError = `翻译字典同步失败: ${error.message}`;
-    }
     return { ok: true, alreadyRunning: true };
   } catch {
     // continue
@@ -384,7 +260,6 @@ async function ensureCrawlerService() {
 
   if (crawlerStartPromise) {
     await crawlerStartPromise;
-    await syncCustomTranslationDict();
     return { ok: true, alreadyRunning: false };
   }
 
@@ -433,7 +308,6 @@ async function ensureCrawlerService() {
 
   try {
     await crawlerStartPromise;
-    await syncCustomTranslationDict(true);
     return { ok: true, alreadyRunning: false };
   } finally {
     crawlerStartPromise = null;
@@ -488,6 +362,11 @@ ipcMain.handle('file:read-data-url', async (_event, targetPath) => {
 ipcMain.handle('file:to-file-url', async (_event, targetPath) => {
   const resolvedPath = toAbsolutePath(targetPath);
   return resolvedPath ? pathToFileURL(resolvedPath).toString() : '';
+});
+
+ipcMain.handle('file:to-local-url', async (_event, targetPath) => {
+  const resolvedPath = toAbsolutePath(targetPath);
+  return resolvedPath ? `local://${encodeURIComponent(resolvedPath)}` : '';
 });
 
 ipcMain.handle('file:save-png', async (_event, payload) => {
@@ -554,6 +433,14 @@ ipcMain.handle('crawler:status', async () => {
 });
 
 app.whenReady().then(() => {
+  protocol.handle('local', (request) => {
+    const url = request.url.replace(/^local:\/\//, '');
+    const filePath = decodeURIComponent(url);
+    if (!isWithin(hotPicDir, filePath)) {
+      return new Response('Access denied', { status: 403 });
+    }
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
