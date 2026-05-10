@@ -73,7 +73,7 @@ pip install -r requirements.txt
 
 ### 快速启动
 
-#### 方式1：直接运行 `desktop-app` 编译后的程序，**启动桌面端**：
+#### 直接运行 `desktop-app` 编译后的程序，**启动桌面端**：
 先进入到 `desktop-app` 目录：
 ```bash
 cd desktop-app
@@ -85,6 +85,14 @@ npm run build
 编译完成后，运行以下命令启动桌面应用：
 ```bash
 npm run dev
+```
+
+然后你可以创建一个.bat文件用文本编辑器输入下面的内容，这样就可以直接在桌面启动了
+```batch
+@echo off
+cd /d "你的项目目录\desktop-app"
+npm run dev
+pause
 ```
 
 ## 项目结构
