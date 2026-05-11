@@ -91,7 +91,7 @@
   },
   "sensei_(blue_archive)": {
     "has_chinese": true,
-    "chinese_name": "先生",
+    "chinese_name": "sensei",
     "source_hint": "blue archive",
     "translated_description_zh": "蓝色档案的玩家角色，是基沃托斯学园城市的一名老师，带领学生解决街道上发生的各种事件。性别不明，但在动画版《蓝色档案》中该角色被设定为男性。偶尔被画成类似涂鸦老师的男性涂鸦，出现在阿罗娜频道的某集及帖子#5944539。后来在《蓝色档案》动画中获得了正式形象。还有其他相关条目如问题解决者68商务日志中的老师等"
   },
@@ -180,8 +180,8 @@
     "translated_description_zh": "『地狱的交通事故』。是《东方Project》《地灵殿》中的第4关中BOSS、第5关中BOSS及BOSS、第6关中BOSS。也被称为『お燐』（Orin），以区别于仅有设定的早期角色『佐月凛』。她是负责将尸体运送到炎狱以调节其热度的火车（kasha）怪猫少女。得知[[Reiuji Utsuho]]获得新力量并企图征服地表，又怕主人[[Komeiji Satori]]的惩罚，她派遣恶灵地面警告能够对抗此威胁的战士。她显然是所谓『僵尸仙女』（Zombie Fairies）的主人。偶尔被描绘为尸体癖。她在《恶灵侦探萨托里》中似乎与[[Chen]]成为朋友，并将她寻找和收集尸体的才能传授给她。外观：她有猫耳和类人尖耳，红色双马尾戴黑色蝴蝶结，刘海较钝，有两条猫尾。身着绿色或黑色连衣裙，袖子为泡泡短袖或朱丽叶袖，几乎总是有褶边袖子，黑色腿带和黑色鞋子。常伴随漂浮的骷髅和火焰骷髅。她的猫形态为黑色双尾猫，尾尖有时带火焰"
   },
   "konpaku_youmu_(ghost)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "半灵",
     "source_hint": "touhou",
     "translated_description_zh": "来自《东方Project》的魂魄妖梦的灵魂一半。虽然英语圈粉丝常用“Myon”来称呼她的灵魂一半，但该称呼源自日本粉丝，原指魂魄妖梦本人。为保持一致性，已将Myon别名为此标签，以避免混淆"
   },
@@ -1914,8 +1914,8 @@
     "translated_description_zh": "《舰队Collection》中日本轻巡洋舰大淀的人设，由Fujikawa设计，Kawasumi Ayako配音。她有长黑发、发带、蓝绿色眼睛戴眼镜，胸部较小。在游戏中她既是任务菜单中的“任务娘”（Ninmu Musume），也是可玩舰船，升级版具备指挥设施可撤退受损舰船。她的服装包括白色衬衫、蓝色水手领、红色领巾、蓝色百褶裙带臀部通风口、黑色过膝袜和黑色舵式靴。作为NPC时她携带笔记本和羽毛笔；作为可玩角色时她装备15.5厘米三联炮手枪、右臂装有飞机弹射器、大腿挂有另一挺三联炮、背部装有大型水机库，身上和机库挂有多个防空炮，以及三根带雷达的桅杆。还有多种皮肤和活动立绘"
   },
   "watanabe_you": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "渡边曜",
     "source_hint": "love live! sunshine!!",
     "translated_description_zh": "Love Live! Sunshine!! 角色。宇治星高中活泼的学生，喜欢潜水和帆船，常被描绘为竞技泳装或其他泳装。喜欢敬礼并使用她的口号‘Yousoro!’。她是Aqours子团体CYaRon!的成员，与高海千歌和黑泽露比一起。她有短棕发或灰发和蓝色眼睛。是高海千歌的青梅竹马。由斋藤朱夏配音"
   },
@@ -1932,8 +1932,8 @@
     "translated_description_zh": "这是《东方Project》中的角色，首次登场于《东方辉针城》的最终Boss。她是具有净化一切力量的神灵，拥有长长的金色或橙色头发和红色眼睛，佩戴着新月形饰的达拉奇头饰和红色罩袍的中式服装，背后有由能量构成的多条狐狸尾巴。她代表着对月族的所有仇恨，尤其是对嫦娥（touhou）的仇恨，因为嫦娥的丈夫射下了太阳并杀死了她的儿子博峰。她与赫卡蒂亚·拉pis拉ズ利是朋友，后者同样对嫦娥怀有怨恨。与其他东方角色不同，她没有游戏内头衔，官方简介仅标注‘(無名の存在)’（无名之存在），可能是因为她已经净化掉所有身份信息"
   },
   "nishizumi_maho": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "西住真穗",
     "source_hint": "girls und panzer",
     "translated_description_zh": "西住真穗是《少女与战车》中的角色，驾驶虎I坦克（虎212号），是黑森峰女学院坦克队的队长，也是西住美穗的姐姐。她被誉为坦克王者，配音演员为田中理惠。在剧情中她曾决定前往德国留学"
   },
@@ -1950,8 +1950,8 @@
     "translated_description_zh": "该角色出自系列《Girls und Panzer》。她是[[Churchill (Tank)|]]坦克的指挥官，也是圣格洛里亚娜坦克队的整体领袖。她的昵称来源于大吉岭茶。她的真名未知。她的[[catchphrase]]是『こんな言葉をしってる？』（Konna kotoba wo shitteru?，[tn]你知道这句话吗？[/tn]]）。由[[Kitamura Eri]]配音"
   },
   "shiori_novella": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "诗织·诺薇拉",
     "source_hint": "hololive english",
     "translated_description_zh": "Shiori Novella 是 hololive English 第三代成员，担任档案员及事实上的领袖，由 Kayahara 设计。她拥有长长的分色黑白头发、黄色眼睛和丰满胸部，颈部与身体之间被一种看似有意识的黑色胶状物覆盖。她有多种服装，包括默认、新年、便装（侦探）、睡衣、泳装等，并拥有肩上的影子生物 Yorick、猫 Nyakuza 以及粉丝团 Novelites"
   },
@@ -1992,14 +1992,14 @@
     "translated_description_zh": "尼可·罗宾（Demon Child）是漫画与动画《海贼王》中的主要角色，草帽海贼团的考古学家。她曾是克洛克达尔的巴洛克工作组成员，代号Ms. All Sunday，目标是找到Rio Poneglyph揭开禁忌空白世纪的秘密。她吃了花花果实，能够让身体部位从任何表面绽放，亦可创造全身克隆"
   },
   "gloria_(pokemon)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "小优",
     "source_hint": "pokemon swsh",
     "translated_description_zh": "Gloria（日名ユウリ）是《宝可梦 剑/盾》的女主角，勇敢且略带调皮，喜欢户外活动和咖喱，外貌为棕色眼睛、短卷发，穿绿色帽子、粉色连衣裙、灰色针织开衫等，其在《宝可梦 特别篇》中的对应角色是Casey Shield"
   },
   "hoshii_miki": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "星井美希",
     "source_hint": "idolmaster",
     "translated_description_zh": "她是《偶像大师》系列的主要角色之一，首次登场于Xbox 360版原版《偶像大师》游戏。她是961 Production的“Project Fairy”成员，与[[Ganaha Hibiki]]和[[Shijou Takane]]一起，因对待遇不满而离开765 Production（在DS游戏《Dearly Stars》中所示）。后来在《偶像大师》动画中，她与希巴基和塔卡内一起重新加入765 Production。性格随闲但才华出众，深受男性喜爱，相信走捷径就能成为顶级偶像。配音演员为[[Hasegawa Akiko]]"
   },
@@ -2010,8 +2010,8 @@
     "translated_description_zh": "《间谍过家家》中的主要角色之一，是一名具备读心能力的前实验体少女，被黄昏（洛伊德·福杰）收养作为其掩护身份的一部分，也是夜寇的养女。她常伴有玩具熊等，粉色头发戴发包覆盖锥形双髻，由日本声优种崎敦美和英文声优梅根·希普曼配音"
   },
   "tsukino_usagi": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "月野兔",
     "source_hint": "sailor moon",
     "translated_description_zh": "该角色是系列《美少女战士Sailor Moon》中 blond hair、双丸子头的女主角，一个粗心大意、常常走神、懒惰且爱哭的女学生，但也是好朋友，多次挺身而出帮助他人。她被一只叫露娜的黑猫发现，成为被称为“爱之战士”的Sailor Moon（内部战士）。她的发型使她成为全球最具辨识度的动漫角色之一。在90年代动画和Crystal版中由三石琴乃配音，她是唯一在Crystal中重新配音的声优"
   },
@@ -2437,7 +2437,7 @@
   },
   "toki_(bunny)_(blue_archive)": {
     "has_chinese": true,
-    "chinese_name": "飞鸟马时",
+    "chinese_name": "飞鸟马时(兔女郎)",
     "source_hint": "blue archive",
     "translated_description_zh": "这是《蓝色档案》角色托奇（Toki）的[[playboy bunny]]官方替换服装。在这套服装中，托奇穿着典型的[[playboy bunny]]装束，外搭[[blue leotard|蓝色]] [[highleg leotard]]以及[[white thighhighs|白色过膝袜]]。她放下了头发，但保留了[[half up braid|半扎辫]]。她随身携带的[[briefcase|公文包]]内装有带动力的[[mechanical arms|机械]] [[single gauntlet|单臂甲]]，同时也能作为导弹发射舱，这在她的EX技能动画中可见"
   },
@@ -3552,8 +3552,8 @@
     "translated_description_zh": "主教是《拉格纳罗克Online》中牧师/高级牧师职业树的第三阶段职业，可使用铁锤、书籍或法杖。男性原装穿戴黑色项圈配普隆特拉十字、白色短外套套在蓝色长袖外套上、黑色无指手套、十字项链、白色裤子及黑白双色鞋；女性则穿蓝白双色连衣裙，胸部开口、朱丽叶袖肩胸处有十字装饰、黄色腰带、白色过膝网袜带褶边及黑色高跟鞋。第二套官方替换服装中，男性外套变开襟并加白色披肩与金边黑衬衫，女性则保持类似造型但裙装袖边加褶边并配黄色蝴蝶结"
   },
   "natsuiro_matsuri": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "夏色祭",
     "source_hint": "hololive",
     "translated_description_zh": "夏色祭是hololive第一期成员的虚拟YouTuber（VTuber），由Minamura Haruki设计。她通常拥有蓝色、青绿色或罕见的绿色眼睛，中等长度的棕色头发，常扎侧马尾并配黑色发带和猫耳发饰，头发及眉间，还有呆毛。她拥有多种官方与非官方服装，包括默认服装、休息日、夏季2019、新年、休闲、游戏休闲、Re:START、街头休闲、运动女仆、魔法少女等，以及与其他成员共用的制服等"
   },
@@ -17994,8 +17994,8 @@
     "translated_description_zh": "她是《偶像大师 灰姑娘女孩》中的偶像角色，性格随和、积极且冷静，喜欢摄影。她与本田未央、日野茜（正激情）组成偶像组合。因人气高，她进入第五届CINDERELLA MASTER CD系列，与白坂小梅、绪方智绘里、佐久间真由和アナスタ西亚同台。她的声优是金子有希"
   },
   "moria_luluka": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "森亚露露卡",
     "source_hint": "meitantei precure!",
     "translated_description_zh": "《Meitantei Precure!》角色。[[Cure Arcana Shadow]]的平民身份。由[[Touyama Nao]]配音，她也为[[Go! Princess Precure]]中的[[Puff (precure)|]]配音。外观：* !asset #41477456 * !asset #41477503：[[Cure Arcana Shadow]"
   },
@@ -37177,9 +37177,9 @@
   },
   "toki_(school_uniform)_(blue_archive)": {
     "has_chinese": true,
-    "chinese_name": "飞鸟马时",
+    "chinese_name": "飞鸟马时(校服)",
     "source_hint": "blue archive",
-    "translated_description_zh": "这是《蓝色档案》中角色托基（Toki）的官方替换服装。托基放下头发，就像她的兔女郎装束一样，穿着她标准的千年科学学校校服，外搭一件她留着未扣的深蓝色开衫"
+    "translated_description_zh": "这是《蓝色档案》中角色托基（Toki）的官方替换服装。时放下头发，就像她的兔女郎装束一样，穿着她标准的千年科学学校校服，外搭一件她留着未扣的深蓝色开衫"
   },
   "drifblim": {
     "has_chinese": false,

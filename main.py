@@ -209,8 +209,10 @@ class StartRequest(BaseModel):
     start_page: int
     end_page: int
     tags: str
-    mode: str = "rank"  # rank | collect_ids | download_ids | popular
+    mode: str = "rank"  # rank | collect_ids | download_ids | popular | popular_range
     target_date: str = ""  # popular 模式用，可指定日期
+    start_date: str = ""   # popular_range
+    end_date: str = ""     # popular_range
 
 class OpenLocalRequest(BaseModel):
     local_path: str
@@ -228,12 +230,15 @@ def _ensure_today(db_data_inst, target_date=None):
     """如果跨天或指定了目标日期，更新全局变量"""
     global daily_viewer_data, today_str, save_dir, runtime_snapshot_path
     current_day = target_date if target_date else datetime.datetime.now().strftime('%Y-%m-%d')
+    
     if db_data_inst.today_str != current_day:
         db_data_inst.__init__(current_day)
-        daily_viewer_data = db_data_inst.load_viewer_data()
+        
+    if today_str != current_day:
         today_str = db_data_inst.today_str
         save_dir = db_data_inst.save_dir
         runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
+        daily_viewer_data = db_data_inst.load_viewer_data()
 
 def _process_post(post, db_data_inst, filter_tags, do_download=True):
     """处理单个 post：过滤、提取画师、可选下载。返回 (ids, artist, saved_filename) 或 None"""
@@ -482,12 +487,44 @@ def task_download_ids(db_data_inst, filter_tags):
     append_log(f"[DownloadIDs] 完成，成功下载 {success_count} 张图片。")
 
 
-def scraper_task(start_page, end_page, mode="rank", target_date=""):
+def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="", end_date=""):
     global scraper_thread
     try:
         if mode == "download_ids":
-            # download_ids 不需要翻页，直接按 IDs 列表走
             task_download_ids(db_data, state.filter_tags)
+        elif mode == "popular_range":
+            if not start_date or not end_date:
+                append_log("日期范围缺失。")
+                return
+            s_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
+            e_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
+            if s_dt > e_dt: s_dt, e_dt = e_dt, s_dt
+            
+            curr_dt = e_dt
+            while curr_dt >= s_dt:
+                if not state.is_running: break
+                pop_date = curr_dt.strftime("%Y-%m-%d")
+                append_log(f"=== 开始抓取日期: {pop_date} ===")
+                pop_db = DanbooruData(pop_date)
+                
+                output = pop_db.load_hot_drawer()
+                nu_sets = pop_db.load_need_update()
+                n = start_page
+                
+                while n <= end_page:
+                    if not state.is_running: break
+                    state.play_event.wait()
+                    append_log(f"--- 正在处理 {pop_date} 第 {n} 页 ---")
+                    o, n_u_dict = grabber_popular(pop_db, n, state.filter_tags, pop_date)
+                    output = list(set(output + o) - pop_db.all_drawer)
+                    for k in ["1", "2"]:
+                        nu_sets[k].update(n_u_dict[k])
+                    
+                    pop_db.save_hot_drawer(list(set(output)))
+                    pop_db.save_need_update(nu_sets)
+                    n += 1
+                
+                curr_dt -= datetime.timedelta(days=1)
         else:
             output = db_data.load_hot_drawer()
             nu_sets = db_data.load_need_update()
@@ -505,21 +542,31 @@ def scraper_task(start_page, end_page, mode="rank", target_date=""):
                 append_log(f"--- 正在处理第 {n} 页 ---")
 
                 if mode == "popular":
-                    # popular 模式需要使用指定的日期
                     pop_date = target_date or db_data.today_str
                     pop_db = DanbooruData(pop_date)
                     o, n_u_dict = grabber_popular(pop_db, n, state.filter_tags, pop_date)
+                    
+                    output = list(set(output + o) - pop_db.all_drawer)
+                    for k in ["1", "2"]:
+                        nu_sets[k].update(n_u_dict[k])
+                    
+                    pop_db.save_hot_drawer(list(set(output)))
+                    pop_db.save_need_update(nu_sets)
                 elif mode == "collect_ids":
                     o, n_u_dict = grabber_collect_ids(db_data, n, state.filter_tags)
+                    output = list(set(output + o) - db_data.all_drawer)
+                    for k in ["1", "2"]:
+                        nu_sets[k].update(n_u_dict[k])
+                    db_data.save_hot_drawer(list(set(output)))
+                    db_data.save_need_update(nu_sets)
                 else:
                     o, n_u_dict = grabber_rank(db_data, n, state.filter_tags)
+                    output = list(set(output + o) - db_data.all_drawer)
+                    for k in ["1", "2"]:
+                        nu_sets[k].update(n_u_dict[k])
+                    db_data.save_hot_drawer(list(set(output)))
+                    db_data.save_need_update(nu_sets)
 
-                output = list(set(output + o) - db_data.all_drawer)
-                for k in ["1", "2"]:
-                    nu_sets[k].update(n_u_dict[k])
-
-                db_data.save_hot_drawer(list(set(output)))
-                db_data.save_need_update(nu_sets)
                 n += 1
     except Exception as e:
         save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
@@ -562,11 +609,11 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
 
     scraper_thread = threading.Thread(
         target=scraper_task,
-        args=(req.start_page, req.end_page, req.mode, req.target_date),
+        args=(req.start_page, req.end_page, req.mode, req.target_date, req.start_date, req.end_date),
         daemon=True
     )
     scraper_thread.start()
-    mode_labels = {"rank": "排行抓取", "popular": "Popular热门", "collect_ids": "仅收集ID", "download_ids": "按ID下载"}
+    mode_labels = {"rank": "排行抓取", "popular": "Popular热门", "collect_ids": "仅收集ID", "download_ids": "按ID下载", "popular_range": "日期范围热门"}
     return {"msg": f"{mode_labels.get(req.mode, '任务')}已启动"}
 
 @app.post("/api/pause")
