@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(node -e \"console.log\\(require\\('electron'\\)\\)\")",
+      "Bash(node -e \"const p=require\\('node_modules/electron'\\); console.log\\('path:', p\\)\")",
+      "Bash(./node_modules/electron/dist/electron.exe --version)",
+      "Bash(./node_modules/electron/dist/electron.exe --abi)",
+      "Bash(./node_modules/electron/dist/electron.exe --help)",
+      "Bash(./node_modules/electron/dist/electron.exe electron/test.cjs)",
+      "Bash(./node_modules/electron/dist/electron.exe /tmp/electron_test)",
+      "Bash(unset ELECTRON_RUN_AS_NODE)",
+      "Bash(env)",
+      "Bash(./node_modules/electron/dist/electron.exe ./electron_app_test)",
+      "Bash(netstat -ano)",
+      "Bash(awk '{print $5}')",
+      "Bash(taskkill //F //PID 23852)"
+    ]
+  }
+}

@@ -8,6 +8,22 @@ import json
 import threading
 import concurrent.futures
 from fastapi import FastAPI, BackgroundTasks
+
+# Windows asyncio ProactorEventLoop 在客户端中途断开时会抛
+# ConnectionResetError(WinError 10054)，是已知无害噪音 (bpo-39010)。
+# 给 _call_connection_lost 打补丁，让它静默吞掉这一类异常。
+if sys.platform == 'win32':
+    from functools import wraps
+    from asyncio.proactor_events import _ProactorBasePipeTransport
+    _orig_call_connection_lost = _ProactorBasePipeTransport._call_connection_lost
+
+    @wraps(_orig_call_connection_lost)
+    def _silenced_call_connection_lost(self, exc):
+        try:
+            return _orig_call_connection_lost(self, exc)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            pass
+    _ProactorBasePipeTransport._call_connection_lost = _silenced_call_connection_lost
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
@@ -137,7 +153,7 @@ def build_local_image_library(selected_date=None):
             if not image_path.is_file():
                 continue
             suffix = image_path.suffix.lower()
-            if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+            if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif", ".zip", ".mp4", ".webm", ".mov", ".mkv", ".avi"}:
                 continue
             # 跳过已有对应 zip 的 gif（属于已转换的动画），避免重复显示
             if suffix == ".gif" and image_path.with_suffix(".zip").exists():
@@ -152,7 +168,9 @@ def build_local_image_library(selected_date=None):
                 "post_url": "#",
                 "web_url": f"/images/{current_day_dir.name}/{image_path.name}",
                 "tags": {},
-                "characters": []
+                "characters": [],
+                "score": 0,
+                "fav_count": 0
             })
 
     return library
@@ -725,21 +743,21 @@ def _extract_post_id(post_url: str) -> str:
     return tail if tail.isdigit() else ""
 
 
-def _run_refresh_scores():
-    """全量刷新所有日期的 score / fav_count，使用线程池并发。"""
+def _run_refresh_scores(date_str: str):
+    """刷新指定日期的 score / fav_count，使用线程池并发。"""
     MAX_WORKERS = 5
     PER_TASK_SLEEP = 0.3  # 每个 worker 单次任务后的限速
 
-    def _task(date_str, post_id, item):
+    def _task(post_id, item):
         if not refresh_state.is_running:
-            return None
+            return False
         try:
             post = danbooru_api.fetch_data_with_retry(int(post_id))
         except Exception:
             post = None
         if not post:
             sleep(PER_TASK_SLEEP)
-            return None
+            return False
         new_score = post.get("score", 0) or 0
         new_fav = post.get("fav_count", 0) or 0
         changed = item.get("score") != new_score or item.get("fav_count") != new_fav
@@ -753,65 +771,46 @@ def _run_refresh_scores():
                     "fav_count": new_fav
                 })
         sleep(PER_TASK_SLEEP)
-        return date_str if changed else None
+        return changed
 
     try:
-        # 1. 列出所有有 viewer_data.json 的日期
-        date_dirs = []
-        if os.path.isdir(base_download_dir):
-            for name in sorted(os.listdir(base_download_dir)):
-                full = os.path.join(base_download_dir, name, "viewer_data.json")
-                if os.path.isfile(full):
-                    date_dirs.append(name)
+        dd = DanbooruData(target_date=date_str)
+        data = dd.load_viewer_data()
+        save_lock = threading.Lock()
 
-        # 2. 加载每个日期的数据并构建任务表
-        loaded = {}  # date_str -> (DanbooruData, list, save_lock)
-        all_tasks = []
-        for date_str in date_dirs:
-            dd = DanbooruData(target_date=date_str)
-            data = dd.load_viewer_data()
-            loaded[date_str] = (dd, data, threading.Lock())
-            for item in data:
-                pid = _extract_post_id(item.get("post_url", ""))
-                if pid:
-                    all_tasks.append((date_str, pid, item))
+        # 构建任务表
+        tasks = []
+        for item in data:
+            pid = _extract_post_id(item.get("post_url", ""))
+            if pid:
+                tasks.append((pid, item))
 
         with refresh_state.lock:
-            refresh_state.total = len(all_tasks)
+            refresh_state.total = len(tasks)
             refresh_state.done = 0
             refresh_state.recent = []
-        append_log(f"开始全量刷新: {len(date_dirs)} 个日期, {len(all_tasks)} 条记录, {MAX_WORKERS} 线程")
+        append_log(f"开始刷新 {date_str}: {len(tasks)} 条记录, {MAX_WORKERS} 线程")
 
-        # 3. 线程池并发拉取
-        date_change_count = {d: 0 for d in date_dirs}
+        change_count = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(_task, d, pid, item): d for d, pid, item in all_tasks}
+            futures = {executor.submit(_task, pid, item): pid for pid, item in tasks}
             for fut in concurrent.futures.as_completed(futures):
-                if not refresh_state.is_running:
-                    # 标记停止后让剩余 future 自然完成，但不再增加进度（保持准确性）
-                    pass
-                changed_date = None
+                changed = False
                 try:
-                    changed_date = fut.result()
+                    changed = bool(fut.result())
                 except Exception:
                     pass
                 with refresh_state.lock:
                     refresh_state.done += 1
-                if changed_date:
-                    date_change_count[changed_date] = date_change_count.get(changed_date, 0) + 1
-                    # 该日期累积 20 条变更落盘一次
-                    if date_change_count[changed_date] % 20 == 0:
-                        dd, data, lock = loaded[changed_date]
-                        with lock:
+                if changed:
+                    change_count += 1
+                    if change_count % 20 == 0:
+                        with save_lock:
                             dd.save_viewer_data(data)
 
-        # 4. 全部完成后把每个日期都落盘一遍
-        for date_str, (dd, data, lock) in loaded.items():
-            with lock:
-                dd.save_viewer_data(data)
-
-        total_changed = sum(date_change_count.values())
-        append_log(f"全量刷新完成: {refresh_state.done}/{refresh_state.total} 条已查询，{total_changed} 条数值变化")
+        with save_lock:
+            dd.save_viewer_data(data)
+        append_log(f"刷新完成 {date_str}: {refresh_state.done}/{refresh_state.total} 条已查询，{change_count} 条数值变化")
     except Exception as e:
         with refresh_state.lock:
             refresh_state.error = str(e)
@@ -821,22 +820,22 @@ def _run_refresh_scores():
             refresh_state.is_running = False
 
 
-@app.post("/api/refresh_scores")
-def refresh_scores_start():
-    """全量刷新所有日期的 score / fav_count（多线程并发）。"""
+@app.post("/api/refresh_scores/{date_str}")
+def refresh_scores_start(date_str: str):
+    """刷新指定日期所有图的 score / fav_count（多线程并发）。"""
     global refresh_thread
     with refresh_state.lock:
         if refresh_state.is_running:
             return {"ok": False, "msg": "已有刷新任务在运行"}
         refresh_state.is_running = True
-        refresh_state.date_str = "ALL"
+        refresh_state.date_str = date_str
         refresh_state.done = 0
         refresh_state.total = 0
         refresh_state.error = ""
         refresh_state.recent = []
-    refresh_thread = threading.Thread(target=_run_refresh_scores, daemon=True)
+    refresh_thread = threading.Thread(target=_run_refresh_scores, args=(date_str,), daemon=True)
     refresh_thread.start()
-    return {"ok": True, "msg": "已开始全量刷新热度"}
+    return {"ok": True, "msg": f"已开始刷新 {date_str} 的热度"}
 
 
 @app.post("/api/refresh_scores_stop")

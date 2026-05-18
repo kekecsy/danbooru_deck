@@ -446,22 +446,27 @@ function extractPostId(postUrl) {
 }
 
 async function startRefreshScores() {
+  const date = gallery.value.selectedDate;
+  if (!date) {
+    showToast('请先选择日期', 'error');
+    return;
+  }
   if (refresh.value.isRunning) {
     showToast('已有刷新任务在运行', 'info');
     return;
   }
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/refresh_scores', { method: 'POST' });
+    const res = await fetch(`http://127.0.0.1:8000/api/refresh_scores/${date}`, { method: 'POST' });
     const result = await res.json();
     if (!result.ok) {
       showToast(result.msg || '启动刷新失败', 'error');
       return;
     }
     refresh.value.isRunning = true;
-    refresh.value.dateStr = 'ALL';
+    refresh.value.dateStr = date;
     refresh.value.done = 0;
     refresh.value.total = 0;
-    showToast('正在全量刷新所有日期的热度...', 'info');
+    showToast(`正在刷新 ${date} 的热度...`, 'info');
     if (!refreshTimer) refreshTimer = window.setInterval(pollRefreshStatus, 1500);
   } catch (err) {
     showToast(`启动失败: ${err.message}`, 'error');
@@ -589,8 +594,14 @@ async function openViewer(item) {
 
   refreshSinglePost(item);
 
+  const ext = (item.filename || '').split('.').pop().toLowerCase();
+  // 视频走 FastAPI 静态服务，自带 byte-range 支持，避开 local:// 协议的媒体限制
+  if (VIDEO_EXTS.includes(ext) && gallery.value.selectedDate && item.filename) {
+    viewer.value.imageUrl = `http://127.0.0.1:8000/images/${gallery.value.selectedDate}/${encodeURIComponent(item.filename)}`;
+    return;
+  }
+
   if (item?.localPath) {
-    const ext = (item.filename || '').split('.').pop().toLowerCase();
     if (ext === 'zip') {
       const gifPath = item.localPath.replace(/\.zip$/i, '.gif');
       if (await window.desktopAPI.file.exists(gifPath)) {
@@ -601,7 +612,7 @@ async function openViewer(item) {
     viewer.value.imageUrl = await window.desktopAPI.file.toLocalUrl(item.localPath);
     return;
   }
-  
+
   const webUrl = item?.web_url || item?.webUrl;
   if (webUrl) {
     viewer.value.imageUrl = `http://127.0.0.1:8000${webUrl}`;
@@ -614,8 +625,13 @@ async function syncViewerImage() {
   viewer.value.imageUrl = '';
   if (!viewerItem.value) return;
 
+  const ext = (viewerItem.value.filename || '').split('.').pop().toLowerCase();
+  if (VIDEO_EXTS.includes(ext) && gallery.value.selectedDate && viewerItem.value.filename) {
+    viewer.value.imageUrl = `http://127.0.0.1:8000/images/${gallery.value.selectedDate}/${encodeURIComponent(viewerItem.value.filename)}`;
+    return;
+  }
+
   if (viewerItem.value.localPath) {
-    const ext = (viewerItem.value.filename || '').split('.').pop().toLowerCase();
     if (ext === 'zip') {
       const gifPath = viewerItem.value.localPath.replace(/\.zip$/i, '.gif');
       if (await window.desktopAPI.file.exists(gifPath)) {
@@ -880,9 +896,10 @@ const modeDescription = computed(() => {
           <button
             :class="['refresh-btn', { active: refresh.isRunning }]"
             @click="refresh.isRunning ? stopRefreshScores() : startRefreshScores()"
-            :title="refresh.isRunning ? '点击停止刷新' : '后台多线程重新拉取所有日期所有图的 score / 收藏数'"
+            :disabled="!gallery.selectedDate"
+            :title="refresh.isRunning ? '点击停止刷新' : '多线程重新拉取当前日期所有图的 score / 收藏数'"
           >
-            <span v-if="!refresh.isRunning">🔄 刷新全部热度</span>
+            <span v-if="!refresh.isRunning">🔄 刷新热度</span>
             <span v-else>⏸ {{ refresh.done }}/{{ refresh.total }}</span>
           </button>
           <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />

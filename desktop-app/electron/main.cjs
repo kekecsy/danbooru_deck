@@ -1,7 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, nativeImage, protocol, net } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
-const { Readable } = require('node:stream');
 const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
 
@@ -486,57 +485,14 @@ ipcMain.handle('crawler:status', async () => {
 });
 
 app.whenReady().then(() => {
-  protocol.handle('local', async (request) => {
+  protocol.handle('local', (request) => {
     const url = request.url.replace(/^local:\/\//, '');
     const filePath = decodeURIComponent(url);
     const allowedRoots = [hotPicDir, ...presetDirs];
     if (!allowedRoots.some(root => isWithin(root, filePath))) {
       return new Response('Access denied', { status: 403 });
     }
-
-    try {
-      const stat = await fs.promises.stat(filePath);
-      const fileSize = stat.size;
-      const mimeType = mimeFromFile(filePath);
-      const rangeHeader = request.headers.get('range');
-
-      if (rangeHeader) {
-        const match = /bytes=(\d+)-(\d*)/.exec(rangeHeader);
-        if (match) {
-          const start = parseInt(match[1], 10);
-          const end = match[2] ? Math.min(parseInt(match[2], 10), fileSize - 1) : fileSize - 1;
-          if (start > end || start >= fileSize) {
-            return new Response('Range Not Satisfiable', {
-              status: 416,
-              headers: { 'Content-Range': `bytes */${fileSize}` }
-            });
-          }
-          const chunkSize = end - start + 1;
-          const stream = fs.createReadStream(filePath, { start, end });
-          return new Response(Readable.toWeb(stream), {
-            status: 206,
-            headers: {
-              'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-              'Accept-Ranges': 'bytes',
-              'Content-Length': String(chunkSize),
-              'Content-Type': mimeType
-            }
-          });
-        }
-      }
-
-      const stream = fs.createReadStream(filePath);
-      return new Response(Readable.toWeb(stream), {
-        status: 200,
-        headers: {
-          'Content-Length': String(fileSize),
-          'Content-Type': mimeType,
-          'Accept-Ranges': 'bytes'
-        }
-      });
-    } catch (err) {
-      return new Response(`Error: ${err.message}`, { status: 500 });
-    }
+    return net.fetch(pathToFileURL(filePath).toString());
   });
   createWindow();
   app.on('activate', () => {
