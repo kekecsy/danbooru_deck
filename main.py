@@ -6,6 +6,7 @@ from time import sleep
 import datetime
 import json
 import threading
+import concurrent.futures
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
@@ -724,55 +725,93 @@ def _extract_post_id(post_url: str) -> str:
     return tail if tail.isdigit() else ""
 
 
-def _run_refresh_scores(date_str: str):
+def _run_refresh_scores():
+    """全量刷新所有日期的 score / fav_count，使用线程池并发。"""
+    MAX_WORKERS = 5
+    PER_TASK_SLEEP = 0.3  # 每个 worker 单次任务后的限速
+
+    def _task(date_str, post_id, item):
+        if not refresh_state.is_running:
+            return None
+        try:
+            post = danbooru_api.fetch_data_with_retry(int(post_id))
+        except Exception:
+            post = None
+        if not post:
+            sleep(PER_TASK_SLEEP)
+            return None
+        new_score = post.get("score", 0) or 0
+        new_fav = post.get("fav_count", 0) or 0
+        changed = item.get("score") != new_score or item.get("fav_count") != new_fav
+        if changed:
+            item["score"] = new_score
+            item["fav_count"] = new_fav
+            with refresh_state.lock:
+                refresh_state.recent.append({
+                    "post_id": post_id,
+                    "score": new_score,
+                    "fav_count": new_fav
+                })
+        sleep(PER_TASK_SLEEP)
+        return date_str if changed else None
+
     try:
-        dd = DanbooruData(target_date=date_str)
-        data = dd.load_viewer_data()
+        # 1. 列出所有有 viewer_data.json 的日期
+        date_dirs = []
+        if os.path.isdir(base_download_dir):
+            for name in sorted(os.listdir(base_download_dir)):
+                full = os.path.join(base_download_dir, name, "viewer_data.json")
+                if os.path.isfile(full):
+                    date_dirs.append(name)
+
+        # 2. 加载每个日期的数据并构建任务表
+        loaded = {}  # date_str -> (DanbooruData, list, save_lock)
+        all_tasks = []
+        for date_str in date_dirs:
+            dd = DanbooruData(target_date=date_str)
+            data = dd.load_viewer_data()
+            loaded[date_str] = (dd, data, threading.Lock())
+            for item in data:
+                pid = _extract_post_id(item.get("post_url", ""))
+                if pid:
+                    all_tasks.append((date_str, pid, item))
+
         with refresh_state.lock:
-            refresh_state.total = len(data)
+            refresh_state.total = len(all_tasks)
             refresh_state.done = 0
             refresh_state.recent = []
+        append_log(f"开始全量刷新: {len(date_dirs)} 个日期, {len(all_tasks)} 条记录, {MAX_WORKERS} 线程")
 
-        changed = 0
-        for i, item in enumerate(data):
-            if not refresh_state.is_running:  # 外部停止
-                break
-            post_id = _extract_post_id(item.get("post_url", ""))
-            if not post_id:
+        # 3. 线程池并发拉取
+        date_change_count = {d: 0 for d in date_dirs}
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            futures = {executor.submit(_task, d, pid, item): d for d, pid, item in all_tasks}
+            for fut in concurrent.futures.as_completed(futures):
+                if not refresh_state.is_running:
+                    # 标记停止后让剩余 future 自然完成，但不再增加进度（保持准确性）
+                    pass
+                changed_date = None
+                try:
+                    changed_date = fut.result()
+                except Exception:
+                    pass
                 with refresh_state.lock:
-                    refresh_state.done = i + 1
-                continue
+                    refresh_state.done += 1
+                if changed_date:
+                    date_change_count[changed_date] = date_change_count.get(changed_date, 0) + 1
+                    # 该日期累积 20 条变更落盘一次
+                    if date_change_count[changed_date] % 20 == 0:
+                        dd, data, lock = loaded[changed_date]
+                        with lock:
+                            dd.save_viewer_data(data)
 
-            try:
-                post = danbooru_api.fetch_data_with_retry(int(post_id))
-            except Exception as e:
-                post = None
-                append_log(f"刷新 post {post_id} 失败: {e}")
-
-            if post:
-                new_score = post.get("score", 0) or 0
-                new_fav = post.get("fav_count", 0) or 0
-                if item.get("score") != new_score or item.get("fav_count") != new_fav:
-                    item["score"] = new_score
-                    item["fav_count"] = new_fav
-                    with refresh_state.lock:
-                        refresh_state.recent.append({
-                            "post_id": post_id,
-                            "score": new_score,
-                            "fav_count": new_fav
-                        })
-                    changed += 1
-
-            with refresh_state.lock:
-                refresh_state.done = i + 1
-
-            if changed > 0 and changed % 20 == 0:
+        # 4. 全部完成后把每个日期都落盘一遍
+        for date_str, (dd, data, lock) in loaded.items():
+            with lock:
                 dd.save_viewer_data(data)
 
-            sleep(1.5)
-
-        dd.save_viewer_data(data)
-        append_log(f"刷新完成 {date_str}: 共 {refresh_state.done}/{refresh_state.total} 条，更新 {changed} 条")
+        total_changed = sum(date_change_count.values())
+        append_log(f"全量刷新完成: {refresh_state.done}/{refresh_state.total} 条已查询，{total_changed} 条数值变化")
     except Exception as e:
         with refresh_state.lock:
             refresh_state.error = str(e)
@@ -782,21 +821,22 @@ def _run_refresh_scores(date_str: str):
             refresh_state.is_running = False
 
 
-@app.post("/api/refresh_scores/{date_str}")
-def refresh_scores_start(date_str: str):
+@app.post("/api/refresh_scores")
+def refresh_scores_start():
+    """全量刷新所有日期的 score / fav_count（多线程并发）。"""
     global refresh_thread
     with refresh_state.lock:
         if refresh_state.is_running:
             return {"ok": False, "msg": "已有刷新任务在运行"}
         refresh_state.is_running = True
-        refresh_state.date_str = date_str
+        refresh_state.date_str = "ALL"
         refresh_state.done = 0
         refresh_state.total = 0
         refresh_state.error = ""
         refresh_state.recent = []
-    refresh_thread = threading.Thread(target=_run_refresh_scores, args=(date_str,), daemon=True)
+    refresh_thread = threading.Thread(target=_run_refresh_scores, daemon=True)
     refresh_thread.start()
-    return {"ok": True, "msg": f"已开始刷新 {date_str} 的热度"}
+    return {"ok": True, "msg": "已开始全量刷新热度"}
 
 
 @app.post("/api/refresh_scores_stop")

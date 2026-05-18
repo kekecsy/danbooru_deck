@@ -446,27 +446,22 @@ function extractPostId(postUrl) {
 }
 
 async function startRefreshScores() {
-  const date = gallery.value.selectedDate;
-  if (!date) {
-    showToast('请先选择日期', 'error');
-    return;
-  }
   if (refresh.value.isRunning) {
     showToast('已有刷新任务在运行', 'info');
     return;
   }
   try {
-    const res = await fetch(`http://127.0.0.1:8000/api/refresh_scores/${date}`, { method: 'POST' });
+    const res = await fetch('http://127.0.0.1:8000/api/refresh_scores', { method: 'POST' });
     const result = await res.json();
     if (!result.ok) {
       showToast(result.msg || '启动刷新失败', 'error');
       return;
     }
     refresh.value.isRunning = true;
-    refresh.value.dateStr = date;
+    refresh.value.dateStr = 'ALL';
     refresh.value.done = 0;
     refresh.value.total = 0;
-    showToast(`正在刷新 ${date} 的热度...`, 'info');
+    showToast('正在全量刷新所有日期的热度...', 'info');
     if (!refreshTimer) refreshTimer = window.setInterval(pollRefreshStatus, 1500);
   } catch (err) {
     showToast(`启动失败: ${err.message}`, 'error');
@@ -885,10 +880,9 @@ const modeDescription = computed(() => {
           <button
             :class="['refresh-btn', { active: refresh.isRunning }]"
             @click="refresh.isRunning ? stopRefreshScores() : startRefreshScores()"
-            :disabled="!gallery.selectedDate"
-            :title="refresh.isRunning ? '点击停止刷新' : '重新拉取当前日期所有图的 score / 收藏数'"
+            :title="refresh.isRunning ? '点击停止刷新' : '后台多线程重新拉取所有日期所有图的 score / 收藏数'"
           >
-            <span v-if="!refresh.isRunning">🔄 刷新热度</span>
+            <span v-if="!refresh.isRunning">🔄 刷新全部热度</span>
             <span v-else>⏸ {{ refresh.done }}/{{ refresh.total }}</span>
           </button>
           <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
