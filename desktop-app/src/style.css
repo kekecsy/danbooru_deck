@@ -298,6 +298,29 @@ input, select {
   box-shadow: 0 4px 12px rgba(224, 90, 23, 0.32);
 }
 
+.refresh-btn {
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: linear-gradient(135deg, #fbf4eb, #f2e8db);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: all 0.18s ease;
+}
+.refresh-btn:hover:not(:disabled):not(.active) {
+  background: linear-gradient(135deg, #f3dfd4, #ebd0c0);
+}
+.refresh-btn.active {
+  background: linear-gradient(135deg, #1d7ef3, #1565d8);
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(29, 126, 243, 0.32);
+}
+.refresh-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 .viewer-toolbar-info {
   display: flex;
   align-items: center;
@@ -642,6 +665,35 @@ input, select {
   margin: 0 auto;
   box-shadow: 0 14px 28px rgba(87,58,25,0.12);
   background: #fff;
+}
+
+.canvas-stage {
+  position: relative;
+  display: inline-block;
+  margin: 0 auto;
+}
+.layer-delete-btn {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #b65434, #8d3d23);
+  color: #fff;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.layer-delete-btn:hover {
+  background: linear-gradient(135deg, #d96544, #a64a2e);
+  box-shadow: 0 6px 16px rgba(182, 84, 52, 0.5);
 }
 
 @media (max-width: 1400px) {

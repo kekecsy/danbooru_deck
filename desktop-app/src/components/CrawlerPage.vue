@@ -73,6 +73,14 @@ const viewer = ref({
   zoom: 1
 });
 
+const refresh = ref({
+  isRunning: false,
+  done: 0,
+  total: 0,
+  dateStr: ''
+});
+let refreshTimer = null;
+
 const toast = ref({
   show: false,
   msg: '',
@@ -431,6 +439,98 @@ async function convertGif(item) {
   }
 }
 
+function extractPostId(postUrl) {
+  if (!postUrl) return '';
+  const tail = String(postUrl).replace(/\/$/, '').split('/').pop();
+  return /^\d+$/.test(tail) ? tail : '';
+}
+
+async function startRefreshScores() {
+  const date = gallery.value.selectedDate;
+  if (!date) {
+    showToast('请先选择日期', 'error');
+    return;
+  }
+  if (refresh.value.isRunning) {
+    showToast('已有刷新任务在运行', 'info');
+    return;
+  }
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/refresh_scores/${date}`, { method: 'POST' });
+    const result = await res.json();
+    if (!result.ok) {
+      showToast(result.msg || '启动刷新失败', 'error');
+      return;
+    }
+    refresh.value.isRunning = true;
+    refresh.value.dateStr = date;
+    refresh.value.done = 0;
+    refresh.value.total = 0;
+    showToast(`正在刷新 ${date} 的热度...`, 'info');
+    if (!refreshTimer) refreshTimer = window.setInterval(pollRefreshStatus, 1500);
+  } catch (err) {
+    showToast(`启动失败: ${err.message}`, 'error');
+  }
+}
+
+async function stopRefreshScores() {
+  try {
+    await fetch('http://127.0.0.1:8000/api/refresh_scores_stop', { method: 'POST' });
+  } catch (_) { /* noop */ }
+}
+
+async function pollRefreshStatus() {
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/refresh_scores_status');
+    const status = await res.json();
+    refresh.value.isRunning = !!status.is_running;
+    refresh.value.done = status.done || 0;
+    refresh.value.total = status.total || 0;
+    refresh.value.dateStr = status.date_str || '';
+
+    if (Array.isArray(status.recent) && status.recent.length) {
+      const updates = new Map();
+      for (const u of status.recent) updates.set(String(u.post_id), u);
+      for (const item of gallery.value.images) {
+        const pid = extractPostId(item.postUrl);
+        const u = updates.get(pid);
+        if (u) {
+          item.score = u.score;
+          item.favCount = u.fav_count;
+        }
+      }
+    }
+
+    if (!status.is_running) {
+      if (refreshTimer) {
+        window.clearInterval(refreshTimer);
+        refreshTimer = null;
+      }
+      if (status.error) {
+        showToast(`刷新出错: ${status.error}`, 'error');
+      } else if (refresh.value.total > 0) {
+        showToast('热度刷新完成', 'success');
+      }
+    }
+  } catch (err) {
+    /* 静默失败，下次重试 */
+  }
+}
+
+async function refreshSinglePost(item) {
+  const postId = extractPostId(item?.postUrl);
+  if (!postId) return;
+  const date = gallery.value.selectedDate || '';
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/refresh_score/${postId}?date=${encodeURIComponent(date)}`);
+    const result = await res.json();
+    if (result.ok) {
+      item.score = result.score;
+      item.favCount = result.fav_count;
+    }
+  } catch (_) { /* 静默失败 */ }
+}
+
 const hostsModal = ref({ open: false });
 
 function openHostsHint() {
@@ -491,7 +591,9 @@ async function openViewer(item) {
   viewer.value.index = Math.max(0, index);
   viewer.value.zoom = 1;
   viewer.value.imageUrl = '';
-  
+
+  refreshSinglePost(item);
+
   if (item?.localPath) {
     const ext = (item.filename || '').split('.').pop().toLowerCase();
     if (ext === 'zip') {
@@ -566,6 +668,7 @@ async function stepViewer(offset) {
   if (next === viewer.value.index) return;
   viewer.value.index = next;
   await syncViewerImage();
+  refreshSinglePost(viewerItem.value);
 }
 
 function onViewerWheel(event) {
@@ -641,6 +744,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (pollTimer) window.clearInterval(pollTimer);
+  if (refreshTimer) window.clearInterval(refreshTimer);
   window.removeEventListener('keydown', onKeyDown);
 });
 
@@ -778,6 +882,15 @@ const modeDescription = computed(() => {
             @click="gallery.hotOnly = !gallery.hotOnly"
             :title="`只看 score ≥ ${gallery.hotThreshold}`"
           >🔥 只看高分</button>
+          <button
+            :class="['refresh-btn', { active: refresh.isRunning }]"
+            @click="refresh.isRunning ? stopRefreshScores() : startRefreshScores()"
+            :disabled="!gallery.selectedDate"
+            :title="refresh.isRunning ? '点击停止刷新' : '重新拉取当前日期所有图的 score / 收藏数'"
+          >
+            <span v-if="!refresh.isRunning">🔄 刷新热度</span>
+            <span v-else>⏸ {{ refresh.done }}/{{ refresh.total }}</span>
+          </button>
           <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
           <button class="secondary" @click="importTranslationFile" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">导入翻译字典</button>
           <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />

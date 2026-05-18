@@ -700,6 +700,159 @@ def open_local_file(req: OpenLocalRequest):
     except Exception as e:
         return {"ok": False, "msg": f"打开失败: {e}"}
 
+
+# ---------------- 热度刷新 (score / fav_count) ----------------
+
+class RefreshState:
+    def __init__(self):
+        self.is_running = False
+        self.date_str = ""
+        self.done = 0
+        self.total = 0
+        self.error = ""
+        self.recent = []  # 待推送给前端的增量更新 [{post_id, score, fav_count}]
+        self.lock = threading.Lock()
+
+refresh_state = RefreshState()
+refresh_thread = None
+
+
+def _extract_post_id(post_url: str) -> str:
+    if not post_url:
+        return ""
+    tail = post_url.rstrip('/').rsplit('/', 1)[-1]
+    return tail if tail.isdigit() else ""
+
+
+def _run_refresh_scores(date_str: str):
+    try:
+        dd = DanbooruData(target_date=date_str)
+        data = dd.load_viewer_data()
+        with refresh_state.lock:
+            refresh_state.total = len(data)
+            refresh_state.done = 0
+            refresh_state.recent = []
+
+        changed = 0
+        for i, item in enumerate(data):
+            if not refresh_state.is_running:  # 外部停止
+                break
+            post_id = _extract_post_id(item.get("post_url", ""))
+            if not post_id:
+                with refresh_state.lock:
+                    refresh_state.done = i + 1
+                continue
+
+            try:
+                post = danbooru_api.fetch_data_with_retry(int(post_id))
+            except Exception as e:
+                post = None
+                append_log(f"刷新 post {post_id} 失败: {e}")
+
+            if post:
+                new_score = post.get("score", 0) or 0
+                new_fav = post.get("fav_count", 0) or 0
+                if item.get("score") != new_score or item.get("fav_count") != new_fav:
+                    item["score"] = new_score
+                    item["fav_count"] = new_fav
+                    with refresh_state.lock:
+                        refresh_state.recent.append({
+                            "post_id": post_id,
+                            "score": new_score,
+                            "fav_count": new_fav
+                        })
+                    changed += 1
+
+            with refresh_state.lock:
+                refresh_state.done = i + 1
+
+            if changed > 0 and changed % 20 == 0:
+                dd.save_viewer_data(data)
+
+            sleep(1.5)
+
+        dd.save_viewer_data(data)
+        append_log(f"刷新完成 {date_str}: 共 {refresh_state.done}/{refresh_state.total} 条，更新 {changed} 条")
+    except Exception as e:
+        with refresh_state.lock:
+            refresh_state.error = str(e)
+        append_log(f"刷新任务异常: {e}")
+    finally:
+        with refresh_state.lock:
+            refresh_state.is_running = False
+
+
+@app.post("/api/refresh_scores/{date_str}")
+def refresh_scores_start(date_str: str):
+    global refresh_thread
+    with refresh_state.lock:
+        if refresh_state.is_running:
+            return {"ok": False, "msg": "已有刷新任务在运行"}
+        refresh_state.is_running = True
+        refresh_state.date_str = date_str
+        refresh_state.done = 0
+        refresh_state.total = 0
+        refresh_state.error = ""
+        refresh_state.recent = []
+    refresh_thread = threading.Thread(target=_run_refresh_scores, args=(date_str,), daemon=True)
+    refresh_thread.start()
+    return {"ok": True, "msg": f"已开始刷新 {date_str} 的热度"}
+
+
+@app.post("/api/refresh_scores_stop")
+def refresh_scores_stop():
+    with refresh_state.lock:
+        refresh_state.is_running = False
+    return {"ok": True}
+
+
+@app.get("/api/refresh_scores_status")
+def refresh_scores_status():
+    """返回当前刷新进度并清空 recent 增量（前端调用一次即取走，避免重复应用）。"""
+    with refresh_state.lock:
+        recent = list(refresh_state.recent)
+        refresh_state.recent = []
+        return {
+            "is_running": refresh_state.is_running,
+            "date_str": refresh_state.date_str,
+            "done": refresh_state.done,
+            "total": refresh_state.total,
+            "error": refresh_state.error,
+            "recent": recent
+        }
+
+
+@app.get("/api/refresh_score/{post_id}")
+def refresh_single_score(post_id: int, date: str = ""):
+    """单个 post 同步刷新，写回对应日期的 viewer_data.json。"""
+    try:
+        post = danbooru_api.fetch_data_with_retry(post_id)
+    except Exception as e:
+        return {"ok": False, "msg": f"拉取失败: {e}"}
+    if not post:
+        return {"ok": False, "msg": "拉取失败"}
+    new_score = post.get("score", 0) or 0
+    new_fav = post.get("fav_count", 0) or 0
+
+    if date:
+        try:
+            dd = DanbooruData(target_date=date)
+            data = dd.load_viewer_data()
+            updated = False
+            for item in data:
+                if _extract_post_id(item.get("post_url", "")) == str(post_id):
+                    item["score"] = new_score
+                    item["fav_count"] = new_fav
+                    updated = True
+                    break
+            if updated:
+                dd.save_viewer_data(data)
+        except Exception as e:
+            append_log(f"单图刷新写盘失败 {post_id}: {e}")
+
+    return {"ok": True, "post_id": post_id, "score": new_score, "fav_count": new_fav}
+
+
 @app.get("/")
 def read_root():
     if os.path.exists("index.html"):

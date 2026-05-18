@@ -489,7 +489,8 @@ app.whenReady().then(() => {
   protocol.handle('local', async (request) => {
     const url = request.url.replace(/^local:\/\//, '');
     const filePath = decodeURIComponent(url);
-    if (!isWithin(hotPicDir, filePath)) {
+    const allowedRoots = [hotPicDir, ...presetDirs];
+    if (!allowedRoots.some(root => isWithin(root, filePath))) {
       return new Response('Access denied', { status: 403 });
     }
 

@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onBeforeUnmount, reactive, ref, watch } from 'vue';
 
 const props = defineProps({
   sourceItem: { type: Object, default: null }
@@ -141,6 +141,7 @@ function syncFromLayer(layer) {
   editor.imageOverlayName = layer.imageOverlayName || '';
   editor.revealColor = layer.revealColor || '#000000';
   editor.revealOpacity = layer.revealOpacity ?? 0.8;
+  if (editor.imageDataUrl) preloadOverlay(editor.imageDataUrl).catch(() => {});
 }
 
 function selectLayer(id) {
@@ -243,7 +244,12 @@ async function drawImageLayer(ctx, layer, scale) {
     drawMosaic(ctx, layer, scale);
     return;
   }
-  const image = await createImage(layer.imageDataUrl);
+  let image = getOverlaySync(layer.imageDataUrl);
+  if (!image) {
+    drawMosaic(ctx, layer, scale);
+    preloadOverlay(layer.imageDataUrl).then(() => render()).catch(() => {});
+    return;
+  }
   const x = layer.x * scale;
   const y = layer.y * scale;
   const w = layer.width * scale;
@@ -376,6 +382,39 @@ function deleteSelected() {
   render();
 }
 
+const selectionBox = computed(() => {
+  const layer = editor.layers.find(item => item.id === editor.selectedId);
+  if (!layer) return null;
+  const z = editor.zoom;
+  return {
+    left: layer.x * z,
+    top: layer.y * z,
+    right: (layer.x + layer.width) * z,
+    bottom: (layer.y + layer.height) * z
+  };
+});
+
+function onEditorKeyDown(event) {
+  const tag = event.target?.tagName?.toLowerCase();
+  if (['input', 'textarea', 'select'].includes(tag)) return;
+  if (event.target?.isContentEditable) return;
+
+  if (event.ctrlKey || event.metaKey) {
+    if (event.key === 'z' || event.key === 'Z') {
+      event.preventDefault();
+      undoLast();
+    } else if (event.key === 'c' || event.key === 'C') {
+      event.preventDefault();
+      copyToClipboard();
+    }
+  } else if (event.key === 'Delete' || event.key === 'Backspace') {
+    if (editor.selectedId != null) {
+      event.preventDefault();
+      deleteSelected();
+    }
+  }
+}
+
 function clearAll() {
   editor.layers = [];
   editor.selectedId = null;
@@ -389,6 +428,29 @@ async function createImage(source) {
     image.onerror = reject;
     image.src = source;
   });
+}
+
+const overlayImageCache = new Map();
+
+async function preloadOverlay(url) {
+  if (!url) return null;
+  const cached = overlayImageCache.get(url);
+  if (cached instanceof HTMLImageElement) return cached;
+  if (cached && typeof cached.then === 'function') return cached;
+  const promise = createImage(url).then(img => {
+    overlayImageCache.set(url, img);
+    return img;
+  }).catch(err => {
+    overlayImageCache.delete(url);
+    throw err;
+  });
+  overlayImageCache.set(url, promise);
+  return promise;
+}
+
+function getOverlaySync(url) {
+  const entry = overlayImageCache.get(url);
+  return entry instanceof HTMLImageElement ? entry : null;
 }
 
 async function loadImageFromDataUrl(dataUrl, meta = {}) {
@@ -432,9 +494,10 @@ async function loadDroppedFile(file) {
 async function chooseOverlay() {
   const filePath = await window.desktopAPI.dialog.selectImage();
   if (!filePath) return;
-  editor.imageDataUrl = await window.desktopAPI.file.toLocalUrl(filePath);
+  editor.imageDataUrl = await window.desktopAPI.file.readDataUrl(filePath);
   editor.imageOverlayName = filePath.split(/[\\/]/).pop() || '';
   editor.fillMode = 'image';
+  await preloadOverlay(editor.imageDataUrl);
   const layer = selectedLayer();
   if (layer) applyControlsToLayer(layer);
   render();
@@ -452,6 +515,7 @@ async function usePreset(item) {
   editor.imageDataUrl = await window.desktopAPI.file.toLocalUrl(item.path);
   editor.imageOverlayName = item.name;
   editor.fillMode = 'image';
+  await preloadOverlay(editor.imageDataUrl);
   const layer = selectedLayer();
   if (layer) applyControlsToLayer(layer);
   render();
@@ -464,6 +528,13 @@ async function exportPng() {
   canvas.height = editor.image.height;
   const ctx = canvas.getContext('2d');
   ctx.drawImage(editor.image, 0, 0);
+
+  const overlayUrls = new Set();
+  for (const layer of editor.layers) {
+    if (layer.fillMode === 'image' && layer.imageDataUrl) overlayUrls.add(layer.imageDataUrl);
+  }
+  await Promise.all([...overlayUrls].map(u => preloadOverlay(u).catch(() => null)));
+
   for (const layer of editor.layers) {
     if (layer.fillMode === 'stripe') drawStripe(ctx, layer, scale);
     else if (layer.fillMode === 'image') await drawImageLayer(ctx, layer, scale);
@@ -696,6 +767,7 @@ onMounted(async () => {
   window.addEventListener('mouseup', onMouseUp);
   window.addEventListener('resize', onResize);
   window.addEventListener('paste', onPaste);
+  window.addEventListener('keydown', onEditorKeyDown);
 });
 
 onBeforeUnmount(() => {
@@ -703,6 +775,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('mouseup', onMouseUp);
   window.removeEventListener('resize', onResize);
   window.removeEventListener('paste', onPaste);
+  window.removeEventListener('keydown', onEditorKeyDown);
 });
 </script>
 
@@ -860,7 +933,16 @@ onBeforeUnmount(() => {
         <div v-if="!editor.image" class="empty-editor">
           <p>从图库进入，手动选择图片，或把图片拖到这里开始编辑。</p>
         </div>
-        <canvas v-else ref="canvasRef" class="editor-canvas" @mousedown="onMouseDown" />
+        <div v-else class="canvas-stage">
+          <canvas ref="canvasRef" class="editor-canvas" @mousedown="onMouseDown" />
+          <button
+            v-if="selectionBox"
+            class="layer-delete-btn"
+            :style="{ left: selectionBox.right + 'px', top: selectionBox.top + 'px' }"
+            @click="deleteSelected"
+            title="删除当前码块 (Delete)"
+          >×</button>
+        </div>
       </div>
     </section>
   </div>
