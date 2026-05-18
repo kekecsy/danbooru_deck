@@ -7,7 +7,7 @@ import danbooru_api
 from danbooru_data import DanbooruData
 
 # 如果需要固定日期，修改这个变量
-TODAY_STR = "2026-05-10"
+TODAY_STR = "2026-05-12"
 
 
 def get_frequency_level(count):
@@ -83,6 +83,8 @@ def grabber(db_data, page_num, log_callback=None, filter_tags=['furry','futanari
                     "filename": saved_filename,
                     "local_path": os.path.join(db_data.save_dir, saved_filename),
                     "post_url": post_url,
+                    "score": test.get('score', 0) or 0,
+                    "fav_count": test.get('fav_count', 0) or 0,
                     "tags": {
                         "tag_string_general": test.get('tag_string_general', ''),
                         "tag_string_character": test.get('tag_string_character', ''),

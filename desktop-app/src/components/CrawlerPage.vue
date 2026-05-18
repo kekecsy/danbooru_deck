@@ -4,7 +4,6 @@ import GalleryCalendar from './GalleryCalendar.vue';
 
 const emit = defineEmits(['edit-image']);
 
-const LOCAL_PAGE_SIZE = 15;
 const LATEST_PAGE_SIZE = 15;
 
 const savedHabitsStr = localStorage.getItem('crawlerHabits') || '{}';
@@ -45,7 +44,18 @@ const gallery = ref({
   images: [],
   search: '',
   filterFormat: 'all',
+  sortBy: habits.sortBy || 'default',
+  hotOnly: false,
+  hotThreshold: habits.hotThreshold || 50,
+  pageSize: habits.pageSize || 30,
   page: 1
+});
+
+watch(() => [gallery.value.sortBy, gallery.value.pageSize, gallery.value.hotThreshold], () => {
+  habits.sortBy = gallery.value.sortBy;
+  habits.pageSize = gallery.value.pageSize;
+  habits.hotThreshold = gallery.value.hotThreshold;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 });
 
 const task = ref({
@@ -88,15 +98,19 @@ watch(() => task.value.logs.length, async () => {
 const filteredLocalImages = computed(() => {
   const keyword = gallery.value.search.trim().toLowerCase();
   const format = gallery.value.filterFormat;
+  const hotOnly = gallery.value.hotOnly;
+  const threshold = gallery.value.hotThreshold;
   const source = gallery.value.images;
-  
-  return source.filter(item => {
+
+  let result = source.filter(item => {
     if (format !== 'all') {
       const ext = (item.filename || '').split('.').pop().toLowerCase();
       if (format === 'zip' && !['zip', 'gif'].includes(ext)) return false;
       if (format === 'video' && !['mp4', 'webm', 'avi', 'mov', 'mkv'].includes(ext)) return false;
       if (format === 'image' && !['jpg', 'jpeg', 'png', 'webp', 'bmp', 'avif'].includes(ext)) return false;
     }
+
+    if (hotOnly && (item.score || 0) < threshold) return false;
 
     if (!keyword) return true;
     const artistMatch = (item.artist || '').toLowerCase().includes(keyword);
@@ -108,14 +122,22 @@ const filteredLocalImages = computed(() => {
     }
     return artistMatch || charMatch;
   });
+
+  const sortBy = gallery.value.sortBy;
+  if (sortBy === 'score') {
+    result = [...result].sort((a, b) => (b.score || 0) - (a.score || 0));
+  } else if (sortBy === 'fav') {
+    result = [...result].sort((a, b) => (b.favCount || 0) - (a.favCount || 0));
+  }
+  return result;
 });
 
-const localTotalPages = computed(() => Math.max(1, Math.ceil(filteredLocalImages.value.length / LOCAL_PAGE_SIZE)));
+const localTotalPages = computed(() => Math.max(1, Math.ceil(filteredLocalImages.value.length / gallery.value.pageSize)));
 
 const pagedLocalImages = computed(() => {
   const page = Math.min(gallery.value.page, localTotalPages.value);
-  const start = (page - 1) * LOCAL_PAGE_SIZE;
-  return filteredLocalImages.value.slice(start, start + LOCAL_PAGE_SIZE);
+  const start = (page - 1) * gallery.value.pageSize;
+  return filteredLocalImages.value.slice(start, start + gallery.value.pageSize);
 });
 
 const activeItems = computed(() => pagedLocalImages.value);
@@ -123,6 +145,11 @@ const activeCount = computed(() => filteredLocalImages.value.length);
 const activeTotalPages = computed(() => localTotalPages.value);
 const viewerItems = computed(() => filteredLocalImages.value);
 const viewerItem = computed(() => viewerItems.value[viewer.value.index] || null);
+const VIDEO_EXTS = ['mp4', 'webm', 'avi', 'mov', 'mkv'];
+function extOf(filename) {
+  return (filename || '').split('.').pop().toLowerCase();
+}
+const viewerIsVideo = computed(() => VIDEO_EXTS.includes(extOf(viewerItem.value?.filename)));
 const activePage = computed({
   get() {
     return gallery.value.page;
@@ -131,6 +158,41 @@ const activePage = computed({
     gallery.value.page = value;
   }
 });
+
+const pageNumbers = computed(() => {
+  const total = activeTotalPages.value;
+  const cur = activePage.value;
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const out = [1];
+  if (cur > 3) out.push('…');
+  const start = Math.max(2, cur - 1);
+  const end = Math.min(total - 1, cur + 1);
+  for (let i = start; i <= end; i++) out.push(i);
+  if (cur < total - 2) out.push('…');
+  out.push(total);
+  return out;
+});
+
+const galleryStats = computed(() => {
+  const all = gallery.value.images;
+  const filtered = filteredLocalImages.value;
+  const scores = filtered.map(i => i.score || 0).filter(s => s > 0);
+  const avg = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
+  const sorted = [...scores].sort((a, b) => a - b);
+  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  return { total: all.length, filtered: filtered.length, avg, median };
+});
+
+const jumpInput = ref(1);
+function doJump() {
+  const n = Math.max(1, Math.min(activeTotalPages.value, jumpInput.value || 1));
+  activePage.value = n;
+  jumpInput.value = n;
+}
+function gotoPage(n) {
+  if (typeof n !== 'number') return;
+  activePage.value = Math.max(1, Math.min(activeTotalPages.value, n));
+}
 
 function appendLog(message) {
   if (!message) return;
@@ -514,19 +576,50 @@ function onViewerWheel(event) {
 }
 
 async function onKeyDown(event) {
-  if (!viewer.value.open) return;
-  if (event.key === 'Escape') {
+  if (viewer.value.open && event.key === 'Escape') {
     closeViewer();
-  } else if (event.key === 'ArrowLeft') {
-    await stepViewer(-1);
-  } else if (event.key === 'ArrowRight') {
-    await stepViewer(1);
+    return;
+  }
+
+  const tag = event.target?.tagName?.toLowerCase();
+  if (['input', 'textarea', 'select', 'video'].includes(tag)) return;
+
+  if (viewer.value.open) {
+    if (event.key === 'ArrowLeft') {
+      await stepViewer(-1);
+    } else if (event.key === 'ArrowRight') {
+      await stepViewer(1);
+    }
+    return;
+  }
+
+  if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+    if (activePage.value > 1) activePage.value -= 1;
+  } else if (event.key === 'ArrowRight' || event.key === 'PageDown') {
+    if (activePage.value < activeTotalPages.value) activePage.value += 1;
+  } else if (event.key === 'Home') {
+    activePage.value = 1;
+  } else if (event.key === 'End') {
+    activePage.value = activeTotalPages.value;
   }
 }
 
-watch(gallery.search, () => {
-  gallery.value.page = 1;
-});
+async function onViewerJump(event) {
+  const n = parseInt(event.target.value, 10);
+  if (Number.isNaN(n)) return;
+  const idx = Math.max(0, Math.min(viewerItems.value.length - 1, n - 1));
+  if (idx === viewer.value.index) return;
+  viewer.value.index = idx;
+  await syncViewerImage();
+}
+
+watch(() => gallery.value.search, () => { gallery.value.page = 1; });
+watch(() => gallery.value.filterFormat, () => { gallery.value.page = 1; });
+watch(() => gallery.value.sortBy, () => { gallery.value.page = 1; });
+watch(() => gallery.value.hotOnly, () => { gallery.value.page = 1; });
+watch(() => gallery.value.pageSize, () => { gallery.value.page = 1; });
+
+watch(activePage, n => { jumpInput.value = n; });
 
 watch(localTotalPages, total => {
   if (gallery.value.page > total) gallery.value.page = total;
@@ -659,16 +752,32 @@ const modeDescription = computed(() => {
         <div>
           <h2>本地已下载</h2>
           <p class="inline-note">
-            共 {{ activeCount }} 张，当前日期 {{ gallery.selectedDate || '未选择' }}
+            共 {{ galleryStats.total }} 张<span v-if="galleryStats.filtered !== galleryStats.total"> · 已筛选 {{ galleryStats.filtered }} 张</span><span v-if="galleryStats.avg > 0"> · 平均 ★ {{ galleryStats.avg }} · 中位 ★ {{ galleryStats.median }}</span> · {{ gallery.selectedDate || '未选择' }}
           </p>
         </div>
         <div class="gallery-tools">
+          <select v-model="gallery.sortBy" class="search-input" style="width: auto;" title="排序方式">
+            <option value="default">默认抓取顺序</option>
+            <option value="score">按 score 排序</option>
+            <option value="fav">按收藏数排序</option>
+          </select>
           <select v-model="gallery.filterFormat" class="search-input" style="width: auto;">
             <option value="all">全部格式</option>
             <option value="image">图片</option>
             <option value="video">视频</option>
             <option value="zip">动图ZIP</option>
           </select>
+          <select v-model.number="gallery.pageSize" class="search-input" style="width: auto;" title="每页数量">
+            <option :value="15">15 / 页</option>
+            <option :value="30">30 / 页</option>
+            <option :value="60">60 / 页</option>
+            <option :value="120">120 / 页</option>
+          </select>
+          <button
+            :class="['hot-toggle', { active: gallery.hotOnly }]"
+            @click="gallery.hotOnly = !gallery.hotOnly"
+            :title="`只看 score ≥ ${gallery.hotThreshold}`"
+          >🔥 只看高分</button>
           <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
           <button class="secondary" @click="importTranslationFile" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">导入翻译字典</button>
           <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
@@ -687,6 +796,10 @@ const modeDescription = computed(() => {
       <div v-else class="gallery-grid">
         <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card">
           <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @click="openViewer(item)" />
+          <div v-if="(item.score || 0) > 0 || (item.favCount || 0) > 0" class="score-badge">
+            <span><span class="score-star">★</span> {{ item.score || 0 }}</span>
+            <span><span class="score-heart">♥</span> {{ item.favCount || 0 }}</span>
+          </div>
           <div class="card-meta">
             <div class="token-row">
               <button
@@ -720,17 +833,45 @@ const modeDescription = computed(() => {
       </div>
 
       <div class="pagination-bar" v-if="activeCount">
-        <button class="secondary" @click="activePage -= 1" :disabled="activePage <= 1">上一页</button>
-        <span>第 {{ activePage }} / {{ activeTotalPages }} 页</span>
-        <button class="secondary" @click="activePage += 1" :disabled="activePage >= activeTotalPages">下一页</button>
+        <button class="ghost pg-btn" @click="gotoPage(1)" :disabled="activePage <= 1" title="首页">«</button>
+        <button class="ghost pg-btn" @click="gotoPage(activePage - 1)" :disabled="activePage <= 1" title="上一页 (←)">‹</button>
+        <button
+          v-for="(n, i) in pageNumbers"
+          :key="`pg-${i}-${n}`"
+          class="pg-num"
+          :class="{ active: n === activePage, ellipsis: n === '…' }"
+          :disabled="n === '…'"
+          @click="gotoPage(n)"
+        >{{ n }}</button>
+        <button class="ghost pg-btn" @click="gotoPage(activePage + 1)" :disabled="activePage >= activeTotalPages" title="下一页 (→)">›</button>
+        <button class="ghost pg-btn" @click="gotoPage(activeTotalPages)" :disabled="activePage >= activeTotalPages" title="末页">»</button>
+        <span class="pg-jump">
+          跳转
+          <input type="number" min="1" :max="activeTotalPages" v-model.number="jumpInput" @keyup.enter="doJump" />
+          / {{ activeTotalPages }}
+        </span>
       </div>
     </section>
 
     <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer">
       <div class="viewer-toolbar">
-        <div>
+        <div class="viewer-toolbar-info">
           <strong>{{ viewerItem?.artist || '未知' }}</strong>
-          <span class="muted compact-text" style="color: #ccc;">第 {{ viewer.index + 1 }} / {{ viewerItems.length }} 张</span>
+          <span class="muted compact-text" style="color: #ccc;">
+            第
+            <input
+              class="viewer-jump-input"
+              type="number"
+              min="1"
+              :max="viewerItems.length"
+              :value="viewer.index + 1"
+              @keyup.enter="onViewerJump($event)"
+              @change="onViewerJump($event)"
+            />
+            / {{ viewerItems.length }} 张
+          </span>
+          <span v-if="(viewerItem?.score || 0) > 0" class="viewer-score">★ {{ viewerItem.score }}</span>
+          <span v-if="(viewerItem?.favCount || 0) > 0" class="viewer-fav">♥ {{ viewerItem.favCount }}</span>
         </div>
         <div class="button-row compact viewer-actions">
           <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
@@ -742,8 +883,16 @@ const modeDescription = computed(() => {
       </div>
       <div class="viewer-stage" @wheel="onViewerWheel" @click.self="closeViewer">
         <div class="viewer-image-wrap" :style="{ zoom: viewer.zoom }">
+          <video
+            v-if="viewer.imageUrl && viewerIsVideo"
+            class="viewer-image"
+            :src="viewer.imageUrl"
+            controls
+            autoplay
+            preload="metadata"
+          />
           <img
-            v-if="viewer.imageUrl"
+            v-else-if="viewer.imageUrl"
             class="viewer-image"
             :src="viewer.imageUrl"
             :alt="viewerItem?.filename || 'preview'"

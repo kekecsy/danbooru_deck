@@ -126,7 +126,9 @@ def build_local_image_library(selected_date=None):
                 "post_url": item.get("post_url") or "#",
                 "web_url": web_url,
                 "tags": tags_dict,
-                "characters": translated_chars
+                "characters": translated_chars,
+                "score": item.get("score", 0) or 0,
+                "fav_count": item.get("fav_count", 0) or 0
             })
 
     if current_day_dir.exists():
@@ -304,6 +306,8 @@ def _append_viewer(ids, artist, saved_filename, post):
         "local_path": os.path.join(save_dir, saved_filename),
         "post_url": post_url,
         "web_url": web_url,
+        "score": post.get('score', 0) or 0,
+        "fav_count": post.get('fav_count', 0) or 0,
         "tags": {
             "tag_string_general": post.get('tag_string_general', ''),
             "tag_string_character": post.get('tag_string_character', ''),

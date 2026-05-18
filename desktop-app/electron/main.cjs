@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, nativeImage, protocol, net } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
+const { Readable } = require('node:stream');
 const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
 
@@ -129,7 +130,9 @@ async function buildGalleryByDate(requestedDate) {
         localPath: toAbsolutePath(item.local_path || path.join(hotPicDir, data.selected_date, item.filename)),
         postUrl: item.post_url || '',
         characters: item.characters || '',
-        tags: item.tags || {}
+        tags: item.tags || {},
+        score: item.score || 0,
+        favCount: item.fav_count || 0
       }));
       return {
         selectedDate: data.selected_date,
@@ -160,7 +163,9 @@ async function buildGalleryByDate(requestedDate) {
       localPath: toAbsolutePath(item.local_path || path.join(dateDir, filename)),
       postUrl: item.post_url || '',
       characters: translateTags(item.tags?.tag_string_character || ''),
-      tags: item.tags || {}
+      tags: item.tags || {},
+      score: item.score || 0,
+      favCount: item.fav_count || 0
     });
   }
 
@@ -206,7 +211,12 @@ function mimeFromFile(targetPath) {
     '.webp': 'image/webp',
     '.gif': 'image/gif',
     '.bmp': 'image/bmp',
-    '.avif': 'image/avif'
+    '.avif': 'image/avif',
+    '.mp4': 'video/mp4',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.mkv': 'video/x-matroska',
+    '.avi': 'video/x-msvideo'
   };
   return map[ext] || 'application/octet-stream';
 }
@@ -353,7 +363,9 @@ async function ensureCrawlerService() {
 function normalizeCrawlerImage(item) {
   return {
     ...item,
-    local_path: toAbsolutePath(item.local_path || '')
+    local_path: toAbsolutePath(item.local_path || ''),
+    score: item.score || 0,
+    favCount: item.fav_count || 0
   };
 }
 
@@ -474,13 +486,56 @@ ipcMain.handle('crawler:status', async () => {
 });
 
 app.whenReady().then(() => {
-  protocol.handle('local', (request) => {
+  protocol.handle('local', async (request) => {
     const url = request.url.replace(/^local:\/\//, '');
     const filePath = decodeURIComponent(url);
     if (!isWithin(hotPicDir, filePath)) {
       return new Response('Access denied', { status: 403 });
     }
-    return net.fetch(pathToFileURL(filePath).toString());
+
+    try {
+      const stat = await fs.promises.stat(filePath);
+      const fileSize = stat.size;
+      const mimeType = mimeFromFile(filePath);
+      const rangeHeader = request.headers.get('range');
+
+      if (rangeHeader) {
+        const match = /bytes=(\d+)-(\d*)/.exec(rangeHeader);
+        if (match) {
+          const start = parseInt(match[1], 10);
+          const end = match[2] ? Math.min(parseInt(match[2], 10), fileSize - 1) : fileSize - 1;
+          if (start > end || start >= fileSize) {
+            return new Response('Range Not Satisfiable', {
+              status: 416,
+              headers: { 'Content-Range': `bytes */${fileSize}` }
+            });
+          }
+          const chunkSize = end - start + 1;
+          const stream = fs.createReadStream(filePath, { start, end });
+          return new Response(Readable.toWeb(stream), {
+            status: 206,
+            headers: {
+              'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+              'Accept-Ranges': 'bytes',
+              'Content-Length': String(chunkSize),
+              'Content-Type': mimeType
+            }
+          });
+        }
+      }
+
+      const stream = fs.createReadStream(filePath);
+      return new Response(Readable.toWeb(stream), {
+        status: 200,
+        headers: {
+          'Content-Length': String(fileSize),
+          'Content-Type': mimeType,
+          'Accept-Ranges': 'bytes'
+        }
+      });
+    } catch (err) {
+      return new Response(`Error: ${err.message}`, { status: 500 });
+    }
   });
   createWindow();
   app.on('activate', () => {
