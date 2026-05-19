@@ -14,7 +14,9 @@
       "Bash(./node_modules/electron/dist/electron.exe ./electron_app_test)",
       "Bash(netstat -ano)",
       "Bash(awk '{print $5}')",
-      "Bash(taskkill //F //PID 23852)"
+      "Bash(taskkill //F //PID 23852)",
+      "Bash(python -c ' *)",
+      "Bash(node -e ' *)"
     ]
   }
 }

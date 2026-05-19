@@ -1,4 +1,6 @@
 import os
+import socket
+import urllib.parse
 from time import sleep
 from curl_cffi import requests
 from my_utils import get_proxies_for_url
@@ -13,7 +15,34 @@ HEADERS = {
     "Accept": "application/json"
 }
 
-PROXIES = get_proxies_for_url("https://danbooru.donmai.us")
+
+def _proxy_alive(proxies, timeout=1.5):
+    """TCP-探测代理端口是否可连接。proxies 为空时按 True 处理。"""
+    if not proxies:
+        return True
+    proxy_url = proxies.get("https") or proxies.get("http")
+    if not proxy_url:
+        return True
+    parsed = urllib.parse.urlparse(proxy_url)
+    host, port = parsed.hostname, parsed.port
+    if not host or not port:
+        return True
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+_RAW_PROXIES = get_proxies_for_url("https://danbooru.donmai.us")
+if _RAW_PROXIES and not _proxy_alive(_RAW_PROXIES):
+    # 环境变量里写了代理但端口没人监听（典型场景：Clash/v2ray 没开），
+    # 用户大概率本身可以直连 —— 直接清空 PROXIES，否则 curl_cffi 会卡死在
+    # "Failed to connect to 127.0.0.1 port 7897" 然后整个抓图任务失败。
+    print(f"[proxy] 检测到环境变量代理 {_RAW_PROXIES} 不可达，自动改用直连。如需走代理请先启动代理软件再重启后端。")
+    PROXIES = {}
+else:
+    PROXIES = _RAW_PROXIES
 
 def check_proxy_simple():
     url = "https://danbooru.donmai.us"

@@ -2,6 +2,8 @@ import os
 import json
 import datetime
 
+from my_utils import dedup_viewer_data
+
 class DanbooruData:
     def __init__(self, target_date=None):
         self.base_dir = './hot_pic'
@@ -72,10 +74,13 @@ class DanbooruData:
         self._save_json(self.stats_path, self.artist_stats)
 
     def load_viewer_data(self):
-        return self._load_json(os.path.join(self.save_dir, "viewer_data.json"), [])
+        items = self._load_json(os.path.join(self.save_dir, "viewer_data.json"), [])
+        if not isinstance(items, list):
+            return []
+        return dedup_viewer_data(items)
 
     def save_viewer_data(self, data):
-        self._save_json(os.path.join(self.save_dir, "viewer_data.json"), data)
+        self._save_json(os.path.join(self.save_dir, "viewer_data.json"), dedup_viewer_data(data))
 
     def load_ids_data(self):
         return self._load_json(os.path.join(self.save_dir, "ids_data.json"), [])

@@ -62,9 +62,14 @@ const task = ref({
   isRunning: false,
   isPaused: false,
   logs: ['桌面端已启动。'],
+  totalLogCount: 1,
   backendError: '',
+  backendErrorExpanded: false,
   backendTail: [],
-  showLogs: false
+  showLogs: false,
+  maximized: false,
+  hideSuccess: true,
+  expandedLogIdx: -1
 });
 const viewer = ref({
   open: false,
@@ -79,7 +84,6 @@ const refresh = ref({
   total: 0,
   dateStr: ''
 });
-let refreshTimer = null;
 
 const toast = ref({
   show: false,
@@ -96,7 +100,7 @@ const loadingGallery = ref(false);
 let pollTimer = null;
 const logBodyRef = ref(null);
 
-watch(() => task.value.logs.length, async () => {
+watch(() => task.value.totalLogCount, async () => {
   if (task.value.showLogs && logBodyRef.value) {
     await nextTick();
     logBodyRef.value.scrollTop = logBodyRef.value.scrollHeight;
@@ -205,8 +209,71 @@ function gotoPage(n) {
 function appendLog(message) {
   if (!message) return;
   task.value.logs.push(message);
-  task.value.logs = task.value.logs.slice(-320);
+  task.value.totalLogCount += 1;
+  // 保留最近 500 条用于渲染，避免 DOM 节点过多导致卡顿；
+  // totalLogCount 单独记录运行至今的全量数量，避免“计数停在 320”的错觉
+  if (task.value.logs.length > 500) {
+    task.value.logs = task.value.logs.slice(-500);
+  }
 }
+
+function clearLogs() {
+  task.value.logs = [];
+  task.value.totalLogCount = 0;
+  task.value.expandedLogIdx = -1;
+}
+
+function toggleLogExpand(idx) {
+  task.value.expandedLogIdx = task.value.expandedLogIdx === idx ? -1 : idx;
+}
+
+function dismissBackendError() {
+  task.value.backendError = '';
+  task.value.backendErrorExpanded = false;
+}
+
+function toggleLogMaximize() {
+  task.value.maximized = !task.value.maximized;
+  // 放大时强制展开，否则只看到一个空的 header 没意义
+  if (task.value.maximized) task.value.showLogs = true;
+}
+
+function toggleLogHeader() {
+  // 放大态下不允许通过 header 折叠 —— 折叠会让人误以为日志消失
+  if (task.value.maximized) return;
+  task.value.showLogs = !task.value.showLogs;
+}
+
+// 按行匹配“下载完成 / 文件已存在 / 正在下载 ...”这类逐张日志，
+// 用户表示更关心异常和概要，因此默认收起这些噪音。
+const SUCCESS_NOISE_PATTERNS = [
+  /^正在下载[:：]/,
+  /^下载完成[:：]/,
+  /^文件已存在[:：]/
+];
+
+function isSuccessNoise(line) {
+  if (!line) return false;
+  return SUCCESS_NOISE_PATTERNS.some(re => re.test(line));
+}
+
+const visibleLogs = computed(() => {
+  if (!task.value.hideSuccess) {
+    return task.value.logs.map((line, idx) => ({ line, idx }));
+  }
+  const out = [];
+  for (let i = 0; i < task.value.logs.length; i += 1) {
+    const line = task.value.logs[i];
+    if (isSuccessNoise(line)) continue;
+    out.push({ line, idx: i });
+  }
+  return out;
+});
+
+const hiddenSuccessCount = computed(() => {
+  if (!task.value.hideSuccess) return 0;
+  return task.value.logs.filter(isSuccessNoise).length;
+});
 
 function splitTags(value) {
   return String(value || '').split(' ').map(item => item.trim()).filter(Boolean);
@@ -446,6 +513,9 @@ function extractPostId(postUrl) {
 }
 
 async function startRefreshScores() {
+  // 刷新「当前展示页」而不是整日 —— 一次只调 15~30 张，避免被风控；
+  // 同时这条路径会把孤立文件（之前下载到本地但没有 viewer_data 条目的图）
+  // 通过后端的 log.json 反查补全 artist / 热度信息。
   const date = gallery.value.selectedDate;
   if (!date) {
     showToast('请先选择日期', 'error');
@@ -455,79 +525,90 @@ async function startRefreshScores() {
     showToast('已有刷新任务在运行', 'info');
     return;
   }
+  const pageItems = pagedLocalImages.value;
+  if (!pageItems.length) {
+    showToast('当前页没有图片', 'info');
+    return;
+  }
+  const filenames = pageItems.map(it => it.filename).filter(Boolean);
+
+  refresh.value.isRunning = true;
+  refresh.value.dateStr = date;
+  refresh.value.total = filenames.length;
+  refresh.value.done = 0;
+  showToast(`正在刷新当前页 ${filenames.length} 张...`, 'info');
+
   try {
-    const res = await fetch(`http://127.0.0.1:8000/api/refresh_scores/${date}`, { method: 'POST' });
+    const res = await fetch('http://127.0.0.1:8000/api/refresh_visible', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, filenames })
+    });
     const result = await res.json();
     if (!result.ok) {
-      showToast(result.msg || '启动刷新失败', 'error');
+      showToast(result.msg || '刷新失败', 'error');
       return;
     }
-    refresh.value.isRunning = true;
-    refresh.value.dateStr = date;
-    refresh.value.done = 0;
-    refresh.value.total = 0;
-    showToast(`正在刷新 ${date} 的热度...`, 'info');
-    if (!refreshTimer) refreshTimer = window.setInterval(pollRefreshStatus, 1500);
+    let okCount = 0;
+    let failCount = 0;
+    for (const u of result.updates || []) {
+      if (!u.ok) { failCount += 1; continue; }
+      const target = gallery.value.images.find(img => img.filename === u.filename);
+      if (target) {
+        applyRefreshUpdate(target, u);
+        okCount += 1;
+      }
+      refresh.value.done = okCount + failCount;
+    }
+    if (failCount > 0) {
+      showToast(`已刷新 ${okCount} 张，${failCount} 张失败`, okCount > 0 ? 'info' : 'error');
+    } else {
+      showToast(`已刷新 ${okCount} 张`, 'success');
+    }
   } catch (err) {
-    showToast(`启动失败: ${err.message}`, 'error');
+    showToast(`请求失败: ${err.message}`, 'error');
+  } finally {
+    refresh.value.isRunning = false;
   }
 }
 
+function applyRefreshUpdate(target, u) {
+  target.score = u.score;
+  target.favCount = u.fav_count;
+  if (u.artist) {
+    target.artist = u.artist;
+    target.artistTokens = splitTags(u.artist);
+  }
+  if (u.post_url) target.postUrl = u.post_url;
+  if (Array.isArray(u.characters)) {
+    target.characters = u.characters;
+    target.characterTokens = u.characters;
+  }
+  if (u.tags) target.tags = { ...(target.tags || {}), ...u.tags };
+}
+
 async function stopRefreshScores() {
+  // 现在使用同步的 /api/refresh_visible，没有后台线程可停 —— 保留按钮但只做兜底
+  refresh.value.isRunning = false;
   try {
     await fetch('http://127.0.0.1:8000/api/refresh_scores_stop', { method: 'POST' });
   } catch (_) { /* noop */ }
 }
 
-async function pollRefreshStatus() {
-  try {
-    const res = await fetch('http://127.0.0.1:8000/api/refresh_scores_status');
-    const status = await res.json();
-    refresh.value.isRunning = !!status.is_running;
-    refresh.value.done = status.done || 0;
-    refresh.value.total = status.total || 0;
-    refresh.value.dateStr = status.date_str || '';
-
-    if (Array.isArray(status.recent) && status.recent.length) {
-      const updates = new Map();
-      for (const u of status.recent) updates.set(String(u.post_id), u);
-      for (const item of gallery.value.images) {
-        const pid = extractPostId(item.postUrl);
-        const u = updates.get(pid);
-        if (u) {
-          item.score = u.score;
-          item.favCount = u.fav_count;
-        }
-      }
-    }
-
-    if (!status.is_running) {
-      if (refreshTimer) {
-        window.clearInterval(refreshTimer);
-        refreshTimer = null;
-      }
-      if (status.error) {
-        showToast(`刷新出错: ${status.error}`, 'error');
-      } else if (refresh.value.total > 0) {
-        showToast('热度刷新完成', 'success');
-      }
-    }
-  } catch (err) {
-    /* 静默失败，下次重试 */
-  }
-}
-
 async function refreshSinglePost(item) {
-  const postId = extractPostId(item?.postUrl);
-  if (!postId) return;
+  if (!item?.filename) return;
   const date = gallery.value.selectedDate || '';
+  if (!date) return;
   try {
-    const res = await fetch(`http://127.0.0.1:8000/api/refresh_score/${postId}?date=${encodeURIComponent(date)}`);
+    const res = await fetch('http://127.0.0.1:8000/api/refresh_visible', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, filenames: [item.filename] })
+    });
     const result = await res.json();
-    if (result.ok) {
-      item.score = result.score;
-      item.favCount = result.fav_count;
-    }
+    if (!result.ok) return;
+    const u = (result.updates || [])[0];
+    if (u && u.ok) applyRefreshUpdate(item, u);
   } catch (_) { /* 静默失败 */ }
 }
 
@@ -658,6 +739,15 @@ function closeViewer() {
 
 function getLogType(line) {
   if (!line) return 'log-info';
+
+  // 「成功 X / 跳过 Y / 失败 Z」这种页结概要：按真实失败数判定，
+  // Z=0 时不应该挂红 ×，否则永远是错误样式
+  const summary = line.match(/成功\s+(\d+)\s*\/\s*跳过\s+(\d+)\s*\/\s*失败\s+(\d+)/);
+  if (summary) {
+    const failed = parseInt(summary[3], 10);
+    return failed > 0 ? 'log-error' : 'log-success';
+  }
+
   const text = line.toLowerCase();
   if (text.includes('失败') || text.includes('错误') || text.includes('error') || text.includes('异常')) return 'log-error';
   if (text.includes('成功') || text.includes('完成') || text.includes('finish')) return 'log-success';
@@ -755,7 +845,6 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (pollTimer) window.clearInterval(pollTimer);
-  if (refreshTimer) window.clearInterval(refreshTimer);
   window.removeEventListener('keydown', onKeyDown);
 });
 
@@ -836,26 +925,69 @@ const modeDescription = computed(() => {
         <span class="pill" :class="{ warning: task.isPaused }">已暂停: {{ task.isPaused ? '是' : '否' }}</span>
       </div>
 
-      <p v-if="task.backendError" class="error-text">{{ task.backendError }}</p>
+      <div v-if="task.backendError" class="error-banner" :class="{ 'is-expanded': task.backendErrorExpanded }">
+        <div class="error-banner-head">
+          <span class="error-banner-icon">×</span>
+          <span class="error-banner-text">{{ task.backendError.split('\n')[0] }}</span>
+          <div class="error-banner-actions">
+            <button class="error-banner-btn" @click="task.backendErrorExpanded = !task.backendErrorExpanded">
+              {{ task.backendErrorExpanded ? '收起' : '查看详情' }}
+            </button>
+            <button class="error-banner-btn" @click="dismissBackendError">关闭</button>
+          </div>
+        </div>
+        <pre v-if="task.backendErrorExpanded" class="error-banner-body">{{ task.backendError }}</pre>
+      </div>
 
-      <div class="modern-log-wrapper" :class="{ 'is-expanded': task.showLogs }">
-        <div class="modern-log-header" @click="task.showLogs = !task.showLogs">
+      <div class="modern-log-wrapper" :class="{ 'is-expanded': task.showLogs, 'is-maximized': task.maximized }">
+        <div class="modern-log-header" @click="toggleLogHeader">
           <div class="log-header-left">
             <span class="status-dot" :class="{ 'is-active': task.isRunning }"></span>
             <span class="log-title">运行动态</span>
           </div>
-          <div class="log-header-right">
-            <span class="log-count" v-if="task.logs.length">{{ task.logs.length }} 条记录</span>
-            <svg class="chevron" :class="{ 'is-rotated': task.showLogs }" viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="6 9 12 15 18 9"></polyline>
-            </svg>
+          <div class="log-header-right" @click.stop>
+            <button
+              class="log-toolbar-btn"
+              :class="{ active: task.hideSuccess }"
+              @click="task.hideSuccess = !task.hideSuccess"
+              :title="task.hideSuccess ? '当前隐藏单张下载/已存在日志，点击切换为显示全部' : '当前显示全部日志，点击只看异常与概要'"
+            >{{ task.hideSuccess ? '只看异常+概要' : '显示全部' }}</button>
+            <button class="log-toolbar-btn" @click="clearLogs" title="清空当前日志">清空</button>
+            <button
+              class="log-icon-btn"
+              @click="toggleLogMaximize"
+              :title="task.maximized ? '缩小日志面板' : '放大日志面板（覆盖抓图任务卡片）'"
+            >
+              <svg v-if="!task.maximized" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-label="放大">
+                <polyline points="15 3 21 3 21 9"></polyline>
+                <polyline points="9 21 3 21 3 15"></polyline>
+                <line x1="21" y1="3" x2="14" y2="10"></line>
+                <line x1="3" y1="21" x2="10" y2="14"></line>
+              </svg>
+              <svg v-else viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-label="缩小">
+                <polyline points="4 14 10 14 10 20"></polyline>
+                <polyline points="20 10 14 10 14 4"></polyline>
+                <line x1="14" y1="10" x2="21" y2="3"></line>
+                <line x1="3" y1="21" x2="10" y2="14"></line>
+              </svg>
+            </button>
           </div>
         </div>
         <transition name="log-expand">
           <div class="modern-log-body" v-show="task.showLogs" ref="logBodyRef">
-            <div class="modern-log-line" v-for="(log, i) in task.logs" :key="i" :class="getLogType(log)">
-              <span class="log-icon">{{ getLogIcon(log) }}</span>
-              <span class="log-text">{{ log }}</span>
+            <div v-if="task.hideSuccess && hiddenSuccessCount" class="modern-log-hint">
+              已折叠 {{ hiddenSuccessCount }} 条单张下载/已存在日志（点击右上「显示全部」可查看）
+            </div>
+            <div
+              class="modern-log-line"
+              v-for="entry in visibleLogs"
+              :key="entry.idx"
+              :class="[getLogType(entry.line), { 'is-expanded': task.expandedLogIdx === entry.idx }]"
+              @click="toggleLogExpand(entry.idx)"
+              :title="task.expandedLogIdx === entry.idx ? '点击收起' : '点击展开完整内容'"
+            >
+              <span class="log-icon">{{ getLogIcon(entry.line) }}</span>
+              <span class="log-text">{{ entry.line }}</span>
             </div>
           </div>
         </transition>
@@ -897,9 +1029,9 @@ const modeDescription = computed(() => {
             :class="['refresh-btn', { active: refresh.isRunning }]"
             @click="refresh.isRunning ? stopRefreshScores() : startRefreshScores()"
             :disabled="!gallery.selectedDate"
-            :title="refresh.isRunning ? '点击停止刷新' : '多线程重新拉取当前日期所有图的 score / 收藏数'"
+            :title="refresh.isRunning ? '点击停止刷新' : '刷新当前页可见图片的 score / 收藏数 / 画师（对缺失热度的图会反查补全）'"
           >
-            <span v-if="!refresh.isRunning">🔄 刷新热度</span>
+            <span v-if="!refresh.isRunning">🔄 刷新本页</span>
             <span v-else>⏸ {{ refresh.done }}/{{ refresh.total }}</span>
           </button>
           <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
@@ -1048,6 +1180,11 @@ const modeDescription = computed(() => {
 </template>
 
 <style scoped>
+/* 控制面板设为 relative，给日志面板的「放大」态做绝对定位锚点 */
+.control-panel {
+  position: relative;
+}
+
 /* Modern Log UI */
 .modern-log-wrapper {
   margin-top: 12px;
@@ -1061,6 +1198,26 @@ const modeDescription = computed(() => {
 }
 .modern-log-wrapper.is-expanded {
   flex: 1;
+  min-height: 0;
+}
+
+/* 放大态：脱离正常流，铺满整个 control-panel 卡片 */
+.modern-log-wrapper.is-maximized {
+  position: absolute;
+  inset: 0;
+  margin-top: 0;
+  z-index: 20;
+  border-radius: 18px;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+  min-height: 0;
+  flex: none;
+}
+.modern-log-wrapper.is-maximized .modern-log-header {
+  cursor: default;
+  border-radius: 18px 18px 0 0;
+}
+.modern-log-wrapper.is-maximized .modern-log-body {
+  flex: 1 1 auto;
   min-height: 0;
 }
 
@@ -1121,21 +1278,24 @@ const modeDescription = computed(() => {
   gap: 10px;
 }
 
-.log-count {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.7);
-  background: rgba(0, 0, 0, 0.3);
-  padding: 2px 8px;
-  border-radius: 999px;
-  border: 1px solid rgba(255,255,255,0.1);
+.log-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
 }
-
-.chevron {
-  color: rgba(255, 255, 255, 0.5);
-  transition: transform 0.3s ease;
-}
-.chevron.is-rotated {
-  transform: rotate(180deg);
+.log-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.3);
+  color: #fff;
 }
 
 .modern-log-body {
@@ -1163,9 +1323,132 @@ const modeDescription = computed(() => {
   line-height: 1.4;
   word-break: break-all;
   animation: slideIn 0.2s ease-out forwards;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.modern-log-line:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.modern-log-line .log-text {
+  flex: 1;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  white-space: pre-wrap;
+}
+.modern-log-line.is-expanded {
+  background: rgba(255, 255, 255, 0.06);
+}
+.modern-log-line.is-expanded .log-text {
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  overflow: visible;
+  white-space: pre-wrap;
+  user-select: text;
 }
 .modern-log-line:last-child {
   border-bottom: none;
+}
+
+.modern-log-hint {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  padding: 6px 0;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.1);
+  margin-bottom: 4px;
+  font-style: italic;
+}
+
+.log-toolbar-btn {
+  font-size: 11px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: rgba(255, 255, 255, 0.85);
+  padding: 3px 10px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+  font-family: inherit;
+}
+.log-toolbar-btn:hover {
+  background: rgba(255, 255, 255, 0.16);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+.log-toolbar-btn.active {
+  background: rgba(255, 188, 86, 0.25);
+  border-color: rgba(255, 188, 86, 0.5);
+  color: #ffd699;
+}
+
+.error-banner {
+  margin-top: 10px;
+  background: rgba(120, 30, 30, 0.18);
+  border: 1px solid rgba(255, 90, 90, 0.45);
+  border-radius: 12px;
+  color: #ffb4b4;
+  font-size: 12px;
+  overflow: hidden;
+}
+.error-banner-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+}
+.error-banner-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 80, 80, 0.3);
+  color: #fff;
+  border-radius: 50%;
+  font-weight: bold;
+  font-size: 12px;
+}
+.error-banner-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 600;
+}
+.error-banner-actions {
+  flex-shrink: 0;
+  display: flex;
+  gap: 6px;
+}
+.error-banner-btn {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: #ffd5d5;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.error-banner-btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+.error-banner-body {
+  margin: 0;
+  padding: 6px 12px 12px 12px;
+  max-height: 160px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 11px;
+  color: #ffd5d5;
+  background: rgba(0, 0, 0, 0.25);
+  border-top: 1px solid rgba(255, 90, 90, 0.25);
+  user-select: text;
 }
 
 .log-icon {

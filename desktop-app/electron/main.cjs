@@ -155,6 +155,9 @@ async function buildGalleryByDate(requestedDate) {
   for (const item of [...viewerData].reverse()) {
     const filename = item.filename;
     if (!filename) continue;
+    // viewer_data.json 早期版本会在 popular_range 流程里追加重复条目，
+    // 此处按 filename 去重，避免画廊里同一张图显示两次
+    if (knownFiles.has(filename)) continue;
     knownFiles.add(filename);
     images.push({
       artist: item.artist || '未知',

@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from my_utils import (
     clear_runtime_snapshot,
+    dedup_viewer_data,
     load_json,
     merge_daily_viewer_data,
     save_runtime_snapshot,
@@ -103,17 +104,21 @@ def build_local_image_library(selected_date=None):
     current_day_dir = Path(base_download_dir) / resolved_date
     viewer_files = [current_day_dir / "viewer_data.json"]
     known_paths = set()
+    seen_filenames = set()
 
     for viewer_file in viewer_files:
         if not viewer_file.exists():
             continue
         day_folder = viewer_file.parent.name
-        items = load_json(str(viewer_file), [])
+        items = dedup_viewer_data(load_json(str(viewer_file), []))
         for item in reversed(items):
             filename = item.get("filename")
             web_url = item.get("web_url")
             if not filename:
                 continue
+            if filename in seen_filenames:
+                continue
+            seen_filenames.add(filename)
             if not web_url:
                 web_url = f"/images/{day_folder}/{filename}"
             local_key = os.path.join(day_folder, filename).replace("\\", "/")
@@ -244,6 +249,11 @@ class TranslationImportRequest(BaseModel):
 class ConvertLocalZipRequest(BaseModel):
     local_path: str
 
+
+class RefreshVisibleRequest(BaseModel):
+    date: str
+    filenames: list[str] = []
+
 # ==========================================
 # 3. 核心爬虫逻辑 (融入了打断检测)
 # ==========================================
@@ -315,12 +325,23 @@ def _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists
 def _append_viewer(ids, artist, saved_filename, post):
     """往 daily_viewer_data 追加一条记录"""
     global daily_viewer_data
-    if not (saved_filename and artist):
+    if not saved_filename:
         return
+    # Danbooru 上有些帖子（如部分纯角色/无主帖）tag_string_artist 是空的，
+    # 之前直接 return 会让图片下载到本地却没有热度信息条目 —— 改成用 "未知"
+    # 作者占位，至少把 score / fav_count / post_url 这些热度元数据保留下来。
+    artist_for_record = artist or "未知"
     post_url = f"https://danbooru.donmai.us/posts/{ids}"
     web_url = f"/images/{today_str}/{saved_filename}"
+    # 同进程内防止同一个 id / filename 被追加两次（修复 popular_range 中
+    # 历史出现的 17 条数据被重复写入的现象）
+    for existing in daily_viewer_data:
+        if existing.get("post_url") == post_url:
+            return
+        if existing.get("filename") == saved_filename and existing.get("web_url") == web_url:
+            return
     daily_viewer_data.append({
-        "artist": artist,
+        "artist": artist_for_record,
         "filename": saved_filename,
         "local_path": os.path.join(save_dir, saved_filename),
         "post_url": post_url,
@@ -355,17 +376,28 @@ def grabber_rank(db_data_inst, page_num, filter_tags):
         save_runtime_snapshot(db_data_inst.log_data, db_data_inst.artist_stats, daily_viewer_data, runtime_snapshot_path)
         return [], {"1": [], "2": []}
 
+    page_success = 0
+    page_skipped = 0
+    page_failed = 0
     for post in posts:
         if not state.is_running:
             break
         state.play_event.wait()
         result = _process_post(post, db_data_inst, filter_tags, do_download=True)
-        if not result:
+        if result is None:
+            page_skipped += 1
             continue
         ids, artist, saved_filename = result
+        if saved_filename:
+            page_success += 1
+        else:
+            page_failed += 1
         _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists)
         _append_viewer(ids, artist, saved_filename, post)
 
+    append_log(
+        f"[Rank] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
+    )
     db_data_inst.save_global_data()
     db_data_inst.save_viewer_data(daily_viewer_data)
     clear_runtime_snapshot(runtime_snapshot_path)
@@ -389,17 +421,28 @@ def grabber_popular(db_data_inst, page_num, filter_tags, target_date):
         append_log(f"获取页面失败: {e}")
         return [], {"1": [], "2": []}
 
+    page_success = 0
+    page_skipped = 0
+    page_failed = 0
     for post in posts:
         if not state.is_running:
             break
         state.play_event.wait()
         result = _process_post(post, db_data_inst, filter_tags, do_download=True)
-        if not result:
+        if result is None:
+            page_skipped += 1
             continue
         ids, artist, saved_filename = result
+        if saved_filename:
+            page_success += 1
+        else:
+            page_failed += 1
         _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists)
         _append_viewer(ids, artist, saved_filename, post)
 
+    append_log(
+        f"[Popular] {target_date} 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
+    )
     db_data_inst.save_global_data()
     db_data_inst.save_viewer_data(daily_viewer_data)
     return new_hot_artists, page_need_update
@@ -529,11 +572,12 @@ def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="
                 pop_date = curr_dt.strftime("%Y-%m-%d")
                 append_log(f"=== 开始抓取日期: {pop_date} ===")
                 pop_db = DanbooruData(pop_date)
-                
+                pop_snapshot_path = os.path.join(pop_db.save_dir, "_runtime_snapshot.json")
+
                 output = pop_db.load_hot_drawer()
                 nu_sets = pop_db.load_need_update()
                 n = start_page
-                
+
                 while n <= end_page:
                     if not state.is_running: break
                     state.play_event.wait()
@@ -542,11 +586,15 @@ def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="
                     output = list(set(output + o) - pop_db.all_drawer)
                     for k in ["1", "2"]:
                         nu_sets[k].update(n_u_dict[k])
-                    
+
                     pop_db.save_hot_drawer(list(set(output)))
                     pop_db.save_need_update(nu_sets)
                     n += 1
-                
+
+                # 本日期所有页面处理完毕（或被打断），清理这天的临时快照，
+                # 否则会留下陈旧的 _runtime_snapshot.json
+                if state.is_running:
+                    clear_runtime_snapshot(pop_snapshot_path)
                 curr_dt -= datetime.timedelta(days=1)
         else:
             output = db_data.load_hot_drawer()
@@ -567,14 +615,18 @@ def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="
                 if mode == "popular":
                     pop_date = target_date or db_data.today_str
                     pop_db = DanbooruData(pop_date)
+                    pop_snapshot_path = os.path.join(pop_db.save_dir, "_runtime_snapshot.json")
                     o, n_u_dict = grabber_popular(pop_db, n, state.filter_tags, pop_date)
-                    
+
                     output = list(set(output + o) - pop_db.all_drawer)
                     for k in ["1", "2"]:
                         nu_sets[k].update(n_u_dict[k])
-                    
+
                     pop_db.save_hot_drawer(list(set(output)))
                     pop_db.save_need_update(nu_sets)
+                    # popular 单日期模式同样需要在每页处理完后清理临时快照
+                    if state.is_running:
+                        clear_runtime_snapshot(pop_snapshot_path)
                 elif mode == "collect_ids":
                     o, n_u_dict = grabber_collect_ids(db_data, n, state.filter_tags)
                     output = list(set(output + o) - db_data.all_drawer)
@@ -743,8 +795,99 @@ def _extract_post_id(post_url: str) -> str:
     return tail if tail.isdigit() else ""
 
 
+_MEDIA_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif",
+               ".zip", ".mp4", ".webm", ".mov", ".mkv", ".avi"}
+
+
+def _backfill_orphan_entries(date_str: str, dd: DanbooruData) -> int:
+    """扫描 date_str 目录里没有 viewer_data 条目的孤立文件，
+    通过全局 log.json 反查 post_id 后再去 danbooru 取热度元数据补回去。
+    返回成功补全的条目数。"""
+    date_dir = Path(base_download_dir) / date_str
+    if not date_dir.exists():
+        return 0
+
+    data = dd.load_viewer_data()
+    known_fns = {item.get("filename") for item in data if item.get("filename")}
+
+    # 反查表：filename -> post_id（取自全局 log.json）
+    global_log = db_data.log_data or {}
+    fn_to_pid = {}
+    for pid, url in global_log.items():
+        if not url:
+            continue
+        fn = url.split('/')[-1].split('?')[0]
+        if fn:
+            fn_to_pid[fn] = pid
+
+    orphans = []
+    for image_path in date_dir.iterdir():
+        if not image_path.is_file():
+            continue
+        name = image_path.name
+        if name.startswith('_') or name.endswith('.json'):
+            continue
+        if image_path.suffix.lower() not in _MEDIA_EXTS:
+            continue
+        # 与 build_local_image_library 保持一致：有 zip 时跳过同名 gif
+        if image_path.suffix.lower() == '.gif' and image_path.with_suffix('.zip').exists():
+            continue
+        if name in known_fns:
+            continue
+        pid = fn_to_pid.get(name)
+        if pid:
+            orphans.append((name, pid))
+
+    if not orphans:
+        return 0
+
+    append_log(f"[Backfill] {date_str} 发现 {len(orphans)} 个孤立文件，开始反查 post_id 补全热度信息...")
+    added = 0
+    for name, pid in orphans:
+        if not refresh_state.is_running:
+            break
+        try:
+            post = danbooru_api.fetch_data_with_retry(int(pid))
+        except Exception as e:
+            append_log(f"[Backfill] 拉取 post {pid} 失败: {e}")
+            post = None
+        if not post:
+            sleep(0.3)
+            continue
+
+        tag_artist = post.get('tag_string_artist', '') or ''
+        artist_tokens = [s for s in tag_artist.split(' ')
+                         if s and not s.lower().endswith("(voice_actor)")]
+        artist = ' '.join(artist_tokens) if artist_tokens else "未知"
+
+        data.append({
+            "artist": artist,
+            "filename": name,
+            "local_path": str(date_dir / name),
+            "post_url": f"https://danbooru.donmai.us/posts/{pid}",
+            "web_url": f"/images/{date_str}/{name}",
+            "score": post.get('score', 0) or 0,
+            "fav_count": post.get('fav_count', 0) or 0,
+            "tags": {
+                "tag_string_general": post.get('tag_string_general', ''),
+                "tag_string_character": post.get('tag_string_character', ''),
+                "tag_string_copyright": post.get('tag_string_copyright', ''),
+                "tag_string_artist": tag_artist,
+                "tag_string_meta": post.get('tag_string_meta', '')
+            }
+        })
+        added += 1
+        sleep(0.3)
+
+    if added:
+        dd.save_viewer_data(data)
+    append_log(f"[Backfill] {date_str} 完成: 补全 {added} / {len(orphans)} 条")
+    return added
+
+
 def _run_refresh_scores(date_str: str):
-    """刷新指定日期的 score / fav_count，使用线程池并发。"""
+    """刷新指定日期的 score / fav_count，使用线程池并发。
+    刷新前先扫描孤立文件做一次反向补全，避免「下载到本地但没有热度」的图。"""
     MAX_WORKERS = 5
     PER_TASK_SLEEP = 0.3  # 每个 worker 单次任务后的限速
 
@@ -775,6 +918,11 @@ def _run_refresh_scores(date_str: str):
 
     try:
         dd = DanbooruData(target_date=date_str)
+        # 在刷新前先把孤立文件回填进 viewer_data.json，否则它们永远没有热度
+        try:
+            _backfill_orphan_entries(date_str, dd)
+        except Exception as e:
+            append_log(f"[Backfill] 异常（不阻塞刷新）: {e}")
         data = dd.load_viewer_data()
         save_lock = threading.Lock()
 
@@ -890,6 +1038,144 @@ def refresh_single_score(post_id: int, date: str = ""):
             append_log(f"单图刷新写盘失败 {post_id}: {e}")
 
     return {"ok": True, "post_id": post_id, "score": new_score, "fav_count": new_fav}
+
+
+def _translate_characters_str(chars_str: str):
+    """与 build_local_image_library 保持一致地翻译角色串。"""
+    out = []
+    for c in (chars_str or '').split():
+        c = c.strip()
+        if not c:
+            continue
+        info = translator.get_tag_info(c)
+        chinese_name = info.get("chinese_name") or translator._format_tag(c)
+        hint = info.get("source_hint", "")
+        alias = translator.get_source_hint_alias(hint) if hint else ""
+        meta = chinese_name
+        if hint:
+            meta += f" [{hint}]"
+        if alias:
+            meta += f" [{alias}]"
+        out.append(meta)
+    return out
+
+
+@app.post("/api/refresh_visible")
+def refresh_visible(req: RefreshVisibleRequest):
+    """同步刷新一组 filename 的热度信息；对孤立文件用全局 log.json 反查 post_id 后回填。
+    返回 {ok, updates: [{filename, ok, score, fav_count, post_url, artist, characters, tags}]}。
+
+    被设计成 stateless / 同步，前端的「刷新热度」按钮拿当前页 15 张图调用即可，
+    避免一次刷全日 600+ 张被 Danbooru 风控。"""
+    date_str = req.date or db_data.today_str
+    filenames = [fn for fn in (req.filenames or []) if fn]
+    if not filenames:
+        return {"ok": False, "msg": "filenames 为空", "updates": []}
+
+    dd = DanbooruData(target_date=date_str)
+    data = dd.load_viewer_data()
+    fn_to_item = {it.get("filename"): it for it in data if it.get("filename")}
+
+    # 全局 log.json 的反查表 —— 给孤立文件用
+    global_log = db_data.log_data or {}
+    fn_to_pid_log = {}
+    for pid, url in global_log.items():
+        if not url:
+            continue
+        fn = url.split('/')[-1].split('?')[0]
+        if fn:
+            fn_to_pid_log[fn] = pid
+
+    def _resolve_one(filename):
+        item = fn_to_item.get(filename)
+        post_id = None
+        if item:
+            post_id = _extract_post_id(item.get("post_url", ""))
+        if not post_id:
+            post_id = fn_to_pid_log.get(filename)
+        if not post_id:
+            return filename, item, None, None
+        try:
+            post = danbooru_api.fetch_data_with_retry(int(post_id))
+        except Exception:
+            post = None
+        return filename, item, post_id, post
+
+    MAX_WORKERS = 5
+    updates = []
+    changed = False
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = [executor.submit(_resolve_one, fn) for fn in filenames]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                filename, item, post_id, post = fut.result()
+            except Exception as e:
+                updates.append({"filename": "?", "ok": False, "msg": str(e)})
+                continue
+
+            if not post_id:
+                updates.append({"filename": filename, "ok": False, "msg": "无法反查 post_id"})
+                continue
+            if not post:
+                updates.append({"filename": filename, "ok": False, "msg": "拉取失败"})
+                continue
+
+            new_score = post.get("score", 0) or 0
+            new_fav = post.get("fav_count", 0) or 0
+            tag_artist = post.get('tag_string_artist', '') or ''
+            artist_tokens = [s for s in tag_artist.split(' ')
+                             if s and not s.lower().endswith("(voice_actor)")]
+            artist = ' '.join(artist_tokens) if artist_tokens else "未知"
+            chars_str = post.get('tag_string_character', '') or ''
+            post_url = f"https://danbooru.donmai.us/posts/{post_id}"
+            tags_full = {
+                "tag_string_general": post.get('tag_string_general', ''),
+                "tag_string_character": chars_str,
+                "tag_string_copyright": post.get('tag_string_copyright', ''),
+                "tag_string_artist": tag_artist,
+                "tag_string_meta": post.get('tag_string_meta', '')
+            }
+
+            if item:
+                item["score"] = new_score
+                item["fav_count"] = new_fav
+                # 孤立文件之前可能是 artist="未知"、post_url="#"，这里一并刷新
+                item["artist"] = artist
+                item["post_url"] = post_url
+                merged_tags = item.get("tags") or {}
+                merged_tags.update(tags_full)
+                item["tags"] = merged_tags
+                changed = True
+            else:
+                data.append({
+                    "artist": artist,
+                    "filename": filename,
+                    "local_path": os.path.join(base_download_dir, date_str, filename),
+                    "post_url": post_url,
+                    "web_url": f"/images/{date_str}/{filename}",
+                    "score": new_score,
+                    "fav_count": new_fav,
+                    "tags": tags_full
+                })
+                changed = True
+
+            updates.append({
+                "filename": filename,
+                "ok": True,
+                "post_id": str(post_id),
+                "post_url": post_url,
+                "score": new_score,
+                "fav_count": new_fav,
+                "artist": artist,
+                "characters": _translate_characters_str(chars_str),
+                "tags": tags_full
+            })
+
+    if changed:
+        dd.save_viewer_data(data)
+
+    return {"ok": True, "updates": updates}
 
 
 @app.get("/")

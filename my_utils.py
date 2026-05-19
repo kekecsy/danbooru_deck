@@ -1,6 +1,7 @@
 # my_utils.py
 import json
 import os
+import time
 from requests.utils import get_environ_proxies
 import exiftool
 import sys
@@ -25,14 +26,38 @@ def load_json(path, default):
     return default
 
 
+def _viewer_item_key(item):
+    """统一去重 key：优先 post_url，其次 (filename, web_url)。"""
+    post_url = item.get("post_url")
+    if post_url:
+        return ("post", post_url)
+    return ("fn", item.get("filename"), item.get("web_url"))
+
+
+def dedup_viewer_data(items):
+    """对 daily_viewer_data 列表去重，保留首次出现的条目。"""
+    if not items:
+        return items if items is not None else []
+    seen = set()
+    deduped = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = _viewer_item_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def merge_daily_viewer_data(current_items, snapshot_items):
-    merged = list(current_items)
-    known = {
-        (item.get("filename"), item.get("web_url"))
-        for item in current_items
-    }
-    for item in snapshot_items:
-        key = (item.get("filename"), item.get("web_url"))
+    merged = dedup_viewer_data(current_items)
+    known = {_viewer_item_key(item) for item in merged}
+    for item in snapshot_items or []:
+        if not isinstance(item, dict):
+            continue
+        key = _viewer_item_key(item)
         if key not in known:
             merged.append(item)
             known.add(key)
@@ -57,12 +82,33 @@ def save_runtime_snapshot(log_data, artist_stats, daily_viewer_data, runtime_sna
     snapshot = {
         "log_data": log_data,
         "artist_stats": artist_stats,
-        "daily_viewer_data": daily_viewer_data
+        "daily_viewer_data": dedup_viewer_data(daily_viewer_data)
     }
     temp_path = runtime_snapshot_path + ".tmp"
-    with open(temp_path, 'w', encoding='utf-8') as f:
-        json.dump(snapshot, f, ensure_ascii=False, indent=4)
-    os.replace(temp_path, runtime_snapshot_path)
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=4)
+    except PermissionError as e:
+        # 临时文件本身被占用（罕见，比如杀软扫描中），跳过这一次写入
+        print(f"[snapshot] 写入临时快照失败，已跳过: {e}")
+        return
+
+    # Windows 下若用户用记事本/编辑器打开了快照文件，os.replace 会触发 WinError 5。
+    # 不应让爬虫任务因此整体崩溃 —— 重试几次，仍失败则丢弃这一次快照，下次再写。
+    last_err = None
+    for attempt in range(5):
+        try:
+            os.replace(temp_path, runtime_snapshot_path)
+            return
+        except PermissionError as e:
+            last_err = e
+            time.sleep(0.2 * (attempt + 1))
+    # 5 次都失败，清理 .tmp 并放弃这次快照
+    try:
+        os.remove(temp_path)
+    except OSError:
+        pass
+    print(f"[snapshot] 快照文件被占用，已跳过本次写入: {last_err}")
 
 
 def clear_runtime_snapshot(runtime_snapshot_path):
