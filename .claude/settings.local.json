@@ -19,7 +19,10 @@
       "Bash(node -e ' *)",
       "Bash(python -c \"from translator import translator; print\\('translator ok, search dict size:', len\\(translator.load_search_dict\\(\\)\\)\\); print\\('source loaded:', bool\\(translator.load_character_source\\(\\)\\)\\)\")",
       "Bash(\"D:\\\\Anaconda3\\\\envs\\\\pic_web\\\\python.exe\" -c \"from translator import translator; print\\('translator ok, search dict size:', len\\(translator.load_search_dict\\(\\)\\)\\)\")",
-      "Bash(PYTHONIOENCODING=utf-8 'D:\\\\Anaconda3\\\\envs\\\\pic_web\\\\python.exe' -c ' *)"
+      "Bash(PYTHONIOENCODING=utf-8 'D:\\\\Anaconda3\\\\envs\\\\pic_web\\\\python.exe' -c ' *)",
+      "Bash(ls \"C:\\\\Users\\\\27147\\\\Downloads\\\\my_work\\\\pic\\\\web_mosaic_gpt\"\\\\*.json 2>&1 | head -10)",
+      "Read(//c/Users/27147/Downloads/my_work/pic/**)",
+      "Bash(grep -E '\\\\.json$')"
     ]
   }
 }

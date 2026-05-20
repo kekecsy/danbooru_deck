@@ -2,6 +2,7 @@
 import { ref } from 'vue';
 import CrawlerPage from './components/CrawlerPage.vue';
 import EditorPage from './components/EditorPage.vue';
+import FavoritesPage from './components/FavoritesPage.vue';
 
 const activePage = ref('crawler');
 const editorSource = ref(null);
@@ -23,12 +24,16 @@ function openEditorWithImage(item) {
         <button class="nav-chip" :class="{ active: activePage === 'editor' }" @click="activePage = 'editor'">
           打码
         </button>
+        <button class="nav-chip" :class="{ active: activePage === 'favorites' }" @click="activePage = 'favorites'">
+          收藏
+        </button>
       </div>
     </aside>
 
     <main class="content">
       <CrawlerPage v-show="activePage === 'crawler'" @edit-image="openEditorWithImage" />
       <EditorPage v-if="activePage === 'editor'" :source-item="editorSource" @back="activePage = 'crawler'" />
+      <FavoritesPage v-if="activePage === 'favorites'" />
     </main>
   </div>
 </template>

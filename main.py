@@ -45,6 +45,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from pic_web.main import app as mosaic_editor_app
 from translator import translator
 
+BASE_DIR = Path(__file__).resolve().parent
+# 画师收藏存盘文件，结构 {group_name: [artist, ...]}；同一画师可在多个分组
+ARTIST_FAVORITES_JSON = BASE_DIR / "artist_favorites.json"
+
 # ==========================================
 # 1. 爬虫全局配置与初始化
 # ==========================================
@@ -265,6 +269,11 @@ class SaveCharacterTranslationRequest(BaseModel):
     chinese_name: str = ""
     source_hint: str = ""
     translated_description_zh: str = ""
+
+
+class ArtistFavoritesRequest(BaseModel):
+    # {group_name: [artist1, artist2, ...]}，同一画师可在多个分组
+    groups: dict[str, list[str]]
 
 # ==========================================
 # 3. 核心爬虫逻辑 (融入了打断检测)
@@ -1329,6 +1338,79 @@ def api_import_character_chinese_search():
     try:
         result = translator.import_search_to_custom()
         return {"ok": True, **result, "msg": f"已导入 {result['imported']}/{result['total']} 条"}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+# ---------------- 画师收藏 ----------------
+
+def _load_artist_favorites() -> dict:
+    if not ARTIST_FAVORITES_JSON.exists():
+        return {}
+    try:
+        import json as _json
+        with open(ARTIST_FAVORITES_JSON, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        # 兼容：值若不是 list 就丢弃；每个 list 内统一 strip + 去重保留顺序
+        out: dict[str, list[str]] = {}
+        for k, v in data.items():
+            if not isinstance(k, str):
+                continue
+            if not isinstance(v, list):
+                continue
+            seen = set()
+            cleaned: list[str] = []
+            for item in v:
+                if not isinstance(item, str):
+                    continue
+                name = item.strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                cleaned.append(name)
+            out[k] = cleaned
+        return out
+    except Exception as e:
+        print(f"Failed to load artist favorites: {e}")
+        return {}
+
+
+def _save_artist_favorites(groups: dict) -> None:
+    import json as _json
+    with open(ARTIST_FAVORITES_JSON, "w", encoding="utf-8") as f:
+        _json.dump(groups, f, ensure_ascii=False, indent=2)
+
+
+@app.get("/api/artist_favorites")
+def api_artist_favorites_get():
+    """返回 {groups: {name: [artist, ...]}}。"""
+    return {"ok": True, "groups": _load_artist_favorites()}
+
+
+@app.post("/api/artist_favorites")
+def api_artist_favorites_set(req: ArtistFavoritesRequest):
+    """整体覆盖式写入 {groups}。文件小且单用户，免去分散的 CRUD 端点。"""
+    try:
+        cleaned: dict[str, list[str]] = {}
+        for raw_name, artists in (req.groups or {}).items():
+            name = (raw_name or "").strip()
+            if not name:
+                continue
+            seen = set()
+            uniq: list[str] = []
+            for a in artists or []:
+                if not isinstance(a, str):
+                    continue
+                a = a.strip()
+                if not a or a in seen:
+                    continue
+                seen.add(a)
+                uniq.append(a)
+            cleaned[name] = uniq
+        _save_artist_favorites(cleaned)
+        return {"ok": True, "groups": cleaned}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 

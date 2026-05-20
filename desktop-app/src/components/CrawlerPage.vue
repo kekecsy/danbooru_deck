@@ -587,6 +587,97 @@ function applyRefreshUpdate(target, u) {
   if (u.tags) target.tags = { ...(target.tags || {}), ...u.tags };
 }
 
+// ---------------- 刷新指定范围页的热度 ----------------
+const rangeRefresh = ref({
+  open: false,
+  startPage: 1,
+  endPage: 1,
+});
+
+function openRangeRefreshDialog() {
+  if (!gallery.value.selectedDate) {
+    showToast('请先选择日期', 'error');
+    return;
+  }
+  if (refresh.value.isRunning) {
+    showToast('已有刷新任务在运行', 'info');
+    return;
+  }
+  rangeRefresh.value.open = true;
+  // 默认从当前页开始，向后多刷几页（不超过总页数）
+  const total = activeTotalPages.value;
+  const cur = activePage.value;
+  rangeRefresh.value.startPage = Math.max(1, Math.min(total, cur));
+  rangeRefresh.value.endPage = Math.max(rangeRefresh.value.startPage, Math.min(total, cur + 4));
+}
+
+function closeRangeRefreshDialog() {
+  rangeRefresh.value.open = false;
+}
+
+const rangeRefreshCount = computed(() => {
+  const total = activeTotalPages.value;
+  if (!total) return 0;
+  const start = Math.max(1, Math.min(total, rangeRefresh.value.startPage || 1));
+  const end = Math.max(start, Math.min(total, rangeRefresh.value.endPage || start));
+  const ps = gallery.value.pageSize;
+  return filteredLocalImages.value.slice((start - 1) * ps, end * ps).length;
+});
+
+async function startRefreshScoresRange() {
+  const date = gallery.value.selectedDate;
+  if (!date) { showToast('请先选择日期', 'error'); return; }
+  if (refresh.value.isRunning) { showToast('已有刷新任务在运行', 'info'); return; }
+
+  const total = activeTotalPages.value;
+  const start = Math.max(1, Math.min(total, rangeRefresh.value.startPage || 1));
+  const end = Math.max(start, Math.min(total, rangeRefresh.value.endPage || start));
+  const ps = gallery.value.pageSize;
+  const items = filteredLocalImages.value.slice((start - 1) * ps, end * ps);
+  const filenames = items.map(it => it.filename).filter(Boolean);
+  if (!filenames.length) { showToast('范围内没有图片', 'info'); return; }
+
+  closeRangeRefreshDialog();
+  refresh.value.isRunning = true;
+  refresh.value.dateStr = date;
+  refresh.value.total = filenames.length;
+  refresh.value.done = 0;
+  showToast(`正在刷新第 ${start}-${end} 页共 ${filenames.length} 张...`, 'info');
+
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/refresh_visible', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, filenames }),
+    });
+    const result = await res.json();
+    if (!result.ok) {
+      showToast(result.msg || '刷新失败', 'error');
+      return;
+    }
+    let okCount = 0;
+    let failCount = 0;
+    for (const u of result.updates || []) {
+      if (!u.ok) { failCount += 1; continue; }
+      const target = gallery.value.images.find(img => img.filename === u.filename);
+      if (target) {
+        applyRefreshUpdate(target, u);
+        okCount += 1;
+      }
+      refresh.value.done = okCount + failCount;
+    }
+    if (failCount > 0) {
+      showToast(`已刷新 ${okCount} 张，${failCount} 张失败`, okCount > 0 ? 'info' : 'error');
+    } else {
+      showToast(`已刷新 ${okCount} 张`, 'success');
+    }
+  } catch (err) {
+    showToast(`请求失败: ${err.message}`, 'error');
+  } finally {
+    refresh.value.isRunning = false;
+  }
+}
+
 async function stopRefreshScores() {
   // 现在使用同步的 /api/refresh_visible，没有后台线程可停 —— 保留按钮但只做兜底
   refresh.value.isRunning = false;
@@ -898,6 +989,98 @@ async function importTranslationDict() {
     translationModal.value.importing = false;
   }
 }
+
+// ---------------- 画师收藏：从画廊 chip 的 ★ 加入分组 ----------------
+const favoriteDialog = ref({
+  open: false,
+  artist: '',
+  loading: false,
+  saving: false,
+  groups: {},              // {name: [artist,...]}，从后端拉到的全集
+  selectedGroups: [],
+  newGroupName: '',
+});
+
+async function openFavoriteDialog(artist) {
+  favoriteDialog.value.open = true;
+  favoriteDialog.value.artist = artist;
+  favoriteDialog.value.loading = true;
+  favoriteDialog.value.newGroupName = '';
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/artist_favorites');
+    const data = await res.json();
+    favoriteDialog.value.groups = data.groups || {};
+    // 默认勾上该 artist 已经在的分组（方便看到当前归属、也支持取消勾选移除）
+    favoriteDialog.value.selectedGroups = Object.entries(favoriteDialog.value.groups)
+      .filter(([, arts]) => arts.includes(artist))
+      .map(([name]) => name);
+  } catch (err) {
+    showToast('加载分组失败: ' + err.message, 'error');
+  } finally {
+    favoriteDialog.value.loading = false;
+  }
+}
+
+function closeFavoriteDialog() {
+  favoriteDialog.value.open = false;
+}
+
+function toggleFavGroup(name) {
+  const idx = favoriteDialog.value.selectedGroups.indexOf(name);
+  if (idx >= 0) favoriteDialog.value.selectedGroups.splice(idx, 1);
+  else favoriteDialog.value.selectedGroups.push(name);
+}
+
+function createFavGroupInline() {
+  const name = favoriteDialog.value.newGroupName.trim();
+  if (!name) { showToast('分组名不能为空', 'error'); return; }
+  if (favoriteDialog.value.groups[name]) { showToast('分组已存在', 'error'); return; }
+  favoriteDialog.value.groups = { ...favoriteDialog.value.groups, [name]: [] };
+  favoriteDialog.value.selectedGroups.push(name);
+  favoriteDialog.value.newGroupName = '';
+}
+
+async function saveFavoriteDialog() {
+  if (!favoriteDialog.value.selectedGroups.length) {
+    showToast('请至少勾选一个分组', 'error');
+    return;
+  }
+  favoriteDialog.value.saving = true;
+  const artist = favoriteDialog.value.artist;
+  const target = new Set(favoriteDialog.value.selectedGroups);
+  // 同步：勾选的加入 / 未勾选的从该 artist 移除（在已知 groups 范围内）
+  const next = {};
+  for (const [g, arr] of Object.entries(favoriteDialog.value.groups)) {
+    const has = arr.includes(artist);
+    if (target.has(g) && !has) next[g] = [...arr, artist];
+    else if (!target.has(g) && has) next[g] = arr.filter(a => a !== artist);
+    else next[g] = arr;
+  }
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/artist_favorites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groups: next }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      showToast('保存失败: ' + (data.msg || ''), 'error');
+      return;
+    }
+    showToast(`已收藏「${artist}」`, 'success');
+    closeFavoriteDialog();
+  } catch (err) {
+    showToast('保存失败: ' + err.message, 'error');
+  } finally {
+    favoriteDialog.value.saving = false;
+  }
+}
+
+const favGroupList = computed(() => {
+  return Object.entries(favoriteDialog.value.groups)
+    .map(([name, arts]) => ({ name, count: arts.length }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+});
 
 function editItem(item) {
   emit('edit-image', item);
@@ -1311,6 +1494,12 @@ const modeDescription = computed(() => {
             <span v-if="!refresh.isRunning">🔄 刷新本页</span>
             <span v-else>⏸ {{ refresh.done }}/{{ refresh.total }}</span>
           </button>
+          <button
+            class="refresh-btn"
+            @click="openRangeRefreshDialog"
+            :disabled="!gallery.selectedDate || refresh.isRunning"
+            title="选择页码范围一次性刷新热度"
+          >🔄 刷新范围</button>
           <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
           <button class="secondary" @click="openTranslationModal" :disabled="!gallery.selectedDate" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">翻译角色</button>
           <button class="secondary" @click="importTranslationFile" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">导入翻译字典</button>
@@ -1336,14 +1525,20 @@ const modeDescription = computed(() => {
           </div>
           <div class="card-meta">
             <div class="token-row">
-              <button
-                v-for="token in (item.artistTokens?.length ? item.artistTokens : ['未知'])"
-                :key="`artist-${token}`"
-                class="meta-link author-link token-chip"
-                @click="applySearch(token)"
-              >
-                {{ token }}
-              </button>
+              <template v-for="token in (item.artistTokens?.length ? item.artistTokens : ['未知'])" :key="`artist-${token}`">
+                <button
+                  class="meta-link author-link token-chip"
+                  @click="applySearch(token)"
+                >
+                  {{ token }}
+                </button>
+                <button
+                  v-if="token !== '未知'"
+                  class="meta-link author-fav-btn"
+                  @click.stop="openFavoriteDialog(token)"
+                  title="加入画师收藏"
+                >★</button>
+              </template>
             </div>
             <div class="token-row">
               <button
@@ -1632,6 +1827,88 @@ const modeDescription = computed(() => {
               :disabled="translateDetail.saving"
               style="min-width: 110px;"
             >{{ translateDetail.saving ? '保存中...' : '保存到字典' }}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 刷新范围 Modal -->
+    <div v-if="rangeRefresh.open" class="viewer-overlay" @click.self="closeRangeRefreshDialog" style="z-index: 10020; display: flex; justify-content: center; align-items: center; padding: 24px;">
+      <div class="range-refresh-modal">
+        <div class="range-refresh-head">
+          <h3 style="margin: 0; color: var(--accent-deep); font-size: 17px;">刷新指定范围页的热度</h3>
+          <button class="ghost" @click="closeRangeRefreshDialog" style="color: var(--muted);">×</button>
+        </div>
+        <p class="muted compact-text" style="margin: 0;">
+          当前共 {{ activeTotalPages }} 页 · 每页 {{ gallery.pageSize }} 张 · 当前所在第 {{ activePage }} 页
+        </p>
+        <div class="field-grid">
+          <label>
+            <span>起始页</span>
+            <input v-model.number="rangeRefresh.startPage" type="number" min="1" :max="activeTotalPages" />
+          </label>
+          <label>
+            <span>结束页</span>
+            <input v-model.number="rangeRefresh.endPage" type="number" min="1" :max="activeTotalPages" />
+          </label>
+        </div>
+        <p class="muted compact-text" style="margin: 0;">
+          将刷新 <strong style="color: var(--accent-deep);">{{ rangeRefreshCount }}</strong> 张图片的 score / 收藏数 / 画师（孤立文件会反查补全）
+        </p>
+        <div style="display: flex; justify-content: flex-end; gap: 8px;">
+          <button class="ghost" @click="closeRangeRefreshDialog" style="color: var(--accent-deep);">取消</button>
+          <button @click="startRefreshScoresRange" :disabled="!rangeRefreshCount || refresh.isRunning" style="min-width: 100px;">
+            {{ refresh.isRunning ? '刷新中...' : '确定刷新' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 加入画师收藏 Modal -->
+    <div v-if="favoriteDialog.open" class="viewer-overlay" @click.self="closeFavoriteDialog" style="z-index: 10020; display: flex; justify-content: center; align-items: center; padding: 24px;">      <div class="fav-add-modal">
+        <div class="fav-add-head">
+          <div>
+            <h3 style="margin: 0; color: var(--accent-deep); font-size: 17px;">加入画师收藏</h3>
+            <p class="muted compact-text" style="margin: 4px 0 0;">画师：<strong style="color: var(--ink); font-family: Consolas, monospace;">{{ favoriteDialog.artist }}</strong></p>
+          </div>
+          <button class="ghost" @click="closeFavoriteDialog" style="color: var(--muted);">×</button>
+        </div>
+
+        <div v-if="favoriteDialog.loading" class="muted compact-text" style="text-align: center; padding: 20px;">加载分组中...</div>
+        <template v-else>
+          <div class="fav-add-list">
+            <label v-for="g in favGroupList" :key="g.name" class="fav-add-row">
+              <input
+                type="checkbox"
+                :checked="favoriteDialog.selectedGroups.includes(g.name)"
+                @change="toggleFavGroup(g.name)"
+              />
+              <span class="fav-add-name">{{ g.name }}</span>
+              <span class="fav-add-count">{{ g.count }}</span>
+            </label>
+            <div v-if="!favGroupList.length" class="muted compact-text" style="text-align: center; padding: 12px;">
+              还没有分组，请在下方创建一个
+            </div>
+          </div>
+
+          <div class="fav-add-new">
+            <input
+              v-model="favoriteDialog.newGroupName"
+              type="text"
+              placeholder="新分组名称，例如：厚涂大佬"
+              @keyup.enter="createFavGroupInline"
+            />
+            <button class="secondary" @click="createFavGroupInline" style="white-space: nowrap;">+ 新建</button>
+          </div>
+        </template>
+
+        <div class="fav-add-foot">
+          <span class="muted compact-text">已勾选 {{ favoriteDialog.selectedGroups.length }} 个分组</span>
+          <div style="display: flex; gap: 8px;">
+            <button class="ghost" @click="closeFavoriteDialog" style="color: var(--accent-deep);">取消</button>
+            <button @click="saveFavoriteDialog" :disabled="favoriteDialog.saving" style="min-width: 90px;">
+              {{ favoriteDialog.saving ? '保存中...' : '保存' }}
+            </button>
           </div>
         </div>
       </div>
@@ -2192,5 +2469,102 @@ const modeDescription = computed(() => {
   word-break: break-word;
   max-height: 160px;
   overflow-y: auto;
+}
+
+/* ---------------- 画师 chip ★ 按钮 + 加入收藏弹窗 ---------------- */
+.author-fav-btn {
+  padding: 2px 6px;
+  font-size: 11px;
+  color: #b46e16;
+  background: rgba(243, 223, 212, 0.45);
+  border: 1px solid rgba(212, 143, 47, 0.35);
+}
+.author-fav-btn:hover {
+  background: rgba(255, 188, 86, 0.3);
+  color: #8a5a14;
+  border-color: rgba(212, 143, 47, 0.55);
+}
+
+.fav-add-modal {
+  width: 440px;
+  max-width: 92vw;
+  background: rgba(255, 250, 243, 0.98);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.fav-add-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+.fav-add-list {
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fav-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink);
+}
+.fav-add-row:hover { background: rgba(243, 223, 212, 0.55); }
+.fav-add-row input[type="checkbox"] { width: auto; margin: 0; }
+.fav-add-name { flex: 1; word-break: break-all; }
+.fav-add-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--soft);
+  color: var(--accent-deep);
+}
+.fav-add-new {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.fav-add-new input { flex: 1; }
+.fav-add-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+/* ---------------- 刷新范围 Modal ---------------- */
+.range-refresh-modal {
+  width: 400px;
+  max-width: 92vw;
+  background: rgba(255, 250, 243, 0.98);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.range-refresh-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 </style>
