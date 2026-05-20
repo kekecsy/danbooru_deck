@@ -86,6 +86,32 @@ def get_popular_posts(date_str, page, scale="day", timeout=20):
     r.raise_for_status()
     return r.json()
 
+
+def get_wiki(name, timeout=10):
+    """从 Danbooru wiki 在线拉一个 tag 的描述 + other_names。
+    复刻 tags_translate/tags_wiki.py 的 get_wiki，改用项目内的 curl_cffi + 代理 + cookie。
+    成功返回 wiki API 的 list（通常 1 个元素，含 body / other_names）；失败/无结果返回 []。
+    """
+    encode_tag = urllib.parse.quote(name, safe='')
+    url = f"https://danbooru.donmai.us/wiki_pages.json?search[title]={encode_tag}"
+    proxies = get_proxies_for_url(url)
+    try:
+        resp = requests.get(
+            url,
+            timeout=timeout,
+            proxies=proxies,
+            headers=HEADERS,
+            impersonate="chrome120",
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"get_wiki failed for {name}: {e}")
+        return []
+
+
 def fetch_data_with_retry(post_id, retries=5, delay=3, timeout=10):
     url = f'https://danbooru.donmai.us/posts/{post_id}.json'
     attempt = 0

@@ -254,6 +254,18 @@ class RefreshVisibleRequest(BaseModel):
     date: str
     filenames: list[str] = []
 
+
+class TranslateCharacterRequest(BaseModel):
+    tag: str
+
+
+class SaveCharacterTranslationRequest(BaseModel):
+    tag: str
+    has_chinese: bool = True
+    chinese_name: str = ""
+    source_hint: str = ""
+    translated_description_zh: str = ""
+
 # ==========================================
 # 3. 核心爬虫逻辑 (融入了打断检测)
 # ==========================================
@@ -1190,6 +1202,133 @@ def api_import_translation(req: TranslationImportRequest):
     try:
         translator.update_custom_dict(req.translations)
         return {"ok": True, "msg": "导入成功"}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+# ---------------- 角色增量翻译 ----------------
+
+@app.get("/api/untranslated_characters")
+def api_untranslated_characters(date: str = ""):
+    """聚合指定日期 viewer_data 里所有「翻译字典查不到」的角色 token。
+    返回 {tags: [{tag, post_count, fallback_name}]}，按出现次数倒序。"""
+    date_str = date or today_str
+    dd = DanbooruData(target_date=date_str)
+    data = dd.load_viewer_data()
+
+    counter = {}
+    for item in data:
+        chars_str = (item.get("tags") or {}).get("tag_string_character", "") or ""
+        for token in chars_str.split():
+            token = token.strip()
+            if not token:
+                continue
+            counter[token] = counter.get(token, 0) + 1
+
+    pending = []
+    for token, count in counter.items():
+        if translator.get_tag_info(token):
+            continue
+        pending.append({
+            "tag": token,
+            "post_count": count,
+            "fallback_name": translator._format_tag(token),
+        })
+    pending.sort(key=lambda x: (-x["post_count"], x["tag"]))
+    return {"date": date_str, "tags": pending}
+
+
+@app.get("/api/character_source/{tag}")
+def api_character_source(tag: str):
+    """返回 character.json 里的英文描述 + other_names + 已组装好的 manual prompt。
+    tag 在 URL 路径上需 URL-encode（前端用 encodeURIComponent）。"""
+    source = translator.get_character_source(tag)
+    manual_prompt = translator.build_manual_prompt(tag, source)
+    return {
+        "tag": tag,
+        "exists": source.get("exists", False),
+        "matched_key": source.get("matched_key", ""),
+        "description": source.get("description", ""),
+        "other_names": source.get("other_names", []),
+        "fallback_name": translator._format_tag(tag),
+        "manual_prompt": manual_prompt,
+    }
+
+
+@app.post("/api/fetch_character_source")
+def api_fetch_character_source(req: TranslateCharacterRequest):
+    """character.json 里没有该 tag 时，按 character_tags.py 的思路从 Danbooru wiki 在线拉描述。
+    成功会写入 character_supplement.json 并刷新内存源；返回与 /api/character_source 同样的 shape。"""
+    tag = (req.tag or "").strip()
+    if not tag:
+        return {"ok": False, "msg": "tag 为空"}
+    source = translator.fetch_character_source(tag)
+    if not source.get("exists"):
+        return {
+            "ok": False,
+            "msg": "Danbooru wiki 中没有这个 tag",
+            "tag": tag,
+            "exists": False,
+            "matched_key": "",
+            "description": "",
+            "other_names": [],
+            "fallback_name": translator._format_tag(tag),
+            "manual_prompt": translator.build_manual_prompt(tag, source),
+        }
+    manual_prompt = translator.build_manual_prompt(tag, source)
+    return {
+        "ok": True,
+        "tag": tag,
+        "exists": True,
+        "matched_key": source.get("matched_key", ""),
+        "description": source.get("description", ""),
+        "other_names": source.get("other_names", []),
+        "fallback_name": translator._format_tag(tag),
+        "manual_prompt": manual_prompt,
+    }
+
+
+@app.post("/api/translate_character")
+def api_translate_character(req: TranslateCharacterRequest):
+    """调用 openrouter 给出 has_chinese/chinese_name/source_hint/translated_description_zh。
+    返回的 entry 不主动写盘，等用户在 UI 上校对后点保存。
+    失败时附带 raw（LLM 原文）+ error，前端可以让用户手工修复 raw 后再次解析。"""
+    tag = (req.tag or "").strip()
+    if not tag:
+        return {"ok": False, "msg": "tag 为空", "entry": {}, "raw": "", "error": "tag 为空"}
+    source = translator.get_character_source(tag)
+    result = translator.call_rich_translation(tag, source)
+    return {
+        "ok": bool(result.get("ok")),
+        "entry": result.get("entry", {}),
+        "raw": result.get("raw", ""),
+        "error": result.get("error", ""),
+        "msg": result.get("error", "") or "ok",
+        "exists": source.get("exists", False),
+    }
+
+
+@app.post("/api/save_character_translation")
+def api_save_character_translation(req: SaveCharacterTranslationRequest):
+    """把单条翻译落到 character_chinese_search.json。"""
+    try:
+        translator.upsert_search_entry(req.tag, {
+            "has_chinese": req.has_chinese,
+            "chinese_name": req.chinese_name,
+            "source_hint": req.source_hint,
+            "translated_description_zh": req.translated_description_zh,
+        })
+        return {"ok": True, "msg": "已保存到 character_chinese_search.json"}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+@app.post("/api/import_character_chinese_search")
+def api_import_character_chinese_search():
+    """把 character_chinese_search.json 整体合并到 custom_translation.json，画廊立即生效。"""
+    try:
+        result = translator.import_search_to_custom()
+        return {"ok": True, **result, "msg": f"已导入 {result['imported']}/{result['total']} 条"}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 

@@ -622,6 +622,283 @@ async function openHostsFolder() {
   await window.desktopAPI.external.open('file:///C:/Windows/System32/drivers/etc/');
 }
 
+// ---------------- 角色增量翻译 ----------------
+const translationModal = ref({
+  open: false,
+  loading: false,
+  list: [],          // [{tag, post_count, fallback_name}]
+  search: '',
+  importing: false,
+});
+
+const translateDetail = ref({
+  open: false,
+  tag: '',
+  fallbackName: '',
+  source: { description: '', other_names: [], exists: false },
+  manualPrompt: '',
+  mode: 'api',       // 'api' | 'manual'
+  apiBusy: false,
+  apiError: '',
+  apiRaw: '',        // API 失败时原文，灌入 pasteText 让用户修
+  pasteText: '',
+  parseError: '',
+  saving: false,
+  fetchBusy: false,
+  fetchMsg: '',
+  form: {
+    has_chinese: true,
+    chinese_name: '',
+    source_hint: '',
+    translated_description_zh: '',
+  },
+});
+
+const filteredUntranslated = computed(() => {
+  const keyword = translationModal.value.search.trim().toLowerCase();
+  if (!keyword) return translationModal.value.list;
+  return translationModal.value.list.filter(item =>
+    item.tag.toLowerCase().includes(keyword) ||
+    (item.fallback_name || '').toLowerCase().includes(keyword)
+  );
+});
+
+async function openTranslationModal() {
+  if (!gallery.value.selectedDate) {
+    showToast('请先选择日期', 'error');
+    return;
+  }
+  translationModal.value.open = true;
+  translationModal.value.loading = true;
+  translationModal.value.search = '';
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/untranslated_characters?date=${encodeURIComponent(gallery.value.selectedDate)}`);
+    const data = await res.json();
+    translationModal.value.list = data.tags || [];
+  } catch (err) {
+    showToast('加载未翻译列表失败: ' + err.message, 'error');
+    translationModal.value.list = [];
+  } finally {
+    translationModal.value.loading = false;
+  }
+}
+
+function closeTranslationModal() {
+  translationModal.value.open = false;
+}
+
+function resetTranslateDetail() {
+  translateDetail.value.tag = '';
+  translateDetail.value.fallbackName = '';
+  translateDetail.value.source = { description: '', other_names: [], exists: false };
+  translateDetail.value.manualPrompt = '';
+  translateDetail.value.mode = 'api';
+  translateDetail.value.apiBusy = false;
+  translateDetail.value.apiError = '';
+  translateDetail.value.apiRaw = '';
+  translateDetail.value.pasteText = '';
+  translateDetail.value.parseError = '';
+  translateDetail.value.saving = false;
+  translateDetail.value.fetchBusy = false;
+  translateDetail.value.fetchMsg = '';
+  translateDetail.value.form = {
+    has_chinese: true,
+    chinese_name: '',
+    source_hint: '',
+    translated_description_zh: '',
+  };
+}
+
+async function openTranslateDetail(item) {
+  resetTranslateDetail();
+  translateDetail.value.open = true;
+  translateDetail.value.tag = item.tag;
+  translateDetail.value.fallbackName = item.fallback_name || item.tag;
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/character_source/${encodeURIComponent(item.tag)}`);
+    const data = await res.json();
+    translateDetail.value.source = {
+      description: data.description || '',
+      other_names: data.other_names || [],
+      exists: !!data.exists,
+    };
+    translateDetail.value.manualPrompt = data.manual_prompt || '';
+    if (data.fallback_name) translateDetail.value.fallbackName = data.fallback_name;
+  } catch (err) {
+    showToast('加载角色描述失败: ' + err.message, 'error');
+  }
+}
+
+function closeTranslateDetail() {
+  translateDetail.value.open = false;
+}
+
+async function fetchCharacterSource() {
+  // 当 character.json 里没有该 tag 时，调用 Danbooru wiki API 在线拉描述
+  translateDetail.value.fetchBusy = true;
+  translateDetail.value.fetchMsg = '';
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/fetch_character_source', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tag: translateDetail.value.tag }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      translateDetail.value.fetchMsg = data.msg || 'Danbooru wiki 没有这个 tag';
+      showToast(translateDetail.value.fetchMsg, 'error');
+      return;
+    }
+    translateDetail.value.source = {
+      description: data.description || '',
+      other_names: data.other_names || [],
+      exists: true,
+    };
+    translateDetail.value.manualPrompt = data.manual_prompt || '';
+    showToast('已从 Danbooru wiki 拉到描述', 'success');
+  } catch (err) {
+    translateDetail.value.fetchMsg = err.message;
+    showToast('在线拉描述失败: ' + err.message, 'error');
+  } finally {
+    translateDetail.value.fetchBusy = false;
+  }
+}
+
+async function runApiTranslation() {
+  translateDetail.value.apiBusy = true;
+  translateDetail.value.apiError = '';
+  translateDetail.value.apiRaw = '';
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/translate_character', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tag: translateDetail.value.tag }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      translateDetail.value.apiError = data.error || data.msg || 'API 调用失败';
+      // 把原始内容灌进手动模式的粘贴框，方便用户人工修复后重新解析
+      const raw = data.raw || '';
+      if (raw) {
+        translateDetail.value.apiRaw = raw;
+        translateDetail.value.pasteText = raw;
+        translateDetail.value.mode = 'manual';
+        translateDetail.value.parseError = '';
+        showToast('API 解析失败，已切换到手动模式，请修复 JSON 后点「解析填表」', 'error');
+      } else {
+        showToast(translateDetail.value.apiError, 'error');
+      }
+      return;
+    }
+    const entry = data.entry || {};
+    translateDetail.value.form = {
+      has_chinese: !!entry.has_chinese,
+      chinese_name: entry.chinese_name || '',
+      source_hint: entry.source_hint || '',
+      translated_description_zh: entry.translated_description_zh || '',
+    };
+    showToast('API 翻译完成，请校对后保存', 'success');
+  } catch (err) {
+    translateDetail.value.apiError = '网络/请求异常: ' + err.message;
+    showToast(translateDetail.value.apiError, 'error');
+  } finally {
+    translateDetail.value.apiBusy = false;
+  }
+}
+
+async function copyManualPrompt() {
+  try {
+    await navigator.clipboard.writeText(translateDetail.value.manualPrompt || '');
+    showToast('Prompt 已复制到剪贴板', 'success');
+  } catch (err) {
+    showToast('复制失败: ' + err.message, 'error');
+  }
+}
+
+function parsePastedJson() {
+  const raw = (translateDetail.value.pasteText || '').trim();
+  translateDetail.value.parseError = '';
+  if (!raw) {
+    translateDetail.value.parseError = '请先粘贴大模型返回的 JSON';
+    return;
+  }
+  let text = raw;
+  // 兼容大模型偶尔输出的 ```json ``` 包裹
+  if (text.startsWith('```json')) text = text.slice(7);
+  if (text.startsWith('```')) text = text.slice(3);
+  if (text.endsWith('```')) text = text.slice(0, -3);
+  text = text.trim();
+  try {
+    const obj = JSON.parse(text);
+    translateDetail.value.form = {
+      has_chinese: !!obj.has_chinese,
+      chinese_name: String(obj.chinese_name || ''),
+      source_hint: String(obj.source_hint || '').toLowerCase(),
+      translated_description_zh: String(obj.translated_description_zh || ''),
+    };
+    showToast('已解析填表', 'success');
+  } catch (err) {
+    translateDetail.value.parseError = 'JSON 解析失败: ' + err.message + '，可手动改下方字段';
+  }
+}
+
+async function saveTranslation() {
+  const form = translateDetail.value.form;
+  if (form.has_chinese && !form.chinese_name.trim()) {
+    showToast('请填写中文名，或取消勾选「有中文名」', 'error');
+    return;
+  }
+  translateDetail.value.saving = true;
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/save_character_translation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tag: translateDetail.value.tag,
+        has_chinese: form.has_chinese,
+        chinese_name: form.chinese_name.trim(),
+        source_hint: form.source_hint.trim().toLowerCase(),
+        translated_description_zh: form.translated_description_zh.trim(),
+      }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      showToast('保存失败: ' + data.msg, 'error');
+      return;
+    }
+    showToast('已保存', 'success');
+    // 从主弹窗列表里移除该 tag
+    const tag = translateDetail.value.tag;
+    translationModal.value.list = translationModal.value.list.filter(it => it.tag !== tag);
+    closeTranslateDetail();
+  } catch (err) {
+    showToast('保存失败: ' + err.message, 'error');
+  } finally {
+    translateDetail.value.saving = false;
+  }
+}
+
+async function importTranslationDict() {
+  translationModal.value.importing = true;
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/import_character_chinese_search', {
+      method: 'POST',
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      showToast('导入失败: ' + data.msg, 'error');
+      return;
+    }
+    showToast(`已导入 ${data.imported} 条到画廊`, 'success');
+    closeTranslationModal();
+    await loadGallery(gallery.value.selectedDate);
+  } catch (err) {
+    showToast('导入失败: ' + err.message, 'error');
+  } finally {
+    translationModal.value.importing = false;
+  }
+}
+
 function editItem(item) {
   emit('edit-image', item);
 }
@@ -1035,6 +1312,7 @@ const modeDescription = computed(() => {
             <span v-else>⏸ {{ refresh.done }}/{{ refresh.total }}</span>
           </button>
           <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
+          <button class="secondary" @click="openTranslationModal" :disabled="!gallery.selectedDate" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">翻译角色</button>
           <button class="secondary" @click="importTranslationFile" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">导入翻译字典</button>
           <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
         </div>
@@ -1173,6 +1451,188 @@ const modeDescription = computed(() => {
         <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
           <button @click="openHostsFolder" class="secondary">打开目录</button>
           <button @click="hostsModal.open = false" style="min-width: 80px;">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Translation Modal (list of untranslated characters) -->
+    <div v-if="translationModal.open" class="viewer-overlay translation-overlay" @click.self="closeTranslationModal">
+      <div class="translation-card">
+        <div class="translation-head">
+          <div>
+            <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">未翻译角色 · {{ gallery.selectedDate || '' }}</h3>
+            <p class="muted compact-text" style="margin: 4px 0 0;">
+              共 {{ translationModal.list.length }} 个 · 已筛选 {{ filteredUntranslated.length }} 个
+            </p>
+          </div>
+          <button class="ghost" @click="closeTranslationModal" style="color: var(--muted);">×</button>
+        </div>
+
+        <input
+          v-model="translationModal.search"
+          class="search-input"
+          type="text"
+          placeholder="搜索 tag 或回退名"
+          style="width: 100%; margin-bottom: 10px;"
+        />
+
+        <div class="translation-list">
+          <div v-if="translationModal.loading" class="gallery-empty" style="min-height: 120px;">正在加载...</div>
+          <div v-else-if="!filteredUntranslated.length" class="gallery-empty" style="min-height: 120px;">
+            {{ translationModal.list.length ? '没有匹配的角色' : '当前日期没有未翻译的角色 🎉' }}
+          </div>
+          <div
+            v-else
+            v-for="item in filteredUntranslated"
+            :key="item.tag"
+            class="translation-row"
+            @click="openTranslateDetail(item)"
+          >
+            <div class="translation-row-main">
+              <span class="translation-row-tag">{{ item.tag }}</span>
+              <span class="translation-row-fallback">{{ item.fallback_name }}</span>
+            </div>
+            <span class="translation-row-count">出现 {{ item.post_count }} 次</span>
+          </div>
+        </div>
+
+        <div class="translation-foot">
+          <span class="muted compact-text">
+            完成后点「导入到画廊」把 character_chinese_search.json 合并进 custom_translation.json
+          </span>
+          <div style="display: flex; gap: 8px;">
+            <button class="ghost" @click="closeTranslationModal" style="color: var(--accent-deep);">关闭</button>
+            <button
+              @click="importTranslationDict"
+              :disabled="translationModal.importing"
+              style="min-width: 130px;"
+            >{{ translationModal.importing ? '导入中...' : '导入到画廊' }}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Translate Detail Modal (single character) -->
+    <div v-if="translateDetail.open" class="viewer-overlay translation-overlay" @click.self="closeTranslateDetail" style="z-index: 10010;">
+      <div class="translation-card translation-detail-card">
+        <div class="translation-head">
+          <div style="min-width: 0;">
+            <h3 style="margin: 0; color: var(--accent-deep); font-size: 17px; word-break: break-all;">{{ translateDetail.tag }}</h3>
+            <p class="muted compact-text" style="margin: 4px 0 0;">回退名: {{ translateDetail.fallbackName }}</p>
+          </div>
+          <button class="ghost" @click="closeTranslateDetail" style="color: var(--muted);">×</button>
+        </div>
+
+        <div v-if="!translateDetail.source.exists" class="translation-fetch-banner">
+          <span style="flex: 1; min-width: 0;">
+            ⚠ character.json 中没有这条记录。可以点右侧按钮调用 Danbooru wiki API 在线拉描述（会写入 character_supplement.json）。
+            <span v-if="translateDetail.fetchMsg" style="display: block; color: #9d2c2c; margin-top: 4px;">{{ translateDetail.fetchMsg }}</span>
+          </span>
+          <button
+            class="secondary"
+            @click="fetchCharacterSource"
+            :disabled="translateDetail.fetchBusy"
+            style="flex-shrink: 0; min-width: 130px;"
+          >{{ translateDetail.fetchBusy ? '拉取中...' : '🔎 在线拉描述' }}</button>
+        </div>
+
+        <!-- 描述区固定在头部下方，不进 scrolling body，保证切换 tab / 滚动表单时一直可见 -->
+        <div class="translation-detail-section translation-description-pinned">
+          <div class="translation-detail-section-head static">
+            <span>英文描述与候选名（{{ translateDetail.source.other_names.length }} 个候选）</span>
+          </div>
+          <div class="translation-detail-section-body">
+            <div v-if="translateDetail.source.other_names.length" style="margin-bottom: 8px;">
+              <strong style="font-size: 12px;">候选名: </strong>
+              <span class="muted compact-text">{{ translateDetail.source.other_names.slice(0, 30).join(' / ') }}</span>
+            </div>
+            <pre class="translation-desc">{{ translateDetail.source.description || '(无描述，可点上方「在线拉描述」)' }}</pre>
+          </div>
+        </div>
+
+        <div class="translation-detail-body">
+          <div class="translation-mode-tabs">
+            <button
+              class="mode-chip"
+              :class="{ active: translateDetail.mode === 'api' }"
+              @click="translateDetail.mode = 'api'"
+            >API 翻译</button>
+            <button
+              class="mode-chip"
+              :class="{ active: translateDetail.mode === 'manual' }"
+              @click="translateDetail.mode = 'manual'"
+            >手动翻译（复制 Prompt）</button>
+          </div>
+
+          <div v-if="translateDetail.mode === 'api'" class="translation-mode-body">
+            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+              <button
+                @click="runApiTranslation"
+                :disabled="translateDetail.apiBusy"
+                style="min-width: 130px;"
+              >{{ translateDetail.apiBusy ? '调用中...' : '立即调用 API' }}</button>
+              <span class="muted compact-text">
+                {{ translateDetail.apiBusy ? '正在请求 openrouter，可能需要几十秒' : (translateDetail.source.exists ? '复用 .env 中的 openrouter_api_key（含描述）' : '没有本地描述，建议先点上方「在线拉描述」；也可直接调用 API 仅凭 tag 名翻译') }}
+              </span>
+            </div>
+            <div v-if="translateDetail.apiError" class="translation-api-error">
+              <strong>API 失败：</strong>{{ translateDetail.apiError }}
+              <div v-if="translateDetail.apiRaw" class="muted compact-text" style="margin-top: 6px;">
+                已把原始 LLM 输出灌进下方「手动翻译」标签的文本框，请修复 JSON 后点「解析填表」。
+              </div>
+            </div>
+          </div>
+
+          <div v-else class="translation-mode-body">
+            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap;">
+              <button class="secondary" @click="copyManualPrompt" style="min-width: 130px;">复制 Prompt</button>
+              <span class="muted compact-text">粘贴到你的大模型，把返回的 JSON 贴到下方</span>
+            </div>
+            <textarea
+              v-model="translateDetail.pasteText"
+              placeholder='把大模型返回的 JSON 粘贴到这里，例如：{"has_chinese": true, "chinese_name": "...", ...}'
+              class="translation-paste"
+            ></textarea>
+            <div style="display: flex; gap: 10px; align-items: center; margin-top: 6px; flex-wrap: wrap;">
+              <button class="secondary" @click="parsePastedJson" style="min-width: 130px;">解析填表</button>
+              <span v-if="translateDetail.parseError" class="error-text" style="margin: 0;">{{ translateDetail.parseError }}</span>
+            </div>
+          </div>
+
+          <div class="translation-form">
+            <label class="translation-form-row">
+              <input type="checkbox" v-model="translateDetail.form.has_chinese" />
+              <span>有中文名</span>
+            </label>
+            <label class="translation-form-field">
+              <span>中文名</span>
+              <input v-model="translateDetail.form.chinese_name" type="text" placeholder="例如：初音未来" />
+            </label>
+            <label class="translation-form-field">
+              <span>source_hint（小写英文，例如 vocaloid / touhou）</span>
+              <input v-model="translateDetail.form.source_hint" type="text" placeholder="例如：touhou" />
+            </label>
+            <label class="translation-form-field">
+              <span>中文简介</span>
+              <textarea
+                v-model="translateDetail.form.translated_description_zh"
+                placeholder="可选：角色的中文简介，会显示在画廊详情里"
+                class="translation-desc-input"
+              ></textarea>
+            </label>
+          </div>
+        </div>
+
+        <div class="translation-foot">
+          <span class="muted compact-text">保存后会写入 character_chinese_search.json</span>
+          <div style="display: flex; gap: 8px;">
+            <button class="ghost" @click="closeTranslateDetail" style="color: var(--accent-deep);">取消</button>
+            <button
+              @click="saveTranslation"
+              :disabled="translateDetail.saving"
+              style="min-width: 110px;"
+            >{{ translateDetail.saving ? '保存中...' : '保存到字典' }}</button>
+          </div>
         </div>
       </div>
     </div>
@@ -1511,5 +1971,226 @@ const modeDescription = computed(() => {
 @keyframes fadeInDown {
   from { opacity: 0; transform: translate(-50%, -15px); }
   to { opacity: 1; transform: translate(-50%, 0); }
+}
+
+/* ---------------- 角色增量翻译弹窗 ---------------- */
+.translation-overlay {
+  z-index: 10000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+}
+.translation-card {
+  width: 720px;
+  max-width: 92vw;
+  max-height: 86vh;
+  background: rgba(255, 250, 243, 0.98);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+.translation-detail-card {
+  width: 760px;
+  max-height: 90vh;
+}
+.translation-detail-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+.translation-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+.translation-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
+}
+.translation-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px dashed rgba(74, 53, 25, 0.12);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.translation-row:hover {
+  background: rgba(243, 223, 212, 0.5);
+}
+.translation-row:last-child {
+  border-bottom: none;
+}
+.translation-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.translation-row-tag {
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  color: var(--ink);
+  word-break: break-all;
+}
+.translation-row-fallback {
+  font-size: 12px;
+  color: var(--muted);
+}
+.translation-row-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--accent-deep);
+  background: var(--soft);
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+.translation-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.translation-detail-section {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
+  overflow: hidden;
+}
+.translation-description-pinned {
+  flex: 0 0 auto;
+}
+.translation-detail-section-head {
+  padding: 8px 12px;
+  background: rgba(243, 223, 212, 0.5);
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  user-select: none;
+}
+.translation-detail-section-head.static {
+  cursor: default;
+}
+.translation-detail-section-body {
+  padding: 10px 12px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.translation-desc {
+  margin: 0;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink);
+}
+.translation-mode-tabs {
+  display: flex;
+  gap: 8px;
+}
+.translation-mode-body {
+  padding: 10px 12px;
+  background: rgba(243, 223, 212, 0.25);
+  border-radius: 12px;
+  border: 1px dashed rgba(74, 53, 25, 0.18);
+}
+.translation-paste {
+  width: 100%;
+  height: 64px;
+  padding: 8px 10px;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  resize: vertical;
+  margin-top: 6px;
+}
+.translation-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.translation-form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--ink);
+}
+.translation-form-row input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+.translation-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.translation-desc-input {
+  width: 100%;
+  height: 90px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  resize: vertical;
+}
+.translation-fetch-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: rgba(212, 143, 47, 0.12);
+  border: 1px solid rgba(212, 143, 47, 0.35);
+  border-radius: 10px;
+  color: #8a5a14;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.translation-api-error {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: rgba(157, 44, 44, 0.08);
+  border: 1px solid rgba(157, 44, 44, 0.35);
+  border-radius: 10px;
+  color: #9d2c2c;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+  max-height: 160px;
+  overflow-y: auto;
 }
 </style>

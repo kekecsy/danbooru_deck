@@ -16,7 +16,10 @@
       "Bash(awk '{print $5}')",
       "Bash(taskkill //F //PID 23852)",
       "Bash(python -c ' *)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(python -c \"from translator import translator; print\\('translator ok, search dict size:', len\\(translator.load_search_dict\\(\\)\\)\\); print\\('source loaded:', bool\\(translator.load_character_source\\(\\)\\)\\)\")",
+      "Bash(\"D:\\\\Anaconda3\\\\envs\\\\pic_web\\\\python.exe\" -c \"from translator import translator; print\\('translator ok, search dict size:', len\\(translator.load_search_dict\\(\\)\\)\\)\")",
+      "Bash(PYTHONIOENCODING=utf-8 'D:\\\\Anaconda3\\\\envs\\\\pic_web\\\\python.exe' -c ' *)"
     ]
   }
 }
