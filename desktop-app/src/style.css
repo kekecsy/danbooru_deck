@@ -367,7 +367,7 @@ input, select {
 .score-badge {
   position: absolute;
   top: 6px;
-  right: 6px;
+  left: 6px;
   display: flex;
   align-items: center;
   gap: 6px;

@@ -4,8 +4,6 @@ import GalleryCalendar from './GalleryCalendar.vue';
 
 const emit = defineEmits(['edit-image']);
 
-const LATEST_PAGE_SIZE = 15;
-
 const savedHabitsStr = localStorage.getItem('crawlerHabits') || '{}';
 const habits = JSON.parse(savedHabitsStr);
 
@@ -47,14 +45,16 @@ const gallery = ref({
   sortBy: habits.sortBy || 'default',
   hotOnly: false,
   hotThreshold: habits.hotThreshold || 50,
-  pageSize: habits.pageSize || 30,
+  // 固定 15/页：30/60/120 会同时渲染太多卡片，缩略图 IPC + 网格布局都会卡
+  pageSize: 15,
+  cardSize: habits.cardSize || 150,
   page: 1
 });
 
-watch(() => [gallery.value.sortBy, gallery.value.pageSize, gallery.value.hotThreshold], () => {
+watch(() => [gallery.value.sortBy, gallery.value.hotThreshold, gallery.value.cardSize], () => {
   habits.sortBy = gallery.value.sortBy;
-  habits.pageSize = gallery.value.pageSize;
   habits.hotThreshold = gallery.value.hotThreshold;
+  habits.cardSize = gallery.value.cardSize;
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 });
 
@@ -84,6 +84,32 @@ const refresh = ref({
   total: 0,
   dateStr: ''
 });
+
+// 按 score / 收藏数 排序时锁定排序的快照：
+// 用户点开一张卡片会触发 refreshSinglePost 更新该卡片的 score/favCount，
+// 没有快照时 computed 会立刻重排，把刚点的卡片挤到别处。
+// 解决方案：把"当前的排序序号"按 filename 记下来，computed 优先用快照的位置，
+// 不在快照里的（例如新下载的图）排到末尾，等用户主动点"重新排序"才更新快照。
+const sortSnapshot = ref({ key: '', positions: new Map() });
+
+function rebuildSortSnapshot() {
+  const sortBy = gallery.value.sortBy;
+  if (sortBy !== 'score' && sortBy !== 'fav') {
+    sortSnapshot.value = { key: '', positions: new Map() };
+    return;
+  }
+  const sorted = [...gallery.value.images];
+  if (sortBy === 'score') {
+    sorted.sort((a, b) => (b.score || 0) - (a.score || 0));
+  } else {
+    sorted.sort((a, b) => (b.favCount || 0) - (a.favCount || 0));
+  }
+  const positions = new Map();
+  sorted.forEach((item, idx) => {
+    if (item.filename) positions.set(item.filename, idx);
+  });
+  sortSnapshot.value = { key: sortBy, positions };
+}
 
 const toast = ref({
   show: false,
@@ -136,10 +162,20 @@ const filteredLocalImages = computed(() => {
   });
 
   const sortBy = gallery.value.sortBy;
-  if (sortBy === 'score') {
-    result = [...result].sort((a, b) => (b.score || 0) - (a.score || 0));
-  } else if (sortBy === 'fav') {
-    result = [...result].sort((a, b) => (b.favCount || 0) - (a.favCount || 0));
+  if (sortBy === 'score' || sortBy === 'fav') {
+    const snap = sortSnapshot.value;
+    if (snap.key === sortBy && snap.positions.size > 0) {
+      // 使用快照顺序，确保点开卡片刷新热度后排序位置不会乱跳
+      result = [...result].sort((a, b) => {
+        const pa = snap.positions.has(a.filename) ? snap.positions.get(a.filename) : Number.MAX_SAFE_INTEGER;
+        const pb = snap.positions.has(b.filename) ? snap.positions.get(b.filename) : Number.MAX_SAFE_INTEGER;
+        return pa - pb;
+      });
+    } else if (sortBy === 'score') {
+      result = [...result].sort((a, b) => (b.score || 0) - (a.score || 0));
+    } else {
+      result = [...result].sort((a, b) => (b.favCount || 0) - (a.favCount || 0));
+    }
   }
   return result;
 });
@@ -358,6 +394,7 @@ async function loadGallery(date, silent = false) {
     gallery.value.today = data.today;
     gallery.value.images = normalizedImages;
     gallery.value.page = 1;
+    rebuildSortSnapshot();
     await hydrateThumbs(pagedLocalImages.value);
   } finally {
     if (!silent) loadingGallery.value = false;
@@ -504,12 +541,6 @@ async function convertGif(item) {
   } catch (err) {
     showToast("请求失败: " + err.message, "error");
   }
-}
-
-function extractPostId(postUrl) {
-  if (!postUrl) return '';
-  const tail = String(postUrl).replace(/\/$/, '').split('/').pop();
-  return /^\d+$/.test(tail) ? tail : '';
 }
 
 async function startRefreshScores() {
@@ -745,6 +776,56 @@ async function stopRefreshScores() {
   try {
     await fetch('http://127.0.0.1:8000/api/refresh_scores_stop', { method: 'POST' });
   } catch (_) { /* noop */ }
+}
+
+// 「刷新热度」下拉菜单：把原先的 3 个按钮（本页/范围/全部）合并到一个入口
+const refreshMenu = ref({ open: false });
+function toggleRefreshMenu() {
+  if (refresh.value.isRunning) {
+    stopRefreshScores();
+    return;
+  }
+  if (!gallery.value.selectedDate) {
+    showToast('请先选择日期', 'error');
+    return;
+  }
+  refreshMenu.value.open = !refreshMenu.value.open;
+}
+function onRefreshChoice(scope) {
+  refreshMenu.value.open = false;
+  if (scope === 'page') startRefreshScores();
+  else if (scope === 'range') openRangeRefreshDialog();
+  else if (scope === 'all') refreshAllPages();
+}
+function onDocClickForRefreshMenu(e) {
+  if (!refreshMenu.value.open) return;
+  const dropdown = document.querySelector('.refresh-dropdown');
+  if (dropdown && !dropdown.contains(e.target)) {
+    refreshMenu.value.open = false;
+  }
+}
+
+// 「翻译」下拉菜单：把「翻译角色」和「导入翻译字典」合并成一个入口，
+// 这两个都是低频操作，原先两个独立按钮加起来太宽导致工具栏换行
+const translateMenu = ref({ open: false });
+function toggleTranslateMenu() {
+  if (!gallery.value.selectedDate) {
+    // 没选日期时直接走文件导入也是合理的，但翻译角色需要日期，
+    // 这里先打开菜单让用户选择，菜单里翻译角色项会被 disable
+  }
+  translateMenu.value.open = !translateMenu.value.open;
+}
+function onTranslateChoice(action) {
+  translateMenu.value.open = false;
+  if (action === 'character') openTranslationModal();
+  else if (action === 'import') importTranslationFile();
+}
+function onDocClickForTranslateMenu(e) {
+  if (!translateMenu.value.open) return;
+  const dropdown = document.querySelector('.translate-dropdown');
+  if (dropdown && !dropdown.contains(e.target)) {
+    translateMenu.value.open = false;
+  }
 }
 
 async function refreshSinglePost(item) {
@@ -1144,11 +1225,12 @@ const favGroupList = computed(() => {
     .sort((a, b) => a.name.localeCompare(b.name));
 });
 
-// ---------------- 已收藏画师/角色：用于卡片异色高亮 ----------------
+// ---------------- 已收藏画师/角色/图片：用于卡片异色高亮 ----------------
 // favorites 全局快照，挂载时拉一次；保存收藏后再同步刷新一次
 const favSnapshot = ref({
   artists: {},       // {group: [artist,...]}
   characters: {},    // {group: [character_token,...]}
+  imageKeys: [],     // ["date/filename", ...]
 });
 
 const favoritedArtistSet = computed(() => {
@@ -1167,7 +1249,18 @@ const favoritedCharacterSet = computed(() => {
   return s;
 });
 
+const favoritedImageKeySet = computed(() => new Set(favSnapshot.value.imageKeys || []));
+
+function imageFavKey(item) {
+  return `${gallery.value.selectedDate || ''}/${item?.filename || ''}`;
+}
+
+function isImageFavorited(item) {
+  return favoritedImageKeySet.value.has(imageFavKey(item));
+}
+
 function isCardFavorited(item) {
+  if (isImageFavorited(item)) return true;
   const arts = item.artistTokens || [];
   for (const a of arts) {
     if (a && a !== '未知' && favoritedArtistSet.value.has(a)) return true;
@@ -1181,13 +1274,49 @@ function isCardFavorited(item) {
 
 async function loadFavSnapshot() {
   try {
-    const [aRes, cRes] = await Promise.all([
+    const [aRes, cRes, iRes] = await Promise.all([
       fetch('http://127.0.0.1:8000/api/artist_favorites').then(r => r.json()),
       fetch('http://127.0.0.1:8000/api/character_favorites').then(r => r.json()),
+      fetch('http://127.0.0.1:8000/api/image_favorites').then(r => r.json()),
     ]);
     favSnapshot.value.artists = aRes.groups || {};
     favSnapshot.value.characters = cRes.groups || {};
+    favSnapshot.value.imageKeys = iRes.keys || [];
   } catch (_) { /* 静默失败，卡片只是不高亮而已 */ }
+}
+
+async function toggleImageFavorite(item) {
+  if (!item?.filename || !gallery.value.selectedDate) {
+    showToast('缺少日期或文件名，无法收藏', 'error');
+    return;
+  }
+  const payload = {
+    date: gallery.value.selectedDate,
+    filename: item.filename,
+    artist: item.artist || '',
+    characters: Array.isArray(item.characters) ? item.characters : [],
+    score: item.score || 0,
+    fav_count: item.favCount || 0,
+    local_path: item.localPath || '',
+    post_url: item.postUrl || '',
+    web_url: item.web_url || item.webUrl || '',
+  };
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/image_favorites/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ item: payload }),
+    });
+    const data = await res.json();
+    if (!data.ok) { showToast(data.msg || '收藏失败', 'error'); return; }
+    const key = data.key;
+    const set = new Set(favSnapshot.value.imageKeys);
+    if (data.favorited) set.add(key); else set.delete(key);
+    favSnapshot.value.imageKeys = Array.from(set);
+    showToast(data.favorited ? '已加入图片收藏' : '已取消图片收藏', data.favorited ? 'success' : 'info');
+  } catch (err) {
+    showToast('收藏失败: ' + err.message, 'error');
+  }
 }
 
 // ---------------- 角色收藏：从画廊 chip 的 ★ 加入分组 ----------------
@@ -1500,9 +1629,13 @@ async function onViewerJump(event) {
 
 watch(() => gallery.value.search, () => { gallery.value.page = 1; });
 watch(() => gallery.value.filterFormat, () => { gallery.value.page = 1; });
-watch(() => gallery.value.sortBy, () => { gallery.value.page = 1; });
+watch(() => gallery.value.sortBy, (newSort) => {
+  gallery.value.page = 1;
+  if (newSort === 'score' || newSort === 'fav') {
+    rebuildSortSnapshot();
+  }
+});
 watch(() => gallery.value.hotOnly, () => { gallery.value.page = 1; });
-watch(() => gallery.value.pageSize, () => { gallery.value.page = 1; });
 
 watch(activePage, n => { jumpInput.value = n; });
 
@@ -1523,11 +1656,15 @@ onMounted(async () => {
   loadFavSnapshot();
   pollTimer = window.setInterval(syncStatus, 1200);
   window.addEventListener('keydown', onKeyDown);
+  document.addEventListener('click', onDocClickForRefreshMenu);
+  document.addEventListener('click', onDocClickForTranslateMenu);
 });
 
 onBeforeUnmount(() => {
   if (pollTimer) window.clearInterval(pollTimer);
   window.removeEventListener('keydown', onKeyDown);
+  document.removeEventListener('click', onDocClickForRefreshMenu);
+  document.removeEventListener('click', onDocClickForTranslateMenu);
 });
 
 const modeDescription = computed(() => {
@@ -1678,59 +1815,101 @@ const modeDescription = computed(() => {
 
     <section class="panel card gallery-panel">
       <div class="gallery-head">
-        <div>
-          <h2>本地已下载</h2>
-          <p class="inline-note">
-            共 {{ galleryStats.total }} 张<span v-if="galleryStats.filtered !== galleryStats.total"> · 已筛选 {{ galleryStats.filtered }} 张</span><span v-if="galleryStats.avg > 0"> · 平均 ★ {{ galleryStats.avg }} · 中位 ★ {{ galleryStats.median }}</span> · {{ gallery.selectedDate || '未选择' }}
-          </p>
+        <div class="gallery-title-row">
+          <h2>{{ gallery.selectedDate || '本地图库' }}</h2>
+          <span class="gallery-stats-inline">
+            共 {{ galleryStats.total }} 张<span v-if="galleryStats.filtered !== galleryStats.total"> · 已筛选 {{ galleryStats.filtered }} 张</span><span v-if="galleryStats.avg > 0"> · 平均 ★ {{ galleryStats.avg }} · 中位 ★ {{ galleryStats.median }}</span>
+          </span>
         </div>
         <div class="gallery-tools">
-          <select v-model="gallery.sortBy" class="search-input" style="width: auto;" title="排序方式">
+          <select v-model="gallery.sortBy" class="search-input gallery-sort-select" style="width: auto;" title="排序方式">
             <option value="default">默认抓取顺序</option>
             <option value="score">按 score 排序</option>
             <option value="fav">按收藏数排序</option>
           </select>
+          <button
+            v-if="gallery.sortBy === 'score' || gallery.sortBy === 'fav'"
+            class="secondary tool-btn"
+            @click="rebuildSortSnapshot"
+            title="按当前最新 score / 收藏数 重新排序（默认锁定排序，避免点开卡片刷新热度时位置乱跳）"
+          >🔃 重新排序</button>
           <select v-model="gallery.filterFormat" class="search-input" style="width: auto;">
             <option value="all">全部格式</option>
             <option value="image">图片</option>
             <option value="video">视频</option>
             <option value="zip">动图ZIP</option>
           </select>
-          <select v-model.number="gallery.pageSize" class="search-input" style="width: auto;" title="每页数量">
-            <option :value="15">15 / 页</option>
-            <option :value="30">30 / 页</option>
-            <option :value="60">60 / 页</option>
-            <option :value="120">120 / 页</option>
+          <select v-model.number="gallery.cardSize" class="search-input" style="width: auto;" title="卡片大小">
+            <option :value="120">紧凑</option>
+            <option :value="150">小</option>
+            <option :value="180">默认</option>
+            <option :value="220">大</option>
           </select>
           <button
             :class="['hot-toggle', { active: gallery.hotOnly }]"
             @click="gallery.hotOnly = !gallery.hotOnly"
             :title="`只看 score ≥ ${gallery.hotThreshold}`"
           >🔥 只看高分</button>
-          <button
-            :class="['refresh-btn', { active: refresh.isRunning }]"
-            @click="refresh.isRunning ? stopRefreshScores() : startRefreshScores()"
-            :disabled="!gallery.selectedDate"
-            :title="refresh.isRunning ? '点击停止刷新' : '刷新当前页可见图片的 score / 收藏数 / 画师（对缺失热度的图会反查补全）'"
-          >
-            <span v-if="!refresh.isRunning">🔄 刷新本页</span>
-            <span v-else>⏸ {{ refresh.done }}/{{ refresh.total }}</span>
-          </button>
-          <button
-            class="refresh-btn"
-            @click="openRangeRefreshDialog"
-            :disabled="!gallery.selectedDate || refresh.isRunning"
-            title="选择页码范围一次性刷新热度"
-          >🔄 刷新范围</button>
-          <button
-            class="refresh-btn"
-            @click="refreshAllPages"
-            :disabled="!gallery.selectedDate || refresh.isRunning"
-            :title="`刷新全部 ${activeTotalPages} 页（>5 页会自动每 4 页休息 40s 防风控）`"
-          >🔄 刷新全部</button>
-          <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
-          <button class="secondary" @click="openTranslationModal" :disabled="!gallery.selectedDate" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">翻译角色</button>
-          <button class="secondary" @click="importTranslationFile" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">导入翻译字典</button>
+          <div class="refresh-dropdown">
+            <button
+              :class="['refresh-btn', { active: refresh.isRunning, 'menu-open': refreshMenu.open }]"
+              @click.stop="toggleRefreshMenu"
+              :disabled="!gallery.selectedDate && !refresh.isRunning"
+              :title="refresh.isRunning ? '点击停止刷新' : '选择刷新范围（本页 / 指定范围 / 全部）'"
+            >
+              <span v-if="!refresh.isRunning">🔄 刷新热度 ▾</span>
+              <span v-else>⏸ {{ refresh.done }}/{{ refresh.total }}</span>
+            </button>
+            <div v-if="refreshMenu.open && !refresh.isRunning" class="refresh-menu" @click.stop>
+              <button class="refresh-menu-item" @click="onRefreshChoice('page')">
+                <span class="refresh-menu-label">本页</span>
+                <span class="refresh-menu-meta">{{ pagedLocalImages.length }} 张</span>
+              </button>
+              <button class="refresh-menu-item" @click="onRefreshChoice('range')">
+                <span class="refresh-menu-label">指定页码范围…</span>
+                <span class="refresh-menu-meta">自定义</span>
+              </button>
+              <button class="refresh-menu-item" @click="onRefreshChoice('all')">
+                <span class="refresh-menu-label">全部</span>
+                <span class="refresh-menu-meta">{{ activeTotalPages }} 页</span>
+              </button>
+            </div>
+          </div>
+          <span class="search-input-wrap">
+            <input v-model="gallery.search" class="search-input search-input-with-clear" type="text" placeholder="搜索作者 / 角色" />
+            <button
+              v-if="gallery.search"
+              class="search-clear-btn"
+              @click="gallery.search = ''"
+              title="清空搜索"
+              type="button"
+            >×</button>
+          </span>
+          <div class="translate-dropdown">
+            <button
+              class="secondary translate-trigger tool-btn"
+              :class="{ 'menu-open': translateMenu.open }"
+              @click.stop="toggleTranslateMenu"
+              title="翻译角色 / 导入翻译字典"
+            >🌐 翻译 ▾</button>
+            <div v-if="translateMenu.open" class="translate-menu" @click.stop>
+              <button
+                class="translate-menu-item"
+                :disabled="!gallery.selectedDate"
+                @click="onTranslateChoice('character')"
+              >
+                <span class="translate-menu-label">翻译角色</span>
+                <span class="translate-menu-meta">{{ gallery.selectedDate ? '调用 LLM 或手动粘贴' : '先选日期' }}</span>
+              </button>
+              <button
+                class="translate-menu-item"
+                @click="onTranslateChoice('import')"
+              >
+                <span class="translate-menu-label">导入翻译字典</span>
+                <span class="translate-menu-meta">从 JSON 文件合并</span>
+              </button>
+            </div>
+          </div>
           <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
         </div>
       </div>
@@ -1744,54 +1923,24 @@ const modeDescription = computed(() => {
 
       <div v-if="loadingGallery" class="gallery-empty">正在读取图库...</div>
       <div v-else-if="!activeItems.length" class="gallery-empty">当前日期没有图片</div>
-      <div v-else class="gallery-grid">
-        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item) }">
+      <div v-else class="gallery-grid" :style="`--card-min-w: ${gallery.cardSize}px`">
+        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item) }">
           <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @click="openViewer(item)" />
+          <button
+            class="img-fav-toggle"
+            :class="{ active: isImageFavorited(item) }"
+            @click.stop="toggleImageFavorite(item)"
+            :title="isImageFavorited(item) ? '取消图片收藏' : '加入图片收藏'"
+          >{{ isImageFavorited(item) ? '♥' : '♡' }}</button>
           <div v-if="(item.score || 0) > 0 || (item.favCount || 0) > 0" class="score-badge">
             <span><span class="score-star">★</span> {{ item.score || 0 }}</span>
             <span><span class="score-heart">♥</span> {{ item.favCount || 0 }}</span>
           </div>
-          <div class="card-meta">
-            <div class="token-row">
-              <template v-for="token in (item.artistTokens?.length ? item.artistTokens : ['未知'])" :key="`artist-${token}`">
-                <button
-                  class="meta-link author-link token-chip"
-                  :class="{ 'is-favorited-chip': favoritedArtistSet.has(token) }"
-                  @click="applySearch(token)"
-                >
-                  {{ token }}
-                </button>
-                <button
-                  v-if="token !== '未知'"
-                  class="meta-link author-fav-btn"
-                  @click.stop="openFavoriteDialog(token)"
-                  title="加入画师收藏"
-                >★</button>
-              </template>
-            </div>
-            <div class="token-row">
-              <template v-for="token in item.characterTokens" :key="`character-${token}`">
-                <button
-                  class="meta-link token-chip"
-                  :class="{ 'is-favorited-chip': favoritedCharacterSet.has(token) }"
-                  @click="applySearch(token)"
-                >
-                  {{ token.includes(' [') ? token.split(' [')[0] : token }}
-                </button>
-                <button
-                  class="meta-link author-fav-btn"
-                  @click.stop="openCharacterFavoriteDialog(token)"
-                  title="加入角色收藏（按 source_hint 合并分组）"
-                >★</button>
-              </template>
-              <span v-if="!item.characterTokens?.length" class="muted compact-text">无角色标签</span>
-            </div>
-          </div>
-          <div class="button-row compact">
-            <button class="secondary" @click="openOriginal(item)" :disabled="!item.postUrl">原帖</button>
-            <button class="secondary" @click="openLocal(item)" :disabled="!item.localPath">打开本地</button>
-            <button @click="editItem(item)">编辑打码</button>
-            <button v-if="item.filename?.toLowerCase().endsWith('.zip')" class="secondary" @click="convertGif(item)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
+          <div class="button-row compact card-actions">
+            <button class="secondary" @click="openOriginal(item)" :disabled="!item.postUrl" title="打开 Danbooru 原帖">原帖</button>
+            <button class="secondary" @click="openLocal(item)" :disabled="!item.localPath" title="打开本地文件">本地</button>
+            <button @click="editItem(item)" title="编辑打码">编辑</button>
+            <button v-if="item.filename?.toLowerCase().endsWith('.zip')" class="secondary" @click="convertGif(item)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;" title="ZIP 动画转 GIF">转GIF</button>
           </div>
         </article>
       </div>
@@ -1820,26 +1969,67 @@ const modeDescription = computed(() => {
     <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer">
       <div class="viewer-toolbar">
         <div class="viewer-toolbar-info">
-          <strong>{{ viewerItem?.artist || '未知' }}</strong>
-          <span class="muted compact-text" style="color: #ccc;">
-            第
-            <input
-              class="viewer-jump-input"
-              type="number"
-              min="1"
-              :max="viewerItems.length"
-              :value="viewer.index + 1"
-              @keyup.enter="onViewerJump($event)"
-              @change="onViewerJump($event)"
-            />
-            / {{ viewerItems.length }} 张
-          </span>
-          <span v-if="(viewerItem?.score || 0) > 0" class="viewer-score">★ {{ viewerItem.score }}</span>
-          <span v-if="(viewerItem?.favCount || 0) > 0" class="viewer-fav">♥ {{ viewerItem.favCount }}</span>
+          <div class="viewer-meta-block">
+            <span class="viewer-meta-label">画师</span>
+            <template v-for="token in (viewerItem?.artistTokens?.length ? viewerItem.artistTokens : ['未知'])" :key="`v-artist-${token}`">
+              <button
+                class="meta-link author-link token-chip viewer-token-chip"
+                :class="{ 'is-favorited-chip': favoritedArtistSet.has(token) }"
+                @click="applySearch(token); closeViewer();"
+                :title="`搜索同画师作品：${token}`"
+              >{{ token }}</button>
+              <button
+                v-if="token !== '未知'"
+                class="meta-link author-fav-btn viewer-fav-star"
+                @click.stop="openFavoriteDialog(token)"
+                title="加入画师收藏"
+              >★</button>
+            </template>
+          </div>
+          <div v-if="viewerItem?.characterTokens?.length" class="viewer-meta-block">
+            <span class="viewer-meta-label">角色</span>
+            <template v-for="token in viewerItem.characterTokens" :key="`v-char-${token}`">
+              <button
+                class="meta-link token-chip viewer-token-chip"
+                :class="{ 'is-favorited-chip': favoritedCharacterSet.has(token) }"
+                @click="applySearch(token); closeViewer();"
+                :title="`搜索同角色作品：${token}`"
+              >{{ token.includes(' [') ? token.split(' [')[0] : token }}</button>
+              <button
+                class="meta-link author-fav-btn viewer-fav-star"
+                @click.stop="openCharacterFavoriteDialog(token)"
+                title="加入角色收藏（按 source_hint 合并分组）"
+              >★</button>
+            </template>
+          </div>
+          <div class="viewer-meta-block viewer-counter-block">
+            <span class="muted compact-text" style="color: #ccc;">
+              第
+              <input
+                class="viewer-jump-input"
+                type="number"
+                min="1"
+                :max="viewerItems.length"
+                :value="viewer.index + 1"
+                @keyup.enter="onViewerJump($event)"
+                @change="onViewerJump($event)"
+              />
+              / {{ viewerItems.length }} 张
+            </span>
+            <span v-if="(viewerItem?.score || 0) > 0" class="viewer-score">★ {{ viewerItem.score }}</span>
+            <span v-if="(viewerItem?.favCount || 0) > 0" class="viewer-fav">♥ {{ viewerItem.favCount }}</span>
+          </div>
         </div>
         <div class="button-row compact viewer-actions">
           <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
           <button class="secondary" @click="stepViewer(1)" :disabled="viewer.index >= viewerItems.length - 1">下一张</button>
+          <button
+            class="viewer-fav-btn"
+            :class="{ active: viewerItem && isImageFavorited(viewerItem) }"
+            @click="viewerItem && toggleImageFavorite(viewerItem)"
+            :disabled="!viewerItem"
+            :title="viewerItem && isImageFavorited(viewerItem) ? '取消图片收藏' : '加入图片收藏'"
+          >{{ viewerItem && isImageFavorited(viewerItem) ? '♥ 已收藏' : '♡ 收藏' }}</button>
           <button v-if="viewerItem?.filename?.toLowerCase().endsWith('.zip')" class="secondary" @click="convertGif(viewerItem)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
           <button @click="editItem(viewerItem)" style="background: linear-gradient(135deg, var(--accent), var(--accent-deep)); border: none; color: white;">编辑图片</button>
           <button class="ghost" @click="closeViewer" style="color: #fff; border: 1px solid rgba(255,255,255,0.2);">关闭</button>
@@ -2209,9 +2399,232 @@ const modeDescription = computed(() => {
 </template>
 
 <style scoped>
+/* 左栏由全局 340px 缩到 300px，把多出来的 40px 让给右侧图片网格 */
+.crawler-layout {
+  grid-template-columns: 300px minmax(0, 1fr);
+}
+@media (max-width: 1400px) {
+  .crawler-layout {
+    grid-template-columns: 270px minmax(0, 1fr);
+  }
+}
+
 /* 控制面板设为 relative，给日志面板的「放大」态做绝对定位锚点 */
 .control-panel {
   position: relative;
+  /* 全局 .control-panel 给的是 position: sticky + top: 16px。把 position 改成 relative
+     后，top: 16px 会从「sticky 阈值」变成「真实位移」，把整个左栏往下推 16px。
+     必须显式 top: 0 把它消掉，否则左栏会比右栏低 16px。 */
+  top: 0;
+  /* 钉死成视口高度：
+     1. 与右侧 gallery-panel 同高，不再需要 align-items: stretch 兜底
+     2. 日志「放大」态用 position: absolute + inset:0 时有完整面板可铺满，
+        不会出现"放大后左栏反而变矮"的诡异（之前日志 absolute 后脱离流，
+        左栏只剩控件高度，导致 absolute 的 inset:0 也只铺这点高度） */
+  height: calc(100vh - 32px);
+  max-height: calc(100vh - 32px);
+}
+
+/* 右侧本地图库栏：同样视口高度。
+   不用 position: sticky（之前用，但跟左栏的 relative 不一致会让两栏顶部出现
+   微妙的偏移；用 relative 保持一致，反正两栏都钉死了视口高度也不需要吸顶）。 */
+.gallery-panel {
+  position: relative;
+  height: calc(100vh - 32px);
+  max-height: calc(100vh - 32px);
+}
+
+/* 关键：两栏 h2 都显式 margin: 0，确保都从卡片内边距 (Y=14) 开始绘制。
+   不依赖浏览器默认 margin + flex/block 容器之间的 margin collapse 规则差异
+   ——左栏 panel-head 里 h2 是 block 容器的子元素（margin 会向上 collapse 到父级），
+   右栏 gallery-title-row 是 flex 容器（flex item 的 margin 不 collapse），
+   两种容器对 h2 margin 的处理不同会导致一边比另一边低 20px。
+   都归零最稳定。 */
+.control-panel .panel-head h2,
+.gallery-title-row h2 {
+  margin: 0;
+}
+.gallery-panel .gallery-grid {
+  /* flex 占满除 head/calendar/pagination 之外的剩余空间；
+     overflow: auto 由全局给好，行数多时网格内部滚动。
+
+     关键：必须显式 align-content: start + grid-auto-rows: max-content，
+     否则某些浏览器/场景下 grid 会把多余的垂直空间均分给行，
+     导致只有 1-2 行卡片时被拉到面板那么高（用户报告的"卡片拉长到整页一样大"），
+     或 3+ 行装不下时压扁行高把按钮裁掉（用户报告的"按钮显示不出来"）。
+     start 把多余空间放到网格末端，max-content 锁死行高 = 卡片自然高度。 */
+  flex: 1 1 auto;
+  min-height: 0;
+  align-content: start;
+  grid-auto-rows: max-content;
+}
+
+/* 覆盖全局 .image-card { contain-intrinsic-size: 320px } 的单值占位。
+   现在卡片移除了 card-meta，自然高度只剩 thumb(=width) + 按钮行(40) + padding(16)。
+   按当前 cardSize 默认 150 算大约 206px；给 220 留点余量。
+   同时强制 align-self: start，杜绝 align-items: stretch 把卡片拉到行高（即使
+   行高被 align-content: start 锁死，再加一层保险） */
+.image-card {
+  contain-intrinsic-size: 200px 220px;
+  align-self: start;
+}
+
+/* 卡片最小宽度由 gallery.cardSize 通过 inline --card-min-w 注入，
+   覆盖全局 .gallery-grid 的 minmax(180px, 1fr)。 */
+.gallery-grid {
+  grid-template-columns: repeat(auto-fill, minmax(var(--card-min-w, 180px), 1fr));
+}
+
+/* 卡片内的「原帖 / 本地 / 编辑 / 转GIF」按钮：
+   全局 button padding 8px 12px + font 13px，在 120-150px 窄卡片里被 flex:1 平分
+   后会出现"一字一行"。这里只在卡片范围内压低 padding 和字号，让 2 字按钮在
+   最窄 120px 卡片下也能横排不换行 */
+.image-card .button-row.compact button {
+  padding: 4px 6px;
+  font-size: 11px;
+  border-radius: 8px;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+/* 卡片移除了 .card-meta 后，按钮行直接贴在缩略图下方。
+   给行本身加点 padding，避免按钮蹭到卡片圆角边缘 */
+.image-card .card-actions {
+  padding: 8px;
+  margin-top: auto;  /* 卡片内剩余空间挤到顶部，让按钮总是贴底，缩略图保持在上 */
+}
+
+/* gallery-head 改成两行竖排：
+   第 1 行 = 标题行（日期 h2 在左，统计文本贴右上角）
+   第 2 行 = 工具栏（所有筛选/排序/刷新/搜索/翻译） */
+.gallery-head {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.gallery-title-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+/* 不要覆写 h2 margin！其他页（EditorPage/FavoritesPage）都用 h2 默认 margin。
+   覆写成 margin:0 会让右栏 h2 比左栏 h2 高出约 20px（左栏 h2 有默认 margin-top），
+   导致"抓图任务"和右栏日期标题不对齐。让 h2 保持默认 margin 即可与左栏对齐。 */
+.gallery-stats-inline {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 工具栏紧凑化：尽量一行装下所有控件 */
+.gallery-tools {
+  gap: 6px;
+  justify-content: flex-start;
+  font-size: 11.5px;
+}
+.gallery-tools select.search-input,
+.gallery-tools .search-input-with-clear,
+.gallery-tools .tool-btn,
+.gallery-tools .hot-toggle,
+.gallery-tools .refresh-btn {
+  font-size: 11.5px;
+  padding: 4px 8px;
+  height: 28px;
+  white-space: nowrap;
+}
+.gallery-tools .gallery-sort-select {
+  font-weight: 600;
+}
+
+/* 搜索框默认紧凑 130，focus 拉宽以便看清完整输入 */
+.gallery-tools .search-input-wrap .search-input {
+  width: 130px;
+  transition: width 0.18s ease;
+}
+.gallery-tools .search-input-wrap .search-input:focus {
+  width: 180px;
+}
+
+/* ---------------- 查看器顶部画师/角色 meta（从卡片挪过来的） ----------------
+   全局 .viewer-toolbar 是水平 pill。在挤进很多角色 chip 后会把右侧的
+   上一张/下一张/收藏 等按钮挤窄到「一字三行」。
+   这里把工具栏改成 column 布局：第 1 行 = 画师/角色/计数 chip 区（可换行）；
+   第 2 行 = 操作按钮（单行不换行），各占据全宽。 */
+.viewer-toolbar {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  max-width: 92vw;
+  min-width: 480px;
+}
+.viewer-toolbar-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.viewer-meta-block {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+}
+.viewer-meta-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.55);
+  letter-spacing: 0.5px;
+  margin-right: 2px;
+}
+/* 查看器在深色蒙层上，chip 默认浅色背景对比好但 hover/收藏态需要点反白 */
+.viewer-token-chip {
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--ink);
+  font-size: 12px;
+}
+.viewer-token-chip:hover {
+  background: #fff;
+  color: var(--accent-deep);
+}
+.viewer-token-chip.is-favorited-chip {
+  background: linear-gradient(135deg, rgba(255, 188, 86, 0.95), rgba(212, 143, 47, 0.9));
+  color: #4a2e08;
+  border-color: rgba(212, 143, 47, 0.7);
+  font-weight: 700;
+}
+.viewer-fav-star {
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #ffd699;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+.viewer-fav-star:hover {
+  background: rgba(255, 188, 86, 0.4);
+  color: #fff;
+  border-color: rgba(255, 188, 86, 0.7);
+}
+.viewer-counter-block {
+  margin-left: auto;
+  gap: 8px;
+}
+
+/* 操作按钮行：第 2 行，居中横排，绝不换行 */
+.viewer-actions {
+  flex-wrap: nowrap !important;
+  justify-content: center;
+  gap: 8px;
+}
+.viewer-actions button {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 /* Modern Log UI */
@@ -2223,6 +2636,10 @@ const modeDescription = computed(() => {
   box-shadow: 0 8px 32px rgba(87, 58, 25, 0.15);
   display: flex;
   flex-direction: column;
+  /* 固定日志面板最大高度。之前 control-panel 解除了 max-height 后，
+     日志会随条数不停拉高把整栏带着无限增长。锁到 360px 后多余日志在
+     .modern-log-body 内部滚动，整栏高度可预期。放大态会单独覆盖此限制。 */
+  max-height: 360px;
   transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
 .modern-log-wrapper.is-expanded {
@@ -2239,6 +2656,8 @@ const modeDescription = computed(() => {
   border-radius: 18px;
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
   min-height: 0;
+  /* 放大态需要覆盖默认的 360px 上限 */
+  max-height: none;
   flex: none;
 }
 .modern-log-wrapper.is-maximized .modern-log-header {
@@ -2841,6 +3260,124 @@ const modeDescription = computed(() => {
   gap: 10px;
 }
 
+/* ---------------- 刷新热度下拉菜单（合并原本 3 个按钮） ---------------- */
+.refresh-dropdown {
+  position: relative;
+  display: inline-block;
+}
+.refresh-btn.menu-open {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+}
+
+/* ---------------- 翻译下拉菜单（合并「翻译角色」与「导入翻译字典」） ---------------- */
+.translate-dropdown {
+  position: relative;
+  display: inline-block;
+}
+.translate-trigger.menu-open {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+}
+.translate-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 200;
+  min-width: 220px;
+  padding: 4px;
+  background: rgba(255, 250, 243, 0.98);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: refresh-menu-in 0.12s ease-out;
+}
+.translate-menu-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  font-size: 12px;
+  text-align: left;
+  background: transparent;
+  color: var(--ink);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+  font-weight: 600;
+}
+.translate-menu-item:hover:not(:disabled) {
+  background: rgba(243, 223, 212, 0.6);
+  color: var(--accent-deep);
+}
+.translate-menu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.translate-menu-meta {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.translate-menu-item:hover:not(:disabled) .translate-menu-meta {
+  color: var(--accent-deep);
+}
+.refresh-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 200;
+  min-width: 200px;
+  padding: 4px;
+  background: rgba(255, 250, 243, 0.98);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: refresh-menu-in 0.12s ease-out;
+}
+@keyframes refresh-menu-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.refresh-menu-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  font-size: 12px;
+  text-align: left;
+  background: transparent;
+  color: var(--ink);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: inherit;
+  font-weight: 600;
+}
+.refresh-menu-item:hover {
+  background: rgba(243, 223, 212, 0.6);
+  color: var(--accent-deep);
+}
+.refresh-menu-meta {
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 500;
+}
+.refresh-menu-item:hover .refresh-menu-meta {
+  color: var(--accent-deep);
+}
+
 /* ---------------- 刷新范围 Modal ---------------- */
 .range-refresh-modal {
   width: 400px;
@@ -2861,16 +3398,88 @@ const modeDescription = computed(() => {
 }
 
 /* ---------------- 收藏卡片 / chip 异色高亮 ---------------- */
+.search-input-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.search-input-with-clear { padding-right: 28px; }
+.search-clear-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(74, 53, 25, 0.35);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.search-clear-btn:hover { background: rgba(157, 44, 44, 0.7); }
+
+/* 单张图片收藏 ♥ 按钮，固定在缩略图右上角 */
+.image-card { position: relative; }
+.img-fav-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, transform 0.15s, color 0.2s;
+  backdrop-filter: blur(4px);
+}
+.img-fav-toggle:hover { background: rgba(0, 0, 0, 0.65); transform: scale(1.08); }
+.img-fav-toggle.active {
+  background: linear-gradient(135deg, #ff5b8a, #d12869);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(209, 40, 105, 0.5);
+}
+
+/* 大图浏览器底部的「收藏」切换按钮 */
+.viewer-fav-btn {
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+.viewer-fav-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.22); }
+.viewer-fav-btn.active {
+  background: linear-gradient(135deg, #ff5b8a, #d12869);
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(209, 40, 105, 0.5);
+}
+
+
 .image-card.is-favorited {
   background: linear-gradient(135deg, rgba(255, 222, 173, 0.35), rgba(255, 188, 86, 0.18));
-  border: 1px solid rgba(212, 143, 47, 0.55);
-  box-shadow: 0 4px 18px rgba(212, 143, 47, 0.22);
+  border: 3px solid #d48f2f;
+  box-shadow: 0 0 0 1px rgba(212, 143, 47, 0.25), 0 6px 22px rgba(212, 143, 47, 0.4);
   position: relative;
 }
 .image-card.is-favorited::before {
   content: '★ 收藏';
   position: absolute;
-  top: 6px;
+  top: 32px;
   left: 6px;
   z-index: 2;
   padding: 2px 8px;
@@ -2882,6 +3491,16 @@ const modeDescription = computed(() => {
   box-shadow: 0 2px 6px rgba(180, 110, 22, 0.45);
   letter-spacing: 0.5px;
   pointer-events: none;
+}
+/* 图片直接收藏比作者/角色命中优先级更高：粉红色厚边框 + 阴影更强 */
+.image-card.is-img-favorited {
+  background: linear-gradient(135deg, rgba(255, 192, 213, 0.4), rgba(209, 40, 105, 0.18));
+  border: 3px solid #d12869;
+  box-shadow: 0 0 0 1px rgba(209, 40, 105, 0.3), 0 6px 22px rgba(209, 40, 105, 0.45);
+}
+.image-card.is-img-favorited::before {
+  content: '';
+  display: none;
 }
 .token-chip.is-favorited-chip {
   background: linear-gradient(135deg, rgba(255, 188, 86, 0.45), rgba(212, 143, 47, 0.3));

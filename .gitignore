@@ -7,3 +7,4 @@ desktop-app/dist/assets
 .env
 artist_favorites.json
 character_favorites.json
+image_favorites.json

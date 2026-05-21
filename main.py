@@ -8,6 +8,7 @@ import json
 import threading
 import concurrent.futures
 from fastapi import FastAPI, BackgroundTasks
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 # Windows asyncio ProactorEventLoop 在客户端中途断开时会抛
 # ConnectionResetError(WinError 10054)，是已知无害噪音 (bpo-39010)。
@@ -51,6 +52,8 @@ ARTIST_FAVORITES_JSON = BASE_DIR / "artist_favorites.json"
 # 角色收藏存盘文件，结构 {group_name: [character_display_token, ...]}；
 # 角色 token 形如 "初音未来 [vocaloid]"，分组通常按 source_hint 命名
 CHARACTER_FAVORITES_JSON = BASE_DIR / "character_favorites.json"
+# 图片收藏存盘文件，结构 {"date/filename": {date, filename, artist, ...}}
+IMAGE_FAVORITES_JSON = BASE_DIR / "image_favorites.json"
 
 # ==========================================
 # 1. 爬虫全局配置与初始化
@@ -209,6 +212,85 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/mosaic", mosaic_editor_app)
 
 
+# ==========================================
+# 缩略图接口（解决收藏/抓图页加载原图导致的卡顿）
+# 原图常是数 MB ~ 几十 MB，但卡片只显示 ~200px，缩到磁盘缓存后体积可降到 30KB 量级。
+# ==========================================
+_THUMB_CACHE_DIR = BASE_DIR / "hot_pic" / ".thumb_cache"
+_THUMB_VALID_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
+_THUMB_ALLOWED_SIZES = (200, 400, 800)
+_THUMB_LOCK = threading.Lock()
+
+
+def _generate_thumbnail(src_path: Path, dst_path: Path, max_dim: int) -> bool:
+    """生成 JPEG 缩略图到 dst_path。返回是否成功。Pillow 是 thread-safe 的，
+    但同一文件并发生成会浪费 CPU——外层 _THUMB_LOCK 串行保护。"""
+    try:
+        from PIL import Image
+        with Image.open(src_path) as im:
+            # 对 GIF / 动图取首帧；对带透明的 PNG/WebP 合成到白底，避免 JPEG 全黑
+            if getattr(im, "is_animated", False):
+                im.seek(0)
+            im = im.convert("RGB") if im.mode != "RGB" else im.copy()
+            im.thumbnail((max_dim, max_dim), Image.LANCZOS)
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            im.save(dst_path, "JPEG", quality=80, optimize=True, progressive=True)
+        return True
+    except Exception as e:
+        print(f"[thumb] 生成失败 {src_path}: {e}")
+        return False
+
+
+@app.get("/thumb/{date_str}/{filename}")
+def api_thumbnail(date_str: str, filename: str, w: int = 400):
+    """返回磁盘缓存的 JPEG 缩略图。非图片格式返回 404 让前端 fallback 到占位符。"""
+    if w not in _THUMB_ALLOWED_SIZES:
+        w = 400  # 限定档位，避免无限大小占满磁盘
+
+    src_path = (BASE_DIR / "hot_pic" / date_str / filename).resolve()
+    # 路径穿越防护：解析后必须仍在 hot_pic 下
+    hot_pic_root = (BASE_DIR / "hot_pic").resolve()
+    try:
+        src_path.relative_to(hot_pic_root)
+    except ValueError:
+        return PlainTextResponse("invalid path", status_code=400)
+
+    if not src_path.exists() or not src_path.is_file():
+        return PlainTextResponse("not found", status_code=404)
+
+    ext = src_path.suffix.lower()
+    if ext not in _THUMB_VALID_EXTS:
+        return PlainTextResponse("not an image", status_code=404)
+
+    cache_path = _THUMB_CACHE_DIR / str(w) / date_str / (filename + ".jpg")
+
+    # 命中缓存且不比源文件旧 -> 直接返回
+    if cache_path.exists():
+        try:
+            if cache_path.stat().st_mtime >= src_path.stat().st_mtime:
+                return FileResponse(
+                    cache_path,
+                    media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=86400"},
+                )
+        except OSError:
+            pass
+
+    # 同一缩略图避免并发生成多份；锁粒度全局，但生成本身是 CPU 密集型，全局串行 OK
+    with _THUMB_LOCK:
+        # 双重检查：拿到锁后可能别人刚生成完
+        if not (cache_path.exists()
+                and cache_path.stat().st_mtime >= src_path.stat().st_mtime):
+            if not _generate_thumbnail(src_path, cache_path, w):
+                return PlainTextResponse("thumb error", status_code=500)
+
+    return FileResponse(
+        cache_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 class ScraperState:
     def __init__(self):
         self.is_running = False
@@ -282,6 +364,27 @@ class ArtistFavoritesRequest(BaseModel):
 class CharacterFavoritesRequest(BaseModel):
     # {group_name: [character_display_token, ...]}，分组名通常 = source_hint
     groups: dict[str, list[str]]
+
+
+class ImageFavoriteItem(BaseModel):
+    # 收藏单张图片时前端传过来的元数据快照，方便收藏页直接渲染缩略
+    date: str
+    filename: str
+    artist: str = ""
+    characters: list[str] = []
+    score: int = 0
+    fav_count: int = 0
+    local_path: str = ""
+    post_url: str = ""
+    web_url: str = ""
+
+
+class ImageFavoriteToggleRequest(BaseModel):
+    item: ImageFavoriteItem
+
+
+class ImageFavoriteRemoveRequest(BaseModel):
+    key: str
 
 # ==========================================
 # 3. 核心爬虫逻辑 (融入了打断检测)
@@ -1490,6 +1593,79 @@ def api_character_favorites_set(req: CharacterFavoritesRequest):
         return {"ok": True, "groups": cleaned}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
+
+
+# ---------------- 图片收藏 ----------------
+
+def _image_fav_key(date: str, filename: str) -> str:
+    return f"{(date or '').strip()}/{(filename or '').strip()}"
+
+
+def _load_image_favorites() -> dict:
+    if not IMAGE_FAVORITES_JSON.exists():
+        return {}
+    try:
+        import json as _json
+        with open(IMAGE_FAVORITES_JSON, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        print(f"Failed to load image favorites: {e}")
+        return {}
+
+
+def _save_image_favorites(data: dict) -> None:
+    import json as _json
+    with open(IMAGE_FAVORITES_JSON, "w", encoding="utf-8") as f:
+        _json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+@app.get("/api/image_favorites")
+def api_image_favorites_get():
+    """返回 {ok, items: [...], keys: [...]}。items 按 added_at 倒序，keys 给前端快速做 Set 查询。"""
+    data = _load_image_favorites()
+    items = []
+    for key, v in data.items():
+        if not isinstance(v, dict):
+            continue
+        items.append({"key": key, **v})
+    items.sort(key=lambda x: x.get("added_at", 0), reverse=True)
+    return {"ok": True, "items": items, "keys": list(data.keys()), "count": len(items)}
+
+
+@app.post("/api/image_favorites/toggle")
+def api_image_favorites_toggle(req: ImageFavoriteToggleRequest):
+    """切换单张图片的收藏状态，幂等。"""
+    item = req.item
+    if not item.date or not item.filename:
+        return {"ok": False, "msg": "date / filename 不能为空"}
+    data = _load_image_favorites()
+    key = _image_fav_key(item.date, item.filename)
+    if key in data:
+        del data[key]
+        favorited = False
+    else:
+        import time as _time
+        try:
+            payload = item.model_dump()  # pydantic v2
+        except AttributeError:
+            payload = item.dict()
+        payload["added_at"] = int(_time.time())
+        data[key] = payload
+        favorited = True
+    _save_image_favorites(data)
+    return {"ok": True, "favorited": favorited, "key": key, "count": len(data)}
+
+
+@app.post("/api/image_favorites/remove")
+def api_image_favorites_remove(req: ImageFavoriteRemoveRequest):
+    """按 key 显式移除（收藏页用，避免依赖整条 item）。"""
+    data = _load_image_favorites()
+    if req.key in data:
+        del data[req.key]
+        _save_image_favorites(data)
+        return {"ok": True, "removed": True, "count": len(data)}
+    return {"ok": True, "removed": False, "count": len(data)}
 
 @app.post("/api/convert_local_zip")
 def api_convert_local_zip(req: ConvertLocalZipRequest):

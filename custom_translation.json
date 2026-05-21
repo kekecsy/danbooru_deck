@@ -9966,10 +9966,10 @@
     "translated_description_zh": "这是《赛马娘》中角色东海帝王（Top of Joyful）的赛车装束，采用进行乐队主题，包括蓝色点缀的白色长袖双排扣衬衫、粉色领带、右肩单肩章、红色短披风、蓝色镶边的白色褶裙、不对称手套（左黑右白）以及白色过膝靴"
   },
   "male_doctor_(arknights)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "男博士",
     "source_hint": "arknights",
-    "translated_description_zh": "男性版的方舟医生角色"
+    "translated_description_zh": "《明日方舟》中玩家扮演角色“博士（Doctor）”的男性形象。"
   },
   "bb_(fate/extra)": {
     "has_chinese": false,
@@ -21138,10 +21138,10 @@
     "translated_description_zh": "魔王是《魔王与勇者》中的女主角，为魔界第43位统治者，按魔界标准是最年轻的统治者。她是强大的魔法师，但缺乏战斗经验，知识渊博，源自‘外部图书馆’——一个保存过去与未来知识的隐藏维度，她的氏族居住于此。尽管她博学多才，却被好战的魔族视为无能。她预见若战争不以解决其引发的问题而结束，将会怎样，于是等待[[yuusha_(maoyuu)|勇者]]的到来，请求其协助以正确方式结束战争。在终于得到勇者作为盟友后，她与勇者前往人类世界，假扮为‘红色学者’——一位来自贵族、旨在帮助下层阶级的人类学者"
   },
   "arezu_(pokemon)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "pokemon legends: arceus",
-    "translated_description_zh": "Arezu（日文名ヒナツ）是《宝可梦 传说 阿尔宙斯》中登场的角色，她的名字均源自火星，类似于《宝可梦 钻石/珍珠》中的火星角色"
+    "has_chinese": true,
+    "chinese_name": "火夏",
+    "source_hint": "pokemon",
+    "translated_description_zh": "火夏（日文名：ヒナツ）是在《宝可梦传说：阿尔宙斯》中登场的角色。她的英文名和日文名都直接对应火星，且其外貌与《宝可梦 钻石/珍珠》中的银河队干部伙星非常相似。"
   },
   "katagiri_sanae": {
     "has_chinese": true,
@@ -40524,10 +40524,10 @@
     "translated_description_zh": "宝可梦第0395号，水/钢属性的 starter，外形像大型企鹅，蓝色眼睛，宽嘴具三角尖角形成三叉戟状冠冕，从 Prinplup 进化而来（Piplup → Prinplup → Empoleon）"
   },
   "north_carolina_(azur_lane)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "azur lane",
-    "translated_description_zh": "北卡罗来纳是《碧蓝航线》中战列舰USS North Carolina (BB-55)的人设角色，由Kishiyo设计，堀江由衣配音。她被刻画为典型的美国形象：金发、蓝眼睛、高挑、丰满。身着白色海军风格连衣裙，配有奖章条、黑色颈圈、黑色丝袜，并在右肩佩戴本州旗作为臂章"
+    "has_chinese": true,
+    "chinese_name": "北卡罗来纳",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中美国海军北卡罗来纳号战列舰（BB-55）的拟人化角色。角色设计由Kishiyo负责，由堀江由衣配音。她拥有一头金发、蓝色眼睛、高挑的身材以及丰满的胸部。她身穿海军制服风格的白色连衣裙，配有略章，戴着黑色项圈和黑色连裤袜，右肩上佩戴着北卡罗来纳州州旗作为臂章。其皮肤包含默认立绘以及在《微速前行》漫画中首次公开的兔女郎换装“秘密的贺礼”。"
   },
   "lee_(pgr)": {
     "has_chinese": false,
@@ -77236,5 +77236,47 @@
     "chinese_name": "弗朗索瓦·普雷拉蒂",
     "source_hint": "fate",
     "translated_description_zh": "《Fate/strange Fake》中的角色，被弗兰切斯卡·普雷拉蒂召唤的“真”Caster职阶从者。真名为弗朗索瓦·普雷拉蒂，是与圣女贞德同时代的意大利神职人员，曾涉足吉尔·德·雷后来亦有修习的魔术。他掌握了死后转世到新身体的方法，从而以弗兰切斯卡的身姿活到了现代，并能将过去的自己作为从者召唤。他在《Fate/Grand Order》的“冰灭十字战线 安条克”活动中与弗兰切斯卡·普雷拉蒂一同作为Caster职阶从者实装。角色设计为森井静香，声优为内田真礼。"
+  },
+  "north_carolina_(unique_sunshine)_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "北卡罗来纳",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中美国海军北卡罗来纳号战列舰（BB-55）的拟人化角色。角色设计由Kishiyo（轻轨）负责，由堀江由衣配音。北卡罗来纳在外貌上具有典型的白人女性特征，拥有一头金发、蓝色眼睛、高挑的身材以及丰满的胸部。她身穿一件带有略章（勋表）的海军制服风格的白色连衣裙，戴着黑色项圈和黑色连裤袜，右肩上佩戴着以其名字命名的州旗作为臂章。其换装包括在《微速前行》漫画中首次公开的兔女郎皮肤“秘密的贺礼”。"
+  },
+  "rulership_(racing)_(umamusume)": {
+    "has_chinese": true,
+    "chinese_name": "统治地位",
+    "source_hint": "umamusume",
+    "translated_description_zh": "《赛马娘 Pretty Derby》中赛马娘“统治地位（Rulership）”的比赛决胜服造型。由于该角色目前在游戏中为不可培育的NPC状态，因此该服装尚未有正式的卡片名称。其决胜服由白色无袖翻领衬衫外搭黑色内衬、黄色无袖短款夹克、白色手套、黑色高腰短裤以及黑色过膝长筒靴组成，头上还戴有两个三角形的发饰。"
+  },
+  "rulership_(umamusume)": {
+    "has_chinese": true,
+    "chinese_name": "统治地位",
+    "source_hint": "umamusume",
+    "translated_description_zh": "《赛马娘 Pretty Derby》中的角色，由海乃水玉配音。她是一个大胆的玩家，对自己的桌游技巧充满了毫不掩饰的自信，但由于缺乏强大的心理韧性，一旦局势出现反噬，她就容易陷入自我崩溃。她留着一头带有白色挑染的棕色短发，拥有一双蓝色眼睛。现实原型为日本著名赛马“统治地位”（Rulership），其母亲为气槽，父亲为夏威夷王。"
+  },
+  "prika_(nikke)": {
+    "has_chinese": true,
+    "chinese_name": "普莉卡",
+    "source_hint": "goddess_of_victory_nikke",
+    "translated_description_zh": "《胜利女神：妮姬》中的可玩角色。她曾与阿尼斯、薄荷一同属于偶像团体“T.T. Star”。与其他成员不同，普莉卡原本计划以人类身份出道，却不幸死于车祸，随后被泰特拉改造为妮姬。团体因不和解散后，她通过贩卖饰品维持生计。她留着发根为棕色的金色短发，长有蓝色眼睛，腹部有一颗痣和一张创可贴。她身穿露肩的白色超短款连帽衫、黑色短上衣和蓝色长裤。她的名字来源于香料“红椒粉（Paprika）”。由岛袋美由利（日配）和Elizabeth Maxwell（英配）负责配音。"
+  },
+  "alva_(girls'_frontline_2)": {
+    "has_chinese": true,
+    "chinese_name": "埃芙",
+    "source_hint": "girls_frontline",
+    "translated_description_zh": "在《少女前线2：追放》中烙印了AN-94突击步枪的战术人形，是前作《少女前线》中AN-94的回归角色。外观包含默认和管弦乐礼服造型，皮肤包括来自前作的“安洁”以及《少女前线2》中的“紫藤絮语”。"
+  },
+  "bangboo_6_(zenless_zone_zero)": {
+    "has_chinese": true,
+    "chinese_name": "06号",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "由哲和铃拥有的一只邦布。它在外观上与“一号”（Eous）完全相同，唯一的区别是其头巾上的编号是06而不是01。只有当“06”清晰可见时才使用此标签。它在录像店里负责处理各种杂务，但主要工作是防止未经授权的人员进入HDD房间。"
+  },
+  "blonde_student_council_president_(blue_archive)": {
+    "has_chinese": true,
+    "chinese_name": "伪联邦学生会长(暂定)",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "这是《蔚蓝档案》第7个PV中出现的金发角色的临时标签，她似乎接替了联邦学生会长的位置。该角色最初在《蔚蓝档案》的“4.5周年PV”中首次亮相。"
   }
 }

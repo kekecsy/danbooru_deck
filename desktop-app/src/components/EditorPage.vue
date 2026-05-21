@@ -13,6 +13,12 @@ const presets = ref([]);
 const isDragOver = ref(false);
 const copyStatus = ref('');
 
+const STORAGE_KEY_EDITOR_HABITS = 'editorHabits';
+const editorHabits = (() => {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY_EDITOR_HABITS) || '{}'); }
+  catch { return {}; }
+})();
+
 const editor = reactive({
   image: null,
   imageSrc: '',
@@ -36,12 +42,21 @@ const editor = reactive({
   imageOverlayName: '',
   revealColor: '#000000',
   revealOpacity: 0.8,
-  outputMaxEdge: 1600,
+  // 用户习惯：复制尺寸上限。0 表示原图无上限。watch 里会落盘。
+  outputMaxEdge: Number.isFinite(editorHabits.outputMaxEdge) ? editorHabits.outputMaxEdge : 1600,
   sourceMeta: {
     artist: '',
     characters: '',
     postUrl: ''
   }
+});
+
+watch(() => editor.outputMaxEdge, (v) => {
+  // 0 / 负数都按"原图"处理；写盘的值统一规范化一下，避免下次进来加载到 NaN
+  const normalized = Number.isFinite(v) && v > 0 ? Math.round(v) : 0;
+  editorHabits.outputMaxEdge = normalized;
+  try { localStorage.setItem(STORAGE_KEY_EDITOR_HABITS, JSON.stringify(editorHabits)); }
+  catch { /* localStorage 异常时静默 */ }
 });
 
 function selectedLayer() {
@@ -521,7 +536,7 @@ async function usePreset(item) {
   render();
 }
 
-async function exportPng() {
+async function exportPng({ maxEdgeOverride } = {}) {
   const scale = 1;
   const canvas = document.createElement('canvas');
   canvas.width = editor.image.width;
@@ -543,7 +558,10 @@ async function exportPng() {
     }
   }
   drawRevealMask(ctx, editor.layers, scale, editor.revealColor, editor.revealOpacity);
-  const maxEdge = Number(editor.outputMaxEdge) || 0;
+  // maxEdgeOverride 优先：原图复制时传 0 即可跳过缩放
+  const maxEdge = maxEdgeOverride !== undefined
+    ? (Number(maxEdgeOverride) || 0)
+    : (Number(editor.outputMaxEdge) || 0);
   if (maxEdge > 0) {
     const currentMax = Math.max(canvas.width, canvas.height);
     if (currentMax > maxEdge) {
@@ -558,21 +576,22 @@ async function exportPng() {
   return canvas;
 }
 
-async function copyToClipboard() {
+async function copyToClipboard({ original = false } = {}) {
   if (!editor.image) return;
   copyStatus.value = '';
-  const canvas = await exportPng();
+  const canvas = await exportPng(original ? { maxEdgeOverride: 0 } : {});
   const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
   if (!blob) {
     copyStatus.value = '复制失败';
     return;
   }
+  const sizeLabel = `${canvas.width}×${canvas.height}`;
   try {
     if (navigator.clipboard && window.ClipboardItem) {
       if (!document.hasFocus()) window.focus();
       if (!document.hasFocus()) throw new Error('窗口未聚焦');
       await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
-      copyStatus.value = '已复制到剪贴板';
+      copyStatus.value = `已复制到剪贴板（${sizeLabel}${original ? ' · 原图' : ''}）`;
       return;
     }
   } catch {
@@ -581,8 +600,12 @@ async function copyToClipboard() {
 
   const bytes = new Uint8Array(await blob.arrayBuffer());
   const result = await window.desktopAPI.file.copyPng(bytes);
-  copyStatus.value = result?.ok ? '已复制到剪贴板' : `复制失败${result?.error ? `: ${result.error}` : ''}`;
+  copyStatus.value = result?.ok
+    ? `已复制到剪贴板（${sizeLabel}${original ? ' · 原图' : ''}）`
+    : `复制失败${result?.error ? `: ${result.error}` : ''}`;
 }
+
+function copyOriginalToClipboard() { return copyToClipboard({ original: true }); }
 
 async function openSourceLink(event) {
   event.preventDefault();
@@ -901,11 +924,19 @@ onBeforeUnmount(() => {
       </div>
 
       <label class="field-full">
-        <span>复制尺寸上限（像素）</span>
+        <span>复制尺寸上限（像素，0 = 不限 / 原图大小，自动记忆）</span>
         <input v-model.number="editor.outputMaxEdge" type="number" min="0" step="100" />
       </label>
 
-      <button @click="copyToClipboard" :disabled="!editor.image">复制到剪贴板</button>
+      <div class="button-row compact">
+        <button @click="copyToClipboard()" :disabled="!editor.image" style="flex: 1;">复制到剪贴板</button>
+        <button
+          class="secondary"
+          @click="copyOriginalToClipboard"
+          :disabled="!editor.image"
+          title="忽略尺寸上限，按原图分辨率复制"
+        >复制原图</button>
+      </div>
       <p v-if="copyStatus" class="inline-note">{{ copyStatus }}</p>
     </aside>
 

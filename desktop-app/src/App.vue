@@ -33,7 +33,7 @@ function openEditorWithImage(item) {
     <main class="content">
       <CrawlerPage v-show="activePage === 'crawler'" @edit-image="openEditorWithImage" />
       <EditorPage v-if="activePage === 'editor'" :source-item="editorSource" @back="activePage = 'crawler'" />
-      <FavoritesPage v-if="activePage === 'favorites'" />
+      <FavoritesPage v-if="activePage === 'favorites'" @edit-image="openEditorWithImage" />
     </main>
   </div>
 </template>

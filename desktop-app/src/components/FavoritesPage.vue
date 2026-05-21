@@ -1,5 +1,7 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
+
+const emit = defineEmits(['edit-image']);
 
 const API_BASE = 'http://127.0.0.1:8000';
 const ALL_KEY = '__all__';
@@ -113,11 +115,284 @@ async function persist() {
 }
 
 // 切换 tab 时清空本地状态并重新加载
-watch(activeTab, () => {
+watch(activeTab, (next) => {
   groups.value = {};
   selectedGroup.value = ALL_KEY;
   search.value = '';
-  loadFavorites();
+  currentPage.value = 1;
+  if (next === 'image') {
+    loadImageFavorites();
+  } else {
+    loadFavorites();
+  }
+});
+
+// ---------------- 图片收藏（独立列表，不复用 groups 结构） ----------------
+const images = ref([]);          // [{key, date, filename, artist, characters, score, fav_count, local_path, ...}]
+const imageThumbCache = ref({});  // key -> dataUrl，避免重渲染重复 hydrate
+const imagesSearch = ref('');
+
+async function loadImageFavorites() {
+  loading.value = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/image_favorites`);
+    const data = await res.json();
+    if (data.ok) {
+      images.value = data.items || [];
+      // 只孵化当前页缩略图，翻页时按需补；上百张时省一大批 IPC
+      hydrateImageThumbs(pagedImages.value);
+    }
+  } catch (err) {
+    showToast('加载图片收藏失败: ' + err.message, 'error');
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function hydrateImageThumbs(targets) {
+  const list = targets && targets.length ? targets : images.value;
+  // 直接走后端 /thumb 接口拿磁盘缓存的 JPEG 缩略图（~30KB 量级），
+  // 避免每张图都加载几 MB 原图后再由浏览器缩放，CPU/内存压力降一个数量级。
+  // 仅在图像格式才走 /thumb；视频/未知格式仍用占位符。
+  await Promise.all(list.map(async (it) => {
+    if (imageThumbCache.value[it.key]) return;
+    const ext = (it.filename || '').split('.').pop().toLowerCase();
+    const isImage = ['jpg', 'jpeg', 'png', 'webp', 'gif', 'bmp', 'avif'].includes(ext);
+
+    if (isImage && it.date && it.filename) {
+      imageThumbCache.value[it.key] = `${API_BASE}/thumb/${encodeURIComponent(it.date)}/${encodeURIComponent(it.filename)}?w=400`;
+      return;
+    }
+
+    // zip 的话尝试同目录的 .gif（抓图页转换后产物），失败由 onerror 兜底
+    if (ext === 'zip' && it.local_path && window.desktopAPI?.file?.exists) {
+      try {
+        const gifPath = it.local_path.replace(/\.zip$/i, '.gif');
+        if (await window.desktopAPI.file.exists(gifPath)) {
+          imageThumbCache.value[it.key] = await window.desktopAPI.file.toLocalUrl(gifPath);
+          return;
+        }
+      } catch (_) { /* fall through */ }
+    }
+
+    // 视频 / 其他：交给前端占位符（保持现状）
+    imageThumbCache.value[it.key] = it.web_url ? `${API_BASE}${it.web_url}` : '';
+  }));
+}
+
+const filteredImages = computed(() => {
+  const kw = imagesSearch.value.trim().toLowerCase();
+  if (!kw) return images.value;
+  return images.value.filter(it => {
+    if ((it.artist || '').toLowerCase().includes(kw)) return true;
+    if ((it.filename || '').toLowerCase().includes(kw)) return true;
+    if ((it.date || '').toLowerCase().includes(kw)) return true;
+    if (Array.isArray(it.characters) && it.characters.some(c => String(c).toLowerCase().includes(kw))) return true;
+    return false;
+  });
+});
+
+async function removeImageFavorite(item) {
+  if (!confirm(`移除收藏：${item.filename}？`)) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/image_favorites/remove`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: item.key }),
+    });
+    const data = await res.json();
+    if (!data.ok) { showToast('移除失败', 'error'); return; }
+    images.value = images.value.filter(it => it.key !== item.key);
+    delete imageThumbCache.value[item.key];
+    showToast('已移除', 'success');
+  } catch (err) {
+    showToast('移除失败: ' + err.message, 'error');
+  }
+}
+
+async function openImageLocally(item) {
+  if (!item.local_path || !window.desktopAPI?.gallery?.openLocalFile) return;
+  await window.desktopAPI.gallery.openLocalFile(item.local_path);
+}
+
+async function openImageOriginal(item) {
+  if (!item.post_url || !window.desktopAPI?.external?.open) return;
+  await window.desktopAPI.external.open(item.post_url);
+}
+
+// ---------------- 分页 ----------------
+// 画师 / 角色：按用户选择的数量分页（写盘记忆）
+// 图片：默认每页 14 张（约对应 7 列 × 2 行），用户可改成 28 / 56 / 112，独立持久化
+const STORAGE_KEY_FAV_PAGE_SIZE = 'favoritesPageSize';
+const STORAGE_KEY_FAV_IMAGE_PAGE_SIZE = 'favoritesImagePageSize';
+const pageSizeChoice = ref(Number(localStorage.getItem(STORAGE_KEY_FAV_PAGE_SIZE)) || 30);
+const imagePageSizeChoice = ref(Number(localStorage.getItem(STORAGE_KEY_FAV_IMAGE_PAGE_SIZE)) || 14);
+
+const pageSize = computed(() => activeTab.value === 'image'
+  ? Math.max(1, imagePageSizeChoice.value)
+  : pageSizeChoice.value);
+
+const currentPage = ref(1);
+watch(pageSizeChoice, (v) => {
+  try { localStorage.setItem(STORAGE_KEY_FAV_PAGE_SIZE, String(v)); } catch { /* noop */ }
+  currentPage.value = 1;
+});
+watch(imagePageSizeChoice, (v) => {
+  try { localStorage.setItem(STORAGE_KEY_FAV_IMAGE_PAGE_SIZE, String(v)); } catch { /* noop */ }
+  currentPage.value = 1;
+});
+
+// 筛选/搜索/分组切换都从第 1 页开始，避免停在一个空页
+watch([search, selectedGroup, imagesSearch], () => {
+  currentPage.value = 1;
+});
+
+const currentFilteredCount = computed(() => activeTab.value === 'image'
+  ? filteredImages.value.length
+  : visibleArtists.value.length);
+
+const totalPages = computed(() => Math.max(1, Math.ceil(currentFilteredCount.value / pageSize.value)));
+
+const pagedArtists = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value;
+  return visibleArtists.value.slice(start, start + pageSize.value);
+});
+const pagedImages = computed(() => {
+  const start = (currentPage.value - 1) * pageSize.value;
+  return filteredImages.value.slice(start, start + pageSize.value);
+});
+
+const pageNumbers = computed(() => {
+  const total = totalPages.value;
+  const cur = currentPage.value;
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const out = [1];
+  if (cur > 3) out.push('…');
+  const start = Math.max(2, cur - 1);
+  const end = Math.min(total - 1, cur + 1);
+  for (let i = start; i <= end; i++) out.push(i);
+  if (cur < total - 2) out.push('…');
+  out.push(total);
+  return out;
+});
+
+function gotoPage(n) {
+  if (typeof n !== 'number') return;
+  currentPage.value = Math.max(1, Math.min(totalPages.value, n));
+}
+const jumpInput = ref(1);
+watch(currentPage, (n) => { jumpInput.value = n; });
+function doJump() {
+  const n = Math.max(1, Math.min(totalPages.value, jumpInput.value || 1));
+  currentPage.value = n;
+  jumpInput.value = n;
+}
+// 当列表收缩到当前页之外时往前回退一格（删除最后一张时常见）
+watch(totalPages, (t) => {
+  if (currentPage.value > t) currentPage.value = t;
+});
+
+// 翻页 / 筛选变化时按需 hydrate 这一页的缩略图（图片 tab 才有意义）
+watch(pagedImages, (items) => {
+  if (activeTab.value === 'image' && items.length) hydrateImageThumbs(items);
+});
+
+// ---------------- 图片浏览器（与抓图页同款体验） ----------------
+const VIDEO_EXTS = ['mp4', 'webm', 'avi', 'mov', 'mkv'];
+const viewer = ref({ open: false, index: 0, imageUrl: '', zoom: 1 });
+const viewerItem = computed(() => filteredImages.value[viewer.value.index] || null);
+const viewerIsVideo = computed(() => {
+  const ext = (viewerItem.value?.filename || '').split('.').pop().toLowerCase();
+  return VIDEO_EXTS.includes(ext);
+});
+
+async function syncViewerImage() {
+  viewer.value.imageUrl = '';
+  viewer.value.zoom = 1;
+  const it = viewerItem.value;
+  if (!it) return;
+  const ext = (it.filename || '').split('.').pop().toLowerCase();
+  if (VIDEO_EXTS.includes(ext) && it.date && it.filename) {
+    viewer.value.imageUrl = `${API_BASE}/images/${it.date}/${encodeURIComponent(it.filename)}`;
+    return;
+  }
+  if (it.local_path && window.desktopAPI?.file?.toLocalUrl) {
+    try {
+      if (ext === 'zip') {
+        const gifPath = it.local_path.replace(/\.zip$/i, '.gif');
+        if (await window.desktopAPI.file.exists(gifPath)) {
+          viewer.value.imageUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+          return;
+        }
+      }
+      viewer.value.imageUrl = await window.desktopAPI.file.toLocalUrl(it.local_path);
+      return;
+    } catch (_) { /* fall through */ }
+  }
+  if (it.web_url) viewer.value.imageUrl = `${API_BASE}${it.web_url}`;
+}
+
+async function openViewer(item) {
+  const idx = filteredImages.value.findIndex(it => it.key === item.key);
+  if (idx < 0) return;
+  viewer.value.open = true;
+  viewer.value.index = idx;
+  viewer.value.zoom = 1;
+  await syncViewerImage();
+}
+
+function closeViewer() {
+  viewer.value.open = false;
+  viewer.value.imageUrl = '';
+  viewer.value.zoom = 1;
+}
+
+async function stepViewer(offset) {
+  if (!filteredImages.value.length) return;
+  const next = Math.min(Math.max(0, viewer.value.index + offset), filteredImages.value.length - 1);
+  if (next === viewer.value.index) return;
+  viewer.value.index = next;
+  await syncViewerImage();
+}
+
+function onViewerWheel(event) {
+  if (!event.ctrlKey) return;
+  event.preventDefault();
+  const factor = event.deltaY < 0 ? 1.1 : 0.9;
+  viewer.value.zoom = Math.min(8, Math.max(0.2, viewer.value.zoom * factor));
+}
+
+function onViewerKeyDown(event) {
+  if (!viewer.value.open) return;
+  if (event.key === 'Escape') { closeViewer(); return; }
+  const tag = event.target?.tagName?.toLowerCase();
+  if (['input', 'textarea', 'select', 'video'].includes(tag)) return;
+  if (event.key === 'ArrowLeft') stepViewer(-1);
+  else if (event.key === 'ArrowRight') stepViewer(1);
+}
+
+function editFromViewer() {
+  if (!viewerItem.value) return;
+  // 把 favorites 的 snake_case 字段转成 EditorPage 期望的形状
+  const it = viewerItem.value;
+  emit('edit-image', {
+    localPath: it.local_path,
+    postUrl: it.post_url,
+    filename: it.filename,
+    artist: it.artist,
+    characters: it.characters,
+    web_url: it.web_url,
+    score: it.score,
+    favCount: it.fav_count,
+  });
+  closeViewer();
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onViewerKeyDown);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onViewerKeyDown);
 });
 
 // ----- 分组 CRUD -----
@@ -277,22 +552,17 @@ onMounted(loadFavorites);
 </script>
 
 <template>
-  <div class="favorites-layout">
-    <!-- 左侧分组列表 -->
-    <section class="panel card favorites-side">
-      <div class="fav-tab-bar">
-        <button
-          class="fav-tab"
-          :class="{ active: activeTab === 'artist' }"
-          @click="activeTab = 'artist'"
-        >画师收藏</button>
-        <button
-          class="fav-tab"
-          :class="{ active: activeTab === 'character' }"
-          @click="activeTab = 'character'"
-        >角色收藏</button>
-      </div>
+  <div class="favorites-layout" :class="{ 'is-image-tab': activeTab === 'image' }">
+    <!-- 顶部 tab 切换 -->
+    <div class="fav-top-tabs">
+      <button class="fav-tab" :class="{ active: activeTab === 'artist' }" @click="activeTab = 'artist'">画师收藏</button>
+      <button class="fav-tab" :class="{ active: activeTab === 'character' }" @click="activeTab = 'character'">角色收藏</button>
+      <button class="fav-tab" :class="{ active: activeTab === 'image' }" @click="activeTab = 'image'">图片收藏</button>
+    </div>
 
+    <template v-if="activeTab !== 'image'">
+      <!-- 左侧分组列表 -->
+      <section class="panel card favorites-side">
       <div class="panel-head compact-head">
         <div>
           <h2>分组</h2>
@@ -338,7 +608,7 @@ onMounted(loadFavorites);
         <div>
           <h2>{{ selectedGroup === ALL_KEY ? `全部${currentMeta.entityLabel}` : selectedGroup }}</h2>
           <p class="inline-note">
-            {{ visibleArtists.length }} 个{{ currentMeta.entityLabel }}<span v-if="search"> · 已搜索</span> · 点击名称复制到剪贴板
+            {{ visibleArtists.length }} 个{{ currentMeta.entityLabel }}<span v-if="search"> · 已搜索</span><span v-if="totalPages > 1"> · 第 {{ currentPage }} / {{ totalPages }} 页</span> · 点击名称复制到剪贴板
           </p>
         </div>
         <div style="display: flex; gap: 8px;">
@@ -360,7 +630,7 @@ onMounted(loadFavorites);
 
       <div v-else class="favorites-grid">
         <article
-          v-for="item in visibleArtists"
+          v-for="item in pagedArtists"
           :key="item.artist"
           class="artist-card"
         >
@@ -383,6 +653,138 @@ onMounted(loadFavorites);
             <button class="ghost" @click.stop="removeArtistFromAll(item.artist)" style="padding: 4px 10px; font-size: 11px; color: #9d2c2c;">全部移除</button>
           </div>
         </article>
+      </div>
+
+      <div v-if="visibleArtists.length" class="pagination-bar fav-pagination">
+        <select v-model.number="pageSizeChoice" class="search-input" style="width: auto;" title="每页数量">
+          <option :value="15">15 / 页</option>
+          <option :value="30">30 / 页</option>
+          <option :value="60">60 / 页</option>
+          <option :value="120">120 / 页</option>
+        </select>
+        <button class="ghost pg-btn" @click="gotoPage(1)" :disabled="currentPage <= 1" title="首页">«</button>
+        <button class="ghost pg-btn" @click="gotoPage(currentPage - 1)" :disabled="currentPage <= 1" title="上一页">‹</button>
+        <button
+          v-for="(n, i) in pageNumbers"
+          :key="`pg-${i}-${n}`"
+          class="pg-num"
+          :class="{ active: n === currentPage, ellipsis: n === '…' }"
+          :disabled="n === '…'"
+          @click="gotoPage(n)"
+        >{{ n }}</button>
+        <button class="ghost pg-btn" @click="gotoPage(currentPage + 1)" :disabled="currentPage >= totalPages" title="下一页">›</button>
+        <button class="ghost pg-btn" @click="gotoPage(totalPages)" :disabled="currentPage >= totalPages" title="末页">»</button>
+        <span class="pg-jump">
+          跳转
+          <input type="number" min="1" :max="totalPages" v-model.number="jumpInput" @keyup.enter="doJump" />
+          / {{ totalPages }}
+        </span>
+      </div>
+    </section>
+    </template>
+
+    <!-- 图片收藏 tab -->
+    <section v-else class="panel card favorites-images-panel">
+      <div class="panel-head compact-head">
+        <div>
+          <h2>图片收藏</h2>
+          <p class="inline-note">
+            共 {{ images.length }} 张<span v-if="imagesSearch"> · 已筛选 {{ filteredImages.length }} 张</span><span v-if="totalPages > 1"> · 第 {{ currentPage }} / {{ totalPages }} 页 · 每页 {{ pageSize }} 张</span> · 点击缩略图在程序内查看
+          </p>
+        </div>
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <span class="search-input-wrap">
+            <input
+              v-model="imagesSearch"
+              class="search-input search-input-with-clear"
+              type="text"
+              placeholder="搜索画师 / 角色 / 文件名 / 日期"
+              style="width: 240px;"
+            />
+            <button
+              v-if="imagesSearch"
+              class="search-clear-btn"
+              @click="imagesSearch = ''"
+              title="清空搜索"
+              type="button"
+            >×</button>
+          </span>
+          <button class="secondary" @click="loadImageFavorites" :disabled="loading" style="white-space: nowrap;">
+            {{ loading ? '加载中...' : '🔄 刷新' }}
+          </button>
+        </div>
+      </div>
+
+      <div v-if="loading" class="gallery-empty">正在加载收藏...</div>
+      <div v-else-if="!filteredImages.length" class="gallery-empty">
+        {{ images.length ? '没有匹配的图片' : '还没有收藏图片 —— 去抓图页点缩略图右上角的 ♡ 加入' }}
+      </div>
+
+      <div v-else class="gallery-grid">
+        <article v-for="it in pagedImages" :key="it.key" class="image-card">
+          <img
+            class="thumb clickable-thumb"
+            :src="imageThumbCache[it.key]"
+            :alt="it.filename"
+            loading="lazy"
+            decoding="async"
+            @click="openViewer(it)"
+          />
+          <button
+            class="img-fav-toggle active"
+            @click.stop="removeImageFavorite(it)"
+            title="从收藏中移除"
+          >♥</button>
+          <div v-if="(it.score || 0) > 0 || (it.fav_count || 0) > 0" class="score-badge">
+            <span><span class="score-star">★</span> {{ it.score || 0 }}</span>
+            <span><span class="score-heart">♥</span> {{ it.fav_count || 0 }}</span>
+          </div>
+          <div class="card-meta">
+            <div class="token-row">
+              <button class="meta-link author-link token-chip" :title="`画师：${it.artist || '未知'}`">
+                {{ it.artist || '未知' }}
+              </button>
+              <span class="meta-link" style="padding: 2px 8px; font-size: 11px;">{{ it.date }}</span>
+            </div>
+            <div class="token-row" v-if="Array.isArray(it.characters) && it.characters.length">
+              <span
+                v-for="token in it.characters"
+                :key="`char-${it.key}-${token}`"
+                class="meta-link token-chip"
+              >{{ token.includes(' [') ? token.split(' [')[0] : token }}</span>
+            </div>
+          </div>
+          <div class="button-row compact">
+            <button class="secondary" @click="openImageOriginal(it)" :disabled="!it.post_url">原帖</button>
+            <button class="secondary" @click="openImageLocally(it)" :disabled="!it.local_path">本地</button>
+          </div>
+        </article>
+      </div>
+
+      <div v-if="filteredImages.length" class="pagination-bar fav-pagination">
+        <select v-model.number="imagePageSizeChoice" class="search-input" style="width: auto;" title="每页数量">
+          <option :value="14">14 / 页</option>
+          <option :value="28">28 / 页</option>
+          <option :value="56">56 / 页</option>
+          <option :value="112">112 / 页</option>
+        </select>
+        <button class="ghost pg-btn" @click="gotoPage(1)" :disabled="currentPage <= 1" title="首页">«</button>
+        <button class="ghost pg-btn" @click="gotoPage(currentPage - 1)" :disabled="currentPage <= 1" title="上一页">‹</button>
+        <button
+          v-for="(n, i) in pageNumbers"
+          :key="`pg-img-${i}-${n}`"
+          class="pg-num"
+          :class="{ active: n === currentPage, ellipsis: n === '…' }"
+          :disabled="n === '…'"
+          @click="gotoPage(n)"
+        >{{ n }}</button>
+        <button class="ghost pg-btn" @click="gotoPage(currentPage + 1)" :disabled="currentPage >= totalPages" title="下一页">›</button>
+        <button class="ghost pg-btn" @click="gotoPage(totalPages)" :disabled="currentPage >= totalPages" title="末页">»</button>
+        <span class="pg-jump">
+          跳转
+          <input type="number" min="1" :max="totalPages" v-model.number="jumpInput" @keyup.enter="doJump" />
+          / {{ totalPages }}
+        </span>
       </div>
     </section>
 
@@ -446,6 +848,51 @@ onMounted(loadFavorites);
       </div>
     </div>
 
+    <!-- 大图查看器（与抓图页同款） -->
+    <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer">
+      <div class="viewer-toolbar">
+        <div class="viewer-toolbar-info">
+          <strong>{{ viewerItem?.artist || '未知' }}</strong>
+          <span class="muted compact-text" style="color: #ccc;">
+            第 {{ viewer.index + 1 }} / {{ filteredImages.length }} 张
+          </span>
+          <span class="muted compact-text" style="color: #ccc;">{{ viewerItem?.date }}</span>
+          <span v-if="(viewerItem?.score || 0) > 0" class="viewer-score">★ {{ viewerItem.score }}</span>
+          <span v-if="(viewerItem?.fav_count || 0) > 0" class="viewer-fav">♥ {{ viewerItem.fav_count }}</span>
+        </div>
+        <div class="button-row compact viewer-actions">
+          <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
+          <button class="secondary" @click="stepViewer(1)" :disabled="viewer.index >= filteredImages.length - 1">下一张</button>
+          <button
+            class="ghost"
+            @click="viewerItem && removeImageFavorite(viewerItem)"
+            :disabled="!viewerItem"
+            style="color: #fff; border: 1px solid rgba(255, 188, 188, 0.4); background: rgba(157, 44, 44, 0.25);"
+          >取消收藏</button>
+          <button @click="editFromViewer" :disabled="!viewerItem" style="background: linear-gradient(135deg, var(--accent), var(--accent-deep)); border: none; color: white;">编辑图片</button>
+          <button class="ghost" @click="closeViewer" style="color: #fff; border: 1px solid rgba(255,255,255,0.2);">关闭</button>
+        </div>
+      </div>
+      <div class="viewer-stage" @wheel="onViewerWheel" @click.self="closeViewer">
+        <div class="viewer-image-wrap" :style="{ zoom: viewer.zoom }">
+          <video
+            v-if="viewer.imageUrl && viewerIsVideo"
+            class="viewer-image"
+            :src="viewer.imageUrl"
+            controls
+            autoplay
+            preload="metadata"
+          />
+          <img
+            v-else-if="viewer.imageUrl"
+            class="viewer-image"
+            :src="viewer.imageUrl"
+            :alt="viewerItem?.filename || 'preview'"
+          />
+        </div>
+      </div>
+    </div>
+
     <div v-if="toast.show" class="toast-overlay" :class="toast.type">{{ toast.msg }}</div>
   </div>
 </template>
@@ -454,9 +901,104 @@ onMounted(loadFavorites);
 .favorites-layout {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
   gap: 16px;
   min-height: 100%;
 }
+.favorites-layout.is-image-tab {
+  grid-template-columns: minmax(0, 1fr);
+}
+.fav-top-tabs {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 6px;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  align-self: start;
+  width: fit-content;
+}
+.favorites-images-panel {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+/* 图片 tab 复用全局 .gallery-grid / .image-card，外加 content-visibility 让屏外卡片彻底零成本 */
+.favorites-images-panel .gallery-grid {
+  /* 默认 14 张时其实是 2 行；但用户可改成 28/56/112，这里允许 flex 拉伸并滚动 */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  grid-auto-rows: min-content;
+  align-content: start;
+}
+.favorites-images-panel .image-card {
+  content-visibility: auto;
+  contain-intrinsic-size: 200px 320px;
+  contain: layout paint style;
+  position: relative;
+}
+/* 收藏页内的「移除收藏」红心按钮，固定在缩略图右上角 */
+.favorites-images-panel .img-fav-toggle {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, transform 0.15s;
+  background: linear-gradient(135deg, #ff5b8a, #d12869);
+  box-shadow: 0 2px 8px rgba(209, 40, 105, 0.5);
+}
+.favorites-images-panel .img-fav-toggle:hover {
+  background: linear-gradient(135deg, #ff7aa1, #e0367a);
+  transform: scale(1.08);
+}
+
+/* 收藏页底部分页栏：复用全局 .pagination-bar 样式，只追加间距 */
+.fav-pagination {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--line);
+  flex-wrap: wrap;
+}
+
+/* 共享给图片 tab 搜索框的清空按钮（与 CrawlerPage 同款样式） */
+.search-input-wrap { position: relative; display: inline-flex; align-items: center; }
+.search-input-with-clear { padding-right: 28px; }
+.search-clear-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(74, 53, 25, 0.35);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.search-clear-btn:hover { background: rgba(157, 44, 44, 0.7); }
+
 .favorites-side {
   position: sticky;
   top: 16px;
@@ -584,19 +1126,38 @@ onMounted(loadFavorites);
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 10px;
+  /* 单列行式列表：每个画师/角色一行，名字 + 分组 + 操作横向排开 */
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding-right: 4px;
 }
 .artist-card {
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 10px;
   background: rgba(255, 255, 255, 0.7);
+  content-visibility: auto;
+  contain-intrinsic-size: 100% 44px;
+}
+.artist-card .artist-name {
+  flex: 0 0 220px;
+  width: 220px;
+  max-width: 40%;
+}
+.artist-card .artist-groups {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+}
+.artist-card .artist-actions {
+  flex-shrink: 0;
+  margin-top: 0;
 }
 .artist-name {
   width: 100%;
