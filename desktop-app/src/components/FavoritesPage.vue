@@ -1,10 +1,38 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 
 const API_BASE = 'http://127.0.0.1:8000';
 const ALL_KEY = '__all__';
 
-const groups = ref({});       // {groupName: [artist, ...]}
+// 'artist' | 'character'：两个 tab 各持一份 groups，共享同一套 UI
+const activeTab = ref('artist');
+const tabMeta = {
+  artist: {
+    label: '画师',
+    endpoint: '/api/artist_favorites',
+    entityLabel: '画师',
+    placeholder: '搜索画师',
+    addLabel: '手动添加画师',
+    addTitle: '手动添加画师',
+    addTextLabel: '画师名（可一次粘多个，用空格 / 逗号 / 换行分隔）',
+    addExample: '例如：kantoku  mika_pikazo, sakimichan',
+    emptyHint: '还没有收藏画师 —— 去抓图页点画师 chip 的 ★ 加入，或在这里手动添加',
+  },
+  character: {
+    label: '角色',
+    endpoint: '/api/character_favorites',
+    entityLabel: '角色',
+    placeholder: '搜索角色',
+    addLabel: '手动添加角色',
+    addTitle: '手动添加角色',
+    addTextLabel: '角色 token（可一次粘多个，用空格 / 逗号 / 换行分隔；建议带 [source_hint]）',
+    addExample: '例如：初音未来 [vocaloid]  博丽灵梦 [touhou]',
+    emptyHint: '还没有收藏角色 —— 去抓图页点角色 chip 的 ★ 加入（会按 source_hint 自动归类）',
+  },
+};
+const currentMeta = computed(() => tabMeta[activeTab.value]);
+
+const groups = ref({});       // {groupName: [name, ...]}
 const loading = ref(false);
 const saving = ref(false);
 const selectedGroup = ref(ALL_KEY);   // 当前过滤
@@ -16,9 +44,9 @@ function showToast(msg, type = 'info') {
   setTimeout(() => { toast.value.show = false; }, 2500);
 }
 
-// 全部画师扁平化 + 反向索引（用于显示每个画师属于哪些分组）
+// 全部条目扁平化 + 反向索引（用于显示每个条目属于哪些分组）
 const allArtists = computed(() => {
-  const m = new Map();   // artist -> Set(groupName)
+  const m = new Map();   // name -> Set(groupName)
   for (const [g, arts] of Object.entries(groups.value)) {
     for (const a of arts) {
       if (!m.has(a)) m.set(a, new Set());
@@ -49,7 +77,7 @@ const groupList = computed(() => {
 async function loadFavorites() {
   loading.value = true;
   try {
-    const res = await fetch(`${API_BASE}/api/artist_favorites`);
+    const res = await fetch(`${API_BASE}${currentMeta.value.endpoint}`);
     const data = await res.json();
     if (data.ok) {
       groups.value = data.groups || {};
@@ -64,7 +92,7 @@ async function loadFavorites() {
 async function persist() {
   saving.value = true;
   try {
-    const res = await fetch(`${API_BASE}/api/artist_favorites`, {
+    const res = await fetch(`${API_BASE}${currentMeta.value.endpoint}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groups: groups.value }),
@@ -83,6 +111,14 @@ async function persist() {
     saving.value = false;
   }
 }
+
+// 切换 tab 时清空本地状态并重新加载
+watch(activeTab, () => {
+  groups.value = {};
+  selectedGroup.value = ALL_KEY;
+  search.value = '';
+  loadFavorites();
+});
 
 // ----- 分组 CRUD -----
 async function createGroup() {
@@ -117,7 +153,7 @@ async function renameGroup(oldName) {
 
 async function deleteGroup(name) {
   const arts = groups.value[name] || [];
-  if (!confirm(`确定删除分组「${name}」（含 ${arts.length} 个画师）？此操作不删除画师本身，仅从该分组中移除。`)) return;
+  if (!confirm(`确定删除分组「${name}」（含 ${arts.length} 个${currentMeta.value.entityLabel}）？此操作不删除${currentMeta.value.entityLabel}本身，仅从该分组中移除。`)) return;
   const next = { ...groups.value };
   delete next[name];
   groups.value = next;
@@ -153,7 +189,7 @@ async function submitManualAdd() {
     .split(/[\s,，;；\n]+/)
     .map(s => s.trim())
     .filter(Boolean);
-  if (!names.length) { showToast('请输入画师名', 'error'); return; }
+  if (!names.length) { showToast(`请输入${currentMeta.value.entityLabel}名`, 'error'); return; }
   if (!manualAdd.value.selectedGroups.length) { showToast('请至少勾选一个分组', 'error'); return; }
   const next = { ...groups.value };
   for (const g of manualAdd.value.selectedGroups) {
@@ -165,7 +201,7 @@ async function submitManualAdd() {
   }
   groups.value = next;
   if (await persist()) {
-    showToast(`已添加 ${names.length} 个画师到 ${manualAdd.value.selectedGroups.length} 个分组`, 'success');
+    showToast(`已添加 ${names.length} 个${currentMeta.value.entityLabel}到 ${manualAdd.value.selectedGroups.length} 个分组`, 'success');
     closeManualAdd();
   }
 }
@@ -212,7 +248,7 @@ async function submitEditArtist() {
 }
 
 async function removeArtistFromAll(artist) {
-  if (!confirm(`从所有分组中移除画师「${artist}」？`)) return;
+  if (!confirm(`从所有分组中移除${currentMeta.value.entityLabel}「${artist}」？`)) return;
   const next = {};
   for (const [g, arr] of Object.entries(groups.value)) {
     next[g] = arr.filter(a => a !== artist);
@@ -244,10 +280,23 @@ onMounted(loadFavorites);
   <div class="favorites-layout">
     <!-- 左侧分组列表 -->
     <section class="panel card favorites-side">
+      <div class="fav-tab-bar">
+        <button
+          class="fav-tab"
+          :class="{ active: activeTab === 'artist' }"
+          @click="activeTab = 'artist'"
+        >画师收藏</button>
+        <button
+          class="fav-tab"
+          :class="{ active: activeTab === 'character' }"
+          @click="activeTab = 'character'"
+        >角色收藏</button>
+      </div>
+
       <div class="panel-head compact-head">
         <div>
           <h2>分组</h2>
-          <p class="inline-note">共 {{ groupList.length }} 个 · {{ allArtists.length }} 个画师</p>
+          <p class="inline-note">共 {{ groupList.length }} 个 · {{ allArtists.length }} 个{{ currentMeta.entityLabel }}</p>
         </div>
         <button @click="createGroup" :disabled="saving">新建分组</button>
       </div>
@@ -283,13 +332,13 @@ onMounted(loadFavorites);
       </div>
     </section>
 
-    <!-- 右侧画师列表 -->
+    <!-- 右侧条目列表 -->
     <section class="panel card favorites-main">
       <div class="panel-head compact-head">
         <div>
-          <h2>{{ selectedGroup === ALL_KEY ? '全部画师' : selectedGroup }}</h2>
+          <h2>{{ selectedGroup === ALL_KEY ? `全部${currentMeta.entityLabel}` : selectedGroup }}</h2>
           <p class="inline-note">
-            {{ visibleArtists.length }} 个画师<span v-if="search"> · 已搜索</span> · 点击画师名复制到剪贴板
+            {{ visibleArtists.length }} 个{{ currentMeta.entityLabel }}<span v-if="search"> · 已搜索</span> · 点击名称复制到剪贴板
           </p>
         </div>
         <div style="display: flex; gap: 8px;">
@@ -297,16 +346,16 @@ onMounted(loadFavorites);
             v-model="search"
             class="search-input"
             type="text"
-            placeholder="搜索画师"
+            :placeholder="currentMeta.placeholder"
             style="width: 200px;"
           />
-          <button @click="openManualAdd" :disabled="saving">手动添加画师</button>
+          <button @click="openManualAdd" :disabled="saving">{{ currentMeta.addLabel }}</button>
         </div>
       </div>
 
       <div v-if="loading" class="gallery-empty">正在加载收藏...</div>
       <div v-else-if="!visibleArtists.length" class="gallery-empty">
-        {{ allArtists.length ? '没有匹配的画师' : '还没有收藏画师 —— 去抓图页点画师 chip 的 ★ 加入，或在这里手动添加' }}
+        {{ allArtists.length ? `没有匹配的${currentMeta.entityLabel}` : currentMeta.emptyHint }}
       </div>
 
       <div v-else class="favorites-grid">
@@ -337,19 +386,19 @@ onMounted(loadFavorites);
       </div>
     </section>
 
-    <!-- 手动添加画师 modal -->
+    <!-- 手动添加 modal -->
     <div v-if="manualAdd.open" class="viewer-overlay fav-overlay" @click.self="closeManualAdd">
       <div class="fav-modal">
         <div class="fav-modal-head">
-          <h3>手动添加画师</h3>
+          <h3>{{ currentMeta.addTitle }}</h3>
           <button class="ghost" @click="closeManualAdd" style="color: var(--muted);">×</button>
         </div>
         <label class="fav-field">
-          <span>画师名（可一次粘多个，用空格 / 逗号 / 换行分隔）</span>
+          <span>{{ currentMeta.addTextLabel }}</span>
           <textarea
             v-model="manualAdd.text"
             class="fav-textarea"
-            placeholder="例如：kantoku  mika_pikazo, sakimichan"
+            :placeholder="currentMeta.addExample"
           ></textarea>
         </label>
         <label class="fav-field">
@@ -373,7 +422,7 @@ onMounted(loadFavorites);
       </div>
     </div>
 
-    <!-- 编辑画师所属分组 modal -->
+    <!-- 编辑所属分组 modal -->
     <div v-if="editArtist.open" class="viewer-overlay fav-overlay" @click.self="closeEditArtist">
       <div class="fav-modal">
         <div class="fav-modal-head">
@@ -415,6 +464,34 @@ onMounted(loadFavorites);
   overflow: hidden;
   display: flex;
   flex-direction: column;
+}
+
+.fav-tab-bar {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 4px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+}
+.fav-tab {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-deep);
+  background: transparent;
+  border: none;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background 0.18s, color 0.18s;
+}
+.fav-tab:hover { background: rgba(243, 223, 212, 0.6); }
+.fav-tab.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(180, 110, 22, 0.3);
 }
 .favorites-main {
   display: flex;

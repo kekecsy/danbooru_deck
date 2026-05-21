@@ -10020,10 +10020,10 @@
     "translated_description_zh": "角色出自《Umineko No Naku Koro Ni》。是[[Ushiromiya Battler]]的妹妹。她是一名留有亮红色头发并用发卡扎起的成熟外观的女孩"
   },
   "mint_fantome": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "densetsu.exe",
-    "translated_description_zh": "Mint Fantome 是一位英语使用的鬼魂女仆独立虚拟YouTuber（VTuber），也是团体 Densetsu.EXE 的创始成员。她最初的直播时间为2020年7月至2021年4月；休息恰好3年后，于2024年4月复播。最初由 kgr 绘制，2024年万圣节她首次亮相由 Ayamy 绘制、Cillia 负责绑定的3.0模型（是2.0设计的更新），整体外观与2.0相似，仅因新画师风格略有变化。虽然官方设定她是鬼魂少女，但在Danbooru上因缺乏足够的鬼魂特征而未被标记为如此。她拥有短发，呈白色到绿色的渐变波浪发，蓝色眼睛。当前默认发型是两侧向上扎起，用小蓝色蝴蝶结固定，并饰有三角形头饰、女仆头饰和X形发夹。她的3.0模型赋予了尖耳朵。注意她的姓氏官方拼写为“Fantôme”（法语意为“幻影”或“鬼魂”），但Danbooru标签不支持ô字符。外部链接包括YouTube和Twitter"
+    "has_chinese": true,
+    "chinese_name": "薄荷·方托姆",
+    "source_hint": "vtuber",
+    "translated_description_zh": "一名英语系个人势（Indie）虚拟主播（VTuber），其设定为幽灵女仆，同时也是团体“Densetsu.EXE”的创始成员。她最初于2020年7月至2021/4月期间进行直播活动；在恰好隐退/沉寂3年后，于2024年4月重回直播舞台。她的1.0与2.0形象最初由kgr设计，后于2024年万圣节公开了由画师Ayamy设计、Cillia进行模型绑定的3.0新形象。她留着白绿渐变的波浪短发，拥有蓝色眼睛，在3.0模型中增加了尖耳朵。她的粉丝群体被称为“Wisps”。"
   },
   "angela_(project_moon)": {
     "has_chinese": true,
@@ -19518,10 +19518,10 @@
     "translated_description_zh": "Kurumi Noah 是 Vspo! 虚拟YouTuber（VTuber），属于 Iris Black Games 成员，角色由 Kuro Kumagaya 设计。她拥有中长浅棕色双锥形发髻、绿眼睛、巨乳和獠牙。官方服装包括原始默认、第二套、第三套（当前默认）、猫天使、和服、睡衣、Jirai Kei、校服等，另有夏季泳装插画。她在 Iris Black Games 小队中与 Kisaragi Ren、Tachibana Hinano 等成员一起活动，外部链接有 YouTube 和 Twitter"
   },
   "airani_iofifteen": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "hololive id",
-    "translated_description_zh": "多语种外星人艺术家，是虚拟YouTuber（VTuber）以及hololive Indonesia（hololive ID）第一代（Area 15）成员。由Yano Mitsuki（nanairo）设计。尽管是外星人，外貌酷似矮小的人类。她拥有紫色眼睛，以及从粉色渐变到浅蓝色的长白/淡粉色头发。胸部中等，但因默认服装的宽松衬衫和视角而显得平胸，真实胸型在后来的服装和3D模型中更明显。她的默认发型是侧边束发，可变为侧马尾，伴有撩刘海和长侧发束，佩戴双色粉绿发带和调色板发饰。服装包括默认、印尼休闲、军装休闲、科幻公主、新年、工作（偶像）、女神（Area 15 五周年）等，以及与其他成员共享的亮色、夏季泳装、色彩升升、hololive Indonesia 校服等。另见其艺术作品条目。外部链接：YouTube、Twitter"
+    "has_chinese": true,
+    "chinese_name": "艾拉妮·伊欧菲芙汀",
+    "source_hint": "vtuber",
+    "translated_description_zh": "Hololive ID（印尼组）一期生“Area 15”的成员，设定上是一名精通多国语言的外星人画家虚拟主播（VTuber），角色形象由Yano Mitsuki设计。尽管是外星人，但她看起来和（身材矮小的）人类无异。她拥有紫色眼睛，留着白、粉、蓝渐变色的长发。虽然默认服装的宽松衬衫会给人一种平胸的印象，但在之后的服装和3D模型中展现出了她其实拥有匀称的中等身材。默认发型为单侧丸子头接侧马尾，配有粉绿双色蝴蝶结发带和调色盘发饰。"
   },
   "oddish": {
     "has_chinese": false,
@@ -32210,8 +32210,8 @@
   "lucia_(scott_malin)": {
     "has_chinese": false,
     "chinese_name": "",
-    "source_hint": "original",
-    "translated_description_zh": "[[Original]] 角色，由 [[Scott Malin]] 创作"
+    "source_hint": "original_character",
+    "translated_description_zh": "画师 Scott Malin 的原创角色（OC）露西亚（Lucia）。"
   },
   "sakurai_touko": {
     "has_chinese": false,
@@ -34356,10 +34356,10 @@
     "translated_description_zh": "《舰队Collection》中日本潜艇I-47的拟人化角色，昵称‘Yona’。由Hoshiakari (C2 Kikan)设计。她有长长的低束黑发、绿眼睛，右臀部有痣。默认穿着蓝色学校泳装内搭白色短上衣、白色水手领、名牌、灰色领巾、透明裙、黑色过膝袜和灰色短靴。装备包括背部鱼雷管、模仿真实鳍状的头饰以及大腿带上的14厘米和25毫米防空炮。历史上该潜艇仅有的显著战绩是1944年11月11日使用人鱼雷击沉USS Mississinewa，后成为人鱼雷母舰，1945年11月30日退役，1946年4月1日在五岛列外作为靶舰被击沉"
   },
   "sora_(nikke)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "goddess of victory: nikke",
-    "translated_description_zh": "可玩角色，出自《胜利女神：NIKKE》。她是方舟航空队“Over the Horizon”的成员，与Cielo和Sky一起担任空乘（空姐），负责乘客安全。性格友好、调情且包容，热爱飞行。鲜为人知的是，她暗中将表面物资走私到外环，以寻找由女神小队驾驶的“Victory Wings”。Sora拥有长黑双马尾、分开齐刘海、红眼睛、左眼下的痣以及丰满胸部。着装包括左胸别有ID卡的开襟蓝色夹克、内穿白色衬衫（黑色胸罩部分可见）、黑色项圈、黑色腰带、蓝色铅笔裙带侧开叉、白色丝袜和黑色高跟鞋；右耳戴无线耳机，左耳戴单耳环及多枚戒指；口袋各装有一卷钱和智能手机，夹克内部有多个隐藏口袋。她使用名为Turbulence的火箭筒。插画师：DarknessDFM；声优：Sakura Kaoru（日）和Cassandra Lee Morris（英）"
+    "has_chinese": true,
+    "chinese_name": "索拉",
+    "source_hint": "goddess_of_victory_nikke",
+    "translated_description_zh": "《胜利女神：妮姬》中的可玩角色。她与席艾洛、斯凯同属方舟的航空部队“地平线之上”（Over the Horizon），并担任空乘人员负责乘客的安全。她性格友好且热情，热爱飞行。然而她隐藏着一个秘密：她一直从地面向外沿区走私物资，目的是寻找当年“女神”部队所驾驶的飞机“胜利之翼”的下落。她留着黑色双马尾，拥有红色眼睛、左眼泪痣以及丰满的身材。她身穿敞开的蓝色外套、白衬衫、蓝色一步裙和白色连裤袜，使用名为“Turbulence”的火箭筒作为武器。由佐仓薰（日配）和Cassandra Lee Morris（英配）负责配音。"
   },
   "kageyama_tobio": {
     "has_chinese": true,
@@ -55812,10 +55812,10 @@
     "translated_description_zh": "他是Fate/Grand Order中的Assassin阶级从者，与玛丽·安托瓦内特（Fate）关系密切，因他在法国大革命中处决了她。角色设计由Shimadoriru负责，声优为Miyano Mamoru。外观包括第一、第二、第三次升华以及多种服装：Angel Breath、Celebratory Attire、FGO Orchestra、Festival Outfit、Rimless Round、Salon de Marie、Still in the Middle of the Trip、Super Doctor、Traveling Outfit、デイ・オフ・マスター等。参见Fate系列角色列表。外部链接有Type-Moon Wiki和Fate/Grand Order Wiki"
   },
   "justina_follower_(blue_archive)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "blue archive",
-    "translated_description_zh": "蔚蓝档案中姐妹派系的前身。以敌方小兵形象出现，身穿黑色紧身衣、修女服装及各种面具。樱子也穿着类似制服，标签为[[Sakurako (Justina Uniform) (Blue Archive)]"
+    "has_chinese": true,
+    "chinese_name": "尤斯蒂娜圣徒",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "《蔚蓝档案》中修女会的前身组织。她们在游戏中作为敌方小怪登场，身穿黑色紧身衣与修女服，并戴着各式各样的面具。歌原樱子（Sakurako）也有一套极其相似的制服（即著名的“觉悟礼装”）。"
   },
   "astra_yao_(chandelier)": {
     "has_chinese": true,
@@ -77206,5 +77206,35 @@
     "chinese_name": "",
     "source_hint": "original_character",
     "translated_description_zh": "画师 Nyantcha 的原创角色（OC）。是被设定为伪娘（Femboy）的仙子伊布拟人化形象。"
+  },
+  "prinz_moritz_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "莫里茨亲王",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中德国P级重巡洋舰莫里茨亲王的拟人化角色。其皮肤包括默认形态以及名为“精灵的游戏”的泳装款式。在游戏中属于P级重巡洋舰（如海因里希亲王、阿达尔伯特亲王、弗里德里希·卡尔）系列。"
+  },
+  "z15_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "Z15",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中德国1934A型驱逐舰Z15（埃里希·斯坦布林克）的拟人化角色。她留着深红色长发，右眼戴着眼罩，拥有黑色眼睛与丰满的身材，在左胸、嘴边和右大腿处有痣。她的默认装束包括一件猫咪主题的黑色连帽夹克、黑色长款手套、黑色短裤和黑色过膝长筒靴。她的舰装由三个机械兽头组成，并装备了两座双联装12.7cm主炮以及四联装533mm鱼雷发射管。"
+  },
+  "arcana_(nikke)": {
+    "has_chinese": true,
+    "chinese_name": "阿尔卡娜",
+    "source_hint": "goddess_of_victory_nikke",
+    "translated_description_zh": "《胜利女神：妮姬》中的可玩角色，与幻影、拉贝尔同属“畅销书”部队（Best Seller）。她是一个彻头彻尾的外向者，性格友好，几乎能与任何人打成一片。她还把经营一家塔罗牌小店作为副业，凭借对塔罗牌的独特且古怪的解读来戏弄他人（主要是指挥官）。由于她的占卜往往出奇地准确，所以她的店铺非常成功。由村上奈津实（日配）和Skyler Davenport（英配）负责配音。"
+  },
+  "velina_airgid": {
+    "has_chinese": true,
+    "chinese_name": "维琳娜",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "《绝区零》中即将登场的游戏角色。日语版由斋藤千和配音，英语版由Rhiannon Moushall配音。"
+  },
+  "francois_prelati_(fate)": {
+    "has_chinese": true,
+    "chinese_name": "弗朗索瓦·普雷拉蒂",
+    "source_hint": "fate",
+    "translated_description_zh": "《Fate/strange Fake》中的角色，被弗兰切斯卡·普雷拉蒂召唤的“真”Caster职阶从者。真名为弗朗索瓦·普雷拉蒂，是与圣女贞德同时代的意大利神职人员，曾涉足吉尔·德·雷后来亦有修习的魔术。他掌握了死后转世到新身体的方法，从而以弗兰切斯卡的身姿活到了现代，并能将过去的自己作为从者召唤。他在《Fate/Grand Order》的“冰灭十字战线 安条克”活动中与弗兰切斯卡·普雷拉蒂一同作为Caster职阶从者实装。角色设计为森井静香，声优为内田真礼。"
   }
 }

@@ -22,7 +22,9 @@
       "Bash(PYTHONIOENCODING=utf-8 'D:\\\\Anaconda3\\\\envs\\\\pic_web\\\\python.exe' -c ' *)",
       "Bash(ls \"C:\\\\Users\\\\27147\\\\Downloads\\\\my_work\\\\pic\\\\web_mosaic_gpt\"\\\\*.json 2>&1 | head -10)",
       "Read(//c/Users/27147/Downloads/my_work/pic/**)",
-      "Bash(grep -E '\\\\.json$')"
+      "Bash(grep -E '\\\\.json$')",
+      "Bash(npx vite *)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('main.py', encoding='utf-8'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }

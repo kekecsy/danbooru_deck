@@ -5,3 +5,5 @@ exiftool
 desktop-app/node_modules
 desktop-app/dist/assets
 .env
+artist_favorites.json
+character_favorites.json

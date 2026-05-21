@@ -615,6 +615,17 @@ function closeRangeRefreshDialog() {
   rangeRefresh.value.open = false;
 }
 
+function refreshAllPages() {
+  if (!gallery.value.selectedDate) { showToast('请先选择日期', 'error'); return; }
+  if (refresh.value.isRunning) { showToast('已有刷新任务在运行', 'info'); return; }
+  const total = activeTotalPages.value;
+  if (!total) { showToast('当前没有可刷新的图片', 'info'); return; }
+  // 直接把范围拉满走节流路径（>5 页自动每 4 页休 40s）
+  rangeRefresh.value.startPage = 1;
+  rangeRefresh.value.endPage = total;
+  startRefreshScoresRange();
+}
+
 const rangeRefreshCount = computed(() => {
   const total = activeTotalPages.value;
   if (!total) return 0;
@@ -632,6 +643,7 @@ async function startRefreshScoresRange() {
   const total = activeTotalPages.value;
   const start = Math.max(1, Math.min(total, rangeRefresh.value.startPage || 1));
   const end = Math.max(start, Math.min(total, rangeRefresh.value.endPage || start));
+  const pageCount = end - start + 1;
   const ps = gallery.value.pageSize;
   const items = filteredLocalImages.value.slice((start - 1) * ps, end * ps);
   const filenames = items.map(it => it.filename).filter(Boolean);
@@ -642,34 +654,83 @@ async function startRefreshScoresRange() {
   refresh.value.dateStr = date;
   refresh.value.total = filenames.length;
   refresh.value.done = 0;
-  showToast(`正在刷新第 ${start}-${end} 页共 ${filenames.length} 张...`, 'info');
 
-  try {
+  // 页数超过 5 时，按每 4 页一批切片，批间休息 40s 防止 Danbooru 风控
+  const THROTTLE_THRESHOLD = 5;
+  const BATCH_PAGES = 4;
+  const REST_MS = 40000;
+  const throttled = pageCount > THROTTLE_THRESHOLD;
+
+  const batches = [];
+  if (throttled) {
+    for (let p = start; p <= end; p += BATCH_PAGES) {
+      const pEnd = Math.min(end, p + BATCH_PAGES - 1);
+      const sliceItems = filteredLocalImages.value.slice((p - 1) * ps, pEnd * ps);
+      const bf = sliceItems.map(it => it.filename).filter(Boolean);
+      if (bf.length) batches.push({ pStart: p, pEnd, filenames: bf });
+    }
+  } else {
+    batches.push({ pStart: start, pEnd: end, filenames });
+  }
+
+  let okCount = 0;
+  let failCount = 0;
+
+  async function runBatch(b, label) {
+    if (!b.filenames.length) return;
+    if (label) showToast(label, 'info');
     const res = await fetch('http://127.0.0.1:8000/api/refresh_visible', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, filenames }),
+      body: JSON.stringify({ date, filenames: b.filenames }),
     });
     const result = await res.json();
     if (!result.ok) {
       showToast(result.msg || '刷新失败', 'error');
       return;
     }
-    let okCount = 0;
-    let failCount = 0;
     for (const u of result.updates || []) {
       if (!u.ok) { failCount += 1; continue; }
       const target = gallery.value.images.find(img => img.filename === u.filename);
-      if (target) {
-        applyRefreshUpdate(target, u);
-        okCount += 1;
-      }
+      if (target) { applyRefreshUpdate(target, u); okCount += 1; }
       refresh.value.done = okCount + failCount;
+    }
+  }
+
+  async function sleepCancellable(ms) {
+    const step = 500;
+    let waited = 0;
+    while (waited < ms) {
+      if (!refresh.value.isRunning) return;
+      await new Promise(r => setTimeout(r, Math.min(step, ms - waited)));
+      waited += step;
+    }
+  }
+
+  try {
+    if (throttled) {
+      showToast(`共 ${pageCount} 页，将分 ${batches.length} 批刷新（每 ${BATCH_PAGES} 页一批，批间休息 ${REST_MS / 1000}s 防风控）`, 'info');
+    } else {
+      showToast(`正在刷新第 ${start}-${end} 页共 ${filenames.length} 张...`, 'info');
+    }
+    for (let bi = 0; bi < batches.length; bi += 1) {
+      if (!refresh.value.isRunning) break;
+      const b = batches[bi];
+      const label = throttled
+        ? `批次 ${bi + 1}/${batches.length} · 第 ${b.pStart}-${b.pEnd} 页（${b.filenames.length} 张）`
+        : '';
+      await runBatch(b, label);
+      if (throttled && bi < batches.length - 1 && refresh.value.isRunning) {
+        showToast(`已完成 ${okCount}/${refresh.value.total}，休息 ${REST_MS / 1000}s 防风控…`, 'info');
+        await sleepCancellable(REST_MS);
+      }
     }
     if (failCount > 0) {
       showToast(`已刷新 ${okCount} 张，${failCount} 张失败`, okCount > 0 ? 'info' : 'error');
-    } else {
+    } else if (refresh.value.isRunning || okCount) {
       showToast(`已刷新 ${okCount} 张`, 'success');
+    } else {
+      showToast('已停止刷新', 'info');
     }
   } catch (err) {
     showToast(`请求失败: ${err.message}`, 'error');
@@ -1068,6 +1129,7 @@ async function saveFavoriteDialog() {
       return;
     }
     showToast(`已收藏「${artist}」`, 'success');
+    favSnapshot.value.artists = data.groups || next;
     closeFavoriteDialog();
   } catch (err) {
     showToast('保存失败: ' + err.message, 'error');
@@ -1079,6 +1141,165 @@ async function saveFavoriteDialog() {
 const favGroupList = computed(() => {
   return Object.entries(favoriteDialog.value.groups)
     .map(([name, arts]) => ({ name, count: arts.length }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+});
+
+// ---------------- 已收藏画师/角色：用于卡片异色高亮 ----------------
+// favorites 全局快照，挂载时拉一次；保存收藏后再同步刷新一次
+const favSnapshot = ref({
+  artists: {},       // {group: [artist,...]}
+  characters: {},    // {group: [character_token,...]}
+});
+
+const favoritedArtistSet = computed(() => {
+  const s = new Set();
+  for (const arts of Object.values(favSnapshot.value.artists || {})) {
+    for (const a of arts) s.add(a);
+  }
+  return s;
+});
+
+const favoritedCharacterSet = computed(() => {
+  const s = new Set();
+  for (const chars of Object.values(favSnapshot.value.characters || {})) {
+    for (const c of chars) s.add(c);
+  }
+  return s;
+});
+
+function isCardFavorited(item) {
+  const arts = item.artistTokens || [];
+  for (const a of arts) {
+    if (a && a !== '未知' && favoritedArtistSet.value.has(a)) return true;
+  }
+  const chars = item.characterTokens || [];
+  for (const c of chars) {
+    if (c && favoritedCharacterSet.value.has(c)) return true;
+  }
+  return false;
+}
+
+async function loadFavSnapshot() {
+  try {
+    const [aRes, cRes] = await Promise.all([
+      fetch('http://127.0.0.1:8000/api/artist_favorites').then(r => r.json()),
+      fetch('http://127.0.0.1:8000/api/character_favorites').then(r => r.json()),
+    ]);
+    favSnapshot.value.artists = aRes.groups || {};
+    favSnapshot.value.characters = cRes.groups || {};
+  } catch (_) { /* 静默失败，卡片只是不高亮而已 */ }
+}
+
+// ---------------- 角色收藏：从画廊 chip 的 ★ 加入分组 ----------------
+// token 形如 "初音未来 [vocaloid]"，按 [source_hint] 提取出处用作默认分组名
+function extractSourceHint(token) {
+  if (!token) return '';
+  const m = String(token).match(/\[([^\[\]]+)\]/);
+  return m ? m[1].trim() : '';
+}
+
+const charFavoriteDialog = ref({
+  open: false,
+  character: '',     // 完整 token，例如 "初音未来 [vocaloid]"
+  sourceHint: '',    // 解析出的 source_hint
+  loading: false,
+  saving: false,
+  groups: {},        // {group: [character_token,...]}
+  selectedGroups: [],
+  newGroupName: '',
+});
+
+async function openCharacterFavoriteDialog(token) {
+  charFavoriteDialog.value.open = true;
+  charFavoriteDialog.value.character = token;
+  charFavoriteDialog.value.sourceHint = extractSourceHint(token);
+  charFavoriteDialog.value.loading = true;
+  charFavoriteDialog.value.newGroupName = '';
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/character_favorites');
+    const data = await res.json();
+    charFavoriteDialog.value.groups = data.groups || {};
+    // 已在的分组默认勾上
+    charFavoriteDialog.value.selectedGroups = Object.entries(charFavoriteDialog.value.groups)
+      .filter(([, arr]) => arr.includes(token))
+      .map(([name]) => name);
+    // 「按 source_hint 合并」：如果还没勾任何分组、且字典里已有同名 source_hint 分组，预勾上；
+    // 否则把 source_hint 填到「新建分组」框，方便一键创建
+    const hint = charFavoriteDialog.value.sourceHint;
+    if (hint) {
+      if (charFavoriteDialog.value.groups[hint]) {
+        if (!charFavoriteDialog.value.selectedGroups.includes(hint)) {
+          charFavoriteDialog.value.selectedGroups.push(hint);
+        }
+      } else {
+        charFavoriteDialog.value.newGroupName = hint;
+      }
+    }
+  } catch (err) {
+    showToast('加载角色收藏分组失败: ' + err.message, 'error');
+  } finally {
+    charFavoriteDialog.value.loading = false;
+  }
+}
+
+function closeCharacterFavoriteDialog() {
+  charFavoriteDialog.value.open = false;
+}
+
+function toggleCharFavGroup(name) {
+  const idx = charFavoriteDialog.value.selectedGroups.indexOf(name);
+  if (idx >= 0) charFavoriteDialog.value.selectedGroups.splice(idx, 1);
+  else charFavoriteDialog.value.selectedGroups.push(name);
+}
+
+function createCharFavGroupInline() {
+  const name = charFavoriteDialog.value.newGroupName.trim();
+  if (!name) { showToast('分组名不能为空', 'error'); return; }
+  if (charFavoriteDialog.value.groups[name]) { showToast('分组已存在', 'error'); return; }
+  charFavoriteDialog.value.groups = { ...charFavoriteDialog.value.groups, [name]: [] };
+  charFavoriteDialog.value.selectedGroups.push(name);
+  charFavoriteDialog.value.newGroupName = '';
+}
+
+async function saveCharacterFavoriteDialog() {
+  if (!charFavoriteDialog.value.selectedGroups.length) {
+    showToast('请至少勾选一个分组', 'error');
+    return;
+  }
+  charFavoriteDialog.value.saving = true;
+  const token = charFavoriteDialog.value.character;
+  const target = new Set(charFavoriteDialog.value.selectedGroups);
+  const next = {};
+  for (const [g, arr] of Object.entries(charFavoriteDialog.value.groups)) {
+    const has = arr.includes(token);
+    if (target.has(g) && !has) next[g] = [...arr, token];
+    else if (!target.has(g) && has) next[g] = arr.filter(a => a !== token);
+    else next[g] = arr;
+  }
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/character_favorites', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ groups: next }),
+    });
+    const data = await res.json();
+    if (!data.ok) {
+      showToast('保存失败: ' + (data.msg || ''), 'error');
+      return;
+    }
+    showToast(`已收藏「${token}」`, 'success');
+    favSnapshot.value.characters = data.groups || next;
+    closeCharacterFavoriteDialog();
+  } catch (err) {
+    showToast('保存失败: ' + err.message, 'error');
+  } finally {
+    charFavoriteDialog.value.saving = false;
+  }
+}
+
+const charFavGroupList = computed(() => {
+  return Object.entries(charFavoriteDialog.value.groups)
+    .map(([name, arr]) => ({ name, count: arr.length }))
     .sort((a, b) => a.name.localeCompare(b.name));
 });
 
@@ -1299,6 +1520,7 @@ onMounted(async () => {
   // 静默加载：Python 后端就绪后在后台刷新翻译，不再显示“正在读取”遮罩，消除闪烁
   await loadGallery(gallery.value.selectedDate, true);
   await syncStatus();
+  loadFavSnapshot();
   pollTimer = window.setInterval(syncStatus, 1200);
   window.addEventListener('keydown', onKeyDown);
 });
@@ -1500,6 +1722,12 @@ const modeDescription = computed(() => {
             :disabled="!gallery.selectedDate || refresh.isRunning"
             title="选择页码范围一次性刷新热度"
           >🔄 刷新范围</button>
+          <button
+            class="refresh-btn"
+            @click="refreshAllPages"
+            :disabled="!gallery.selectedDate || refresh.isRunning"
+            :title="`刷新全部 ${activeTotalPages} 页（>5 页会自动每 4 页休息 40s 防风控）`"
+          >🔄 刷新全部</button>
           <input v-model="gallery.search" class="search-input" type="text" placeholder="搜索作者 / 角色" />
           <button class="secondary" @click="openTranslationModal" :disabled="!gallery.selectedDate" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">翻译角色</button>
           <button class="secondary" @click="importTranslationFile" style="white-space: nowrap; font-size: 12px; padding: 6px 12px;">导入翻译字典</button>
@@ -1517,7 +1745,7 @@ const modeDescription = computed(() => {
       <div v-if="loadingGallery" class="gallery-empty">正在读取图库...</div>
       <div v-else-if="!activeItems.length" class="gallery-empty">当前日期没有图片</div>
       <div v-else class="gallery-grid">
-        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card">
+        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item) }">
           <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @click="openViewer(item)" />
           <div v-if="(item.score || 0) > 0 || (item.favCount || 0) > 0" class="score-badge">
             <span><span class="score-star">★</span> {{ item.score || 0 }}</span>
@@ -1528,6 +1756,7 @@ const modeDescription = computed(() => {
               <template v-for="token in (item.artistTokens?.length ? item.artistTokens : ['未知'])" :key="`artist-${token}`">
                 <button
                   class="meta-link author-link token-chip"
+                  :class="{ 'is-favorited-chip': favoritedArtistSet.has(token) }"
                   @click="applySearch(token)"
                 >
                   {{ token }}
@@ -1541,14 +1770,20 @@ const modeDescription = computed(() => {
               </template>
             </div>
             <div class="token-row">
-              <button
-                v-for="token in item.characterTokens"
-                :key="`character-${token}`"
-                class="meta-link token-chip"
-                @click="applySearch(token)"
-              >
-                {{ token.includes(' [') ? token.split(' [')[0] : token }}
-              </button>
+              <template v-for="token in item.characterTokens" :key="`character-${token}`">
+                <button
+                  class="meta-link token-chip"
+                  :class="{ 'is-favorited-chip': favoritedCharacterSet.has(token) }"
+                  @click="applySearch(token)"
+                >
+                  {{ token.includes(' [') ? token.split(' [')[0] : token }}
+                </button>
+                <button
+                  class="meta-link author-fav-btn"
+                  @click.stop="openCharacterFavoriteDialog(token)"
+                  title="加入角色收藏（按 source_hint 合并分组）"
+                >★</button>
+              </template>
               <span v-if="!item.characterTokens?.length" class="muted compact-text">无角色标签</span>
             </div>
           </div>
@@ -1908,6 +2143,63 @@ const modeDescription = computed(() => {
             <button class="ghost" @click="closeFavoriteDialog" style="color: var(--accent-deep);">取消</button>
             <button @click="saveFavoriteDialog" :disabled="favoriteDialog.saving" style="min-width: 90px;">
               {{ favoriteDialog.saving ? '保存中...' : '保存' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 加入角色收藏 Modal -->
+    <div v-if="charFavoriteDialog.open" class="viewer-overlay" @click.self="closeCharacterFavoriteDialog" style="z-index: 10020; display: flex; justify-content: center; align-items: center; padding: 24px;">
+      <div class="fav-add-modal">
+        <div class="fav-add-head">
+          <div>
+            <h3 style="margin: 0; color: var(--accent-deep); font-size: 17px;">加入角色收藏</h3>
+            <p class="muted compact-text" style="margin: 4px 0 0;">
+              角色：<strong style="color: var(--ink); font-family: Consolas, monospace;">{{ charFavoriteDialog.character }}</strong>
+            </p>
+            <p v-if="charFavoriteDialog.sourceHint" class="muted compact-text" style="margin: 2px 0 0;">
+              出处 (source_hint)：<strong style="color: var(--accent-deep);">{{ charFavoriteDialog.sourceHint }}</strong>
+              <span class="muted compact-text">· 同出处的角色会自动合并到同名分组</span>
+            </p>
+          </div>
+          <button class="ghost" @click="closeCharacterFavoriteDialog" style="color: var(--muted);">×</button>
+        </div>
+
+        <div v-if="charFavoriteDialog.loading" class="muted compact-text" style="text-align: center; padding: 20px;">加载分组中...</div>
+        <template v-else>
+          <div class="fav-add-list">
+            <label v-for="g in charFavGroupList" :key="g.name" class="fav-add-row">
+              <input
+                type="checkbox"
+                :checked="charFavoriteDialog.selectedGroups.includes(g.name)"
+                @change="toggleCharFavGroup(g.name)"
+              />
+              <span class="fav-add-name">{{ g.name }}</span>
+              <span class="fav-add-count">{{ g.count }}</span>
+            </label>
+            <div v-if="!charFavGroupList.length" class="muted compact-text" style="text-align: center; padding: 12px;">
+              还没有分组，下方已为你预填 source_hint 作为新分组名
+            </div>
+          </div>
+
+          <div class="fav-add-new">
+            <input
+              v-model="charFavoriteDialog.newGroupName"
+              type="text"
+              placeholder="新分组名（建议 = source_hint，例如 vocaloid / touhou）"
+              @keyup.enter="createCharFavGroupInline"
+            />
+            <button class="secondary" @click="createCharFavGroupInline" style="white-space: nowrap;">+ 新建</button>
+          </div>
+        </template>
+
+        <div class="fav-add-foot">
+          <span class="muted compact-text">已勾选 {{ charFavoriteDialog.selectedGroups.length }} 个分组</span>
+          <div style="display: flex; gap: 8px;">
+            <button class="ghost" @click="closeCharacterFavoriteDialog" style="color: var(--accent-deep);">取消</button>
+            <button @click="saveCharacterFavoriteDialog" :disabled="charFavoriteDialog.saving" style="min-width: 90px;">
+              {{ charFavoriteDialog.saving ? '保存中...' : '保存' }}
             </button>
           </div>
         </div>
@@ -2566,5 +2858,38 @@ const modeDescription = computed(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+/* ---------------- 收藏卡片 / chip 异色高亮 ---------------- */
+.image-card.is-favorited {
+  background: linear-gradient(135deg, rgba(255, 222, 173, 0.35), rgba(255, 188, 86, 0.18));
+  border: 1px solid rgba(212, 143, 47, 0.55);
+  box-shadow: 0 4px 18px rgba(212, 143, 47, 0.22);
+  position: relative;
+}
+.image-card.is-favorited::before {
+  content: '★ 收藏';
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  z-index: 2;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  background: linear-gradient(135deg, #d48f2f, #b46e16);
+  border-radius: 999px;
+  box-shadow: 0 2px 6px rgba(180, 110, 22, 0.45);
+  letter-spacing: 0.5px;
+  pointer-events: none;
+}
+.token-chip.is-favorited-chip {
+  background: linear-gradient(135deg, rgba(255, 188, 86, 0.45), rgba(212, 143, 47, 0.3));
+  color: #6b3f0a;
+  border: 1px solid rgba(212, 143, 47, 0.55);
+  font-weight: 700;
+}
+.token-chip.is-favorited-chip:hover {
+  background: linear-gradient(135deg, rgba(255, 188, 86, 0.65), rgba(212, 143, 47, 0.45));
 }
 </style>

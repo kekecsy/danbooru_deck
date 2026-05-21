@@ -48,6 +48,9 @@ from translator import translator
 BASE_DIR = Path(__file__).resolve().parent
 # 画师收藏存盘文件，结构 {group_name: [artist, ...]}；同一画师可在多个分组
 ARTIST_FAVORITES_JSON = BASE_DIR / "artist_favorites.json"
+# 角色收藏存盘文件，结构 {group_name: [character_display_token, ...]}；
+# 角色 token 形如 "初音未来 [vocaloid]"，分组通常按 source_hint 命名
+CHARACTER_FAVORITES_JSON = BASE_DIR / "character_favorites.json"
 
 # ==========================================
 # 1. 爬虫全局配置与初始化
@@ -273,6 +276,11 @@ class SaveCharacterTranslationRequest(BaseModel):
 
 class ArtistFavoritesRequest(BaseModel):
     # {group_name: [artist1, artist2, ...]}，同一画师可在多个分组
+    groups: dict[str, list[str]]
+
+
+class CharacterFavoritesRequest(BaseModel):
+    # {group_name: [character_display_token, ...]}，分组名通常 = source_hint
     groups: dict[str, list[str]]
 
 # ==========================================
@@ -1410,6 +1418,75 @@ def api_artist_favorites_set(req: ArtistFavoritesRequest):
                 uniq.append(a)
             cleaned[name] = uniq
         _save_artist_favorites(cleaned)
+        return {"ok": True, "groups": cleaned}
+    except Exception as e:
+        return {"ok": False, "msg": str(e)}
+
+
+# ---------------- 角色收藏 ----------------
+
+def _load_character_favorites() -> dict:
+    if not CHARACTER_FAVORITES_JSON.exists():
+        return {}
+    try:
+        import json as _json
+        with open(CHARACTER_FAVORITES_JSON, "r", encoding="utf-8") as f:
+            data = _json.load(f)
+        if not isinstance(data, dict):
+            return {}
+        out: dict[str, list[str]] = {}
+        for k, v in data.items():
+            if not isinstance(k, str) or not isinstance(v, list):
+                continue
+            seen = set()
+            cleaned: list[str] = []
+            for item in v:
+                if not isinstance(item, str):
+                    continue
+                name = item.strip()
+                if not name or name in seen:
+                    continue
+                seen.add(name)
+                cleaned.append(name)
+            out[k] = cleaned
+        return out
+    except Exception as e:
+        print(f"Failed to load character favorites: {e}")
+        return {}
+
+
+def _save_character_favorites(groups: dict) -> None:
+    import json as _json
+    with open(CHARACTER_FAVORITES_JSON, "w", encoding="utf-8") as f:
+        _json.dump(groups, f, ensure_ascii=False, indent=2)
+
+
+@app.get("/api/character_favorites")
+def api_character_favorites_get():
+    return {"ok": True, "groups": _load_character_favorites()}
+
+
+@app.post("/api/character_favorites")
+def api_character_favorites_set(req: CharacterFavoritesRequest):
+    """整体覆盖式写入 {groups}，分组通常按 source_hint 命名以达成「按出处合并」。"""
+    try:
+        cleaned: dict[str, list[str]] = {}
+        for raw_name, chars in (req.groups or {}).items():
+            name = (raw_name or "").strip()
+            if not name:
+                continue
+            seen = set()
+            uniq: list[str] = []
+            for c in chars or []:
+                if not isinstance(c, str):
+                    continue
+                c = c.strip()
+                if not c or c in seen:
+                    continue
+                seen.add(c)
+                uniq.append(c)
+            cleaned[name] = uniq
+        _save_character_favorites(cleaned)
         return {"ok": True, "groups": cleaned}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
