@@ -4,9 +4,9 @@
 
 ---
 
-## 🚀 快速开始（Windows · 三步）
+## 🚀 快速开始（Windows）
 
-> 适合"装好就能用"。需要 [Python 3.9+](https://www.python.org/downloads/)（安装时勾上 **Add to PATH**）和 [Node.js 18+](https://nodejs.org/)。
+> 需要 [Python 3.9+](https://www.python.org/downloads/)和 [Node.js 18+](https://nodejs.org/)。
 
 ```text
 1. 下载/克隆本仓库
@@ -14,7 +14,7 @@
 3. 双击 start.bat   ← 启动桌面端
 ```
 
-`setup.bat` 做的事：
+`setup.bat` 的作用：
 
 - 检查 Python / Node.js
 - 在项目根目录创建独立 `.venv`，跑 `pip install -r requirements.txt`
@@ -43,7 +43,7 @@
 
 任选其一。
 
-venv（推荐）：
+venv：
 
 ```bash
 python -m venv .venv
@@ -51,7 +51,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Anaconda：
+Anaconda（推荐）：
 
 ```bash
 conda create -n danbooru python=3.10
@@ -138,4 +138,4 @@ ffmpeg -version
 ```
 
 ---
-*Created by Antigravity AI assistant.*
+*Created by Claude Code AI assistant.*
