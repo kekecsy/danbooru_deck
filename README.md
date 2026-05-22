@@ -96,7 +96,7 @@ npm run dev        # 开发模式（带热重载 + Electron）
 winget install Gyan.FFmpeg
 ```
 
-或从 [FFMPEG 官网](https://ffmpeg.org/download.html) 下载，把 `bin/` 加入系统 `PATH`，验证：
+或从 [FFMPEG 官网](https://ffmpeg.org/download.html) 下载，把 `bin/` 加入系统 `PATH`，在终端中验证：
 
 ```bash
 ffmpeg -version
