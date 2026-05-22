@@ -299,7 +299,42 @@ watch(pagedImages, (items) => {
 
 // ---------------- 图片浏览器（与抓图页同款体验） ----------------
 const VIDEO_EXTS = ['mp4', 'webm', 'avi', 'mov', 'mkv'];
-const viewer = ref({ open: false, index: 0, imageUrl: '', zoom: 1 });
+const VIEWER_HABITS_KEY = 'crawlerHabits';
+function readViewerHabits() {
+  try { return JSON.parse(localStorage.getItem(VIEWER_HABITS_KEY) || '{}'); }
+  catch { return {}; }
+}
+function writeViewerHabit(key, value) {
+  try {
+    const habits = readViewerHabits();
+    habits[key] = value;
+    localStorage.setItem(VIEWER_HABITS_KEY, JSON.stringify(habits));
+  } catch { /* noop */ }
+}
+const _initHabits = readViewerHabits();
+const viewer = ref({
+  open: false,
+  index: 0,
+  imageUrl: '',
+  zoom: 1,
+  fitMode: _initHabits.viewerFitMode === 'actual' ? 'actual' : 'fit',
+  toolbarPinned: _initHabits.viewerToolbarPinned === true,
+  toolbarHovered: false
+});
+const viewerToolbarVisible = computed(() => viewer.value.toolbarPinned || viewer.value.toolbarHovered);
+function toggleViewerFitMode() {
+  viewer.value.fitMode = viewer.value.fitMode === 'fit' ? 'actual' : 'fit';
+  viewer.value.zoom = 1;
+  writeViewerHabit('viewerFitMode', viewer.value.fitMode);
+}
+function toggleViewerToolbarPin() {
+  viewer.value.toolbarPinned = !viewer.value.toolbarPinned;
+  writeViewerHabit('viewerToolbarPinned', viewer.value.toolbarPinned);
+}
+function onViewerMouseMove(event) {
+  if (viewer.value.toolbarPinned) return;
+  viewer.value.toolbarHovered = event.clientY < 160;
+}
 const viewerItem = computed(() => filteredImages.value[viewer.value.index] || null);
 const viewerIsVideo = computed(() => {
   const ext = (viewerItem.value?.filename || '').split('.').pop().toLowerCase();
@@ -849,8 +884,8 @@ onMounted(loadFavorites);
     </div>
 
     <!-- 大图查看器（与抓图页同款） -->
-    <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer">
-      <div class="viewer-toolbar">
+    <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer" @mousemove="onViewerMouseMove" @mouseleave="viewer.toolbarHovered = false">
+      <div class="viewer-toolbar" :class="{ 'is-hidden': !viewerToolbarVisible }">
         <div class="viewer-toolbar-info">
           <strong>{{ viewerItem?.artist || '未知' }}</strong>
           <span class="muted compact-text" style="color: #ccc;">
@@ -864,6 +899,17 @@ onMounted(loadFavorites);
           <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
           <button class="secondary" @click="stepViewer(1)" :disabled="viewer.index >= filteredImages.length - 1">下一张</button>
           <button
+            class="secondary"
+            @click="toggleViewerFitMode"
+            :title="viewer.fitMode === 'fit' ? '当前：适应窗口，点击切换为原始大小' : '当前：原始大小，点击切换为适应窗口'"
+          >{{ viewer.fitMode === 'fit' ? '⛶ 原始大小' : '▣ 适应窗口' }}</button>
+          <button
+            class="secondary"
+            :class="{ 'pin-active': viewer.toolbarPinned }"
+            @click="toggleViewerToolbarPin"
+            :title="viewer.toolbarPinned ? '已固定信息栏，点击取消固定（恢复鼠标悬浮显示）' : '固定信息栏（默认悬浮显示）'"
+          >{{ viewer.toolbarPinned ? '📌 已固定' : '📌 固定' }}</button>
+          <button
             class="ghost"
             @click="viewerItem && removeImageFavorite(viewerItem)"
             :disabled="!viewerItem"
@@ -873,8 +919,8 @@ onMounted(loadFavorites);
           <button class="ghost" @click="closeViewer" style="color: #fff; border: 1px solid rgba(255,255,255,0.2);">关闭</button>
         </div>
       </div>
-      <div class="viewer-stage" @wheel="onViewerWheel" @click.self="closeViewer">
-        <div class="viewer-image-wrap" :style="{ zoom: viewer.zoom }">
+      <div class="viewer-stage" :class="{ 'is-fit': viewer.fitMode === 'fit' }" @wheel="onViewerWheel" @click.self="closeViewer">
+        <div class="viewer-image-wrap" :class="{ 'is-fit': viewer.fitMode === 'fit' }" :style="{ zoom: viewer.zoom }">
           <video
             v-if="viewer.imageUrl && viewerIsVideo"
             class="viewer-image"

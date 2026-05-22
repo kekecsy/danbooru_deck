@@ -14,7 +14,8 @@ const form = ref({
   mode: habits.mode || 'rank',
   targetDate: '',
   startDate: '',
-  endDate: ''
+  endDate: '',
+  idsText: ''
 });
 
 watch(() => form.value.mode, (newMode) => {
@@ -75,8 +76,106 @@ const viewer = ref({
   open: false,
   index: 0,
   imageUrl: '',
-  zoom: 1
+  zoom: 1,
+  fitMode: habits.viewerFitMode === 'actual' ? 'actual' : 'fit',
+  toolbarPinned: habits.viewerToolbarPinned === true,
+  toolbarHovered: false
 });
+
+const viewerToolbarVisible = computed(() => viewer.value.toolbarPinned || viewer.value.toolbarHovered);
+
+function toggleViewerFitMode() {
+  viewer.value.fitMode = viewer.value.fitMode === 'fit' ? 'actual' : 'fit';
+  viewer.value.zoom = 1;
+  habits.viewerFitMode = viewer.value.fitMode;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+}
+
+function toggleViewerToolbarPin() {
+  viewer.value.toolbarPinned = !viewer.value.toolbarPinned;
+  habits.viewerToolbarPinned = viewer.value.toolbarPinned;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+}
+
+function onViewerMouseMove(event) {
+  if (viewer.value.toolbarPinned) return;
+  viewer.value.toolbarHovered = event.clientY < 160;
+}
+
+// ---------------- 多选/分享 ----------------
+const SELECTION_KEY = 'crawlerSelection';
+function loadSelection() {
+  try {
+    const s = JSON.parse(localStorage.getItem(SELECTION_KEY) || '{}');
+    return {
+      enabled: !!s.enabled,
+      ids: new Set(Array.isArray(s.ids) ? s.ids.map(String) : [])
+    };
+  } catch { return { enabled: false, ids: new Set() }; }
+}
+const _initSel = loadSelection();
+const selection = ref({
+  enabled: _initSel.enabled,
+  ids: _initSel.ids
+});
+function persistSelection() {
+  try {
+    localStorage.setItem(SELECTION_KEY, JSON.stringify({
+      enabled: selection.value.enabled,
+      ids: Array.from(selection.value.ids)
+    }));
+  } catch { /* noop */ }
+}
+function extractPostId(item) {
+  if (!item) return '';
+  const url = item.postUrl || '';
+  const m = url.match(/\/posts\/(\d+)/);
+  return m ? m[1] : '';
+}
+function isItemSelected(item) {
+  const id = extractPostId(item);
+  return !!id && selection.value.ids.has(id);
+}
+function toggleItemSelection(item) {
+  const id = extractPostId(item);
+  if (!id) { showToast('该图片没有 Post ID，无法加入选择', 'warning'); return; }
+  if (selection.value.ids.has(id)) selection.value.ids.delete(id);
+  else selection.value.ids.add(id);
+  persistSelection();
+}
+function setSelectionEnabled(v) {
+  selection.value.enabled = !!v;
+  persistSelection();
+}
+function clearSelection() {
+  selection.value.ids.clear();
+  persistSelection();
+}
+async function copySelectedIds() {
+  const ids = Array.from(selection.value.ids);
+  if (!ids.length) { showToast('还没有勾选任何图片', 'warning'); return; }
+  const text = ids.join(',');
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(`已复制 ${ids.length} 个 ID 到剪贴板`, 'success');
+  } catch (e) {
+    showToast(`复制失败: ${e.message}`, 'error');
+  }
+}
+function parsePastedIds(text) {
+  if (!text) return [];
+  const matches = String(text).match(/\d{3,}/g) || [];
+  return Array.from(new Set(matches));
+}
+const parsedPastedIds = computed(() => parsePastedIds(form.value.idsText));
+function onThumbClick(event, item) {
+  if (event.ctrlKey || event.metaKey) {
+    if (!selection.value.enabled) setSelectionEnabled(true);
+    toggleItemSelection(item);
+    return;
+  }
+  openViewer(item);
+}
 
 const refresh = ref({
   isRunning: false,
@@ -463,7 +562,7 @@ async function ensureService() {
 
 async function startTask() {
   try {
-    const result = await window.desktopAPI.crawler.start({
+    const payload = {
       start_page: Number(form.value.startPage) || 1,
       end_page: Number(form.value.endPage) || 1,
       tags: form.value.tags || '',
@@ -471,7 +570,12 @@ async function startTask() {
       target_date: form.value.targetDate || '',
       start_date: form.value.startDate || '',
       end_date: form.value.endDate || ''
-    });
+    };
+    if (payload.mode === 'download_ids') {
+      const ids = parsePastedIds(form.value.idsText);
+      if (ids.length) payload.ids = ids;
+    }
+    const result = await window.desktopAPI.crawler.start(payload);
     appendLog(result.msg || '已发送启动抓图请求。');
     await syncStatus();
   } catch (error) {
@@ -1717,6 +1821,24 @@ const modeDescription = computed(() => {
         <span>目标日期 <span class="muted compact-text">(留空则用今天)</span></span>
         <input v-model="form.targetDate" type="date" />
       </label>
+      <label class="field-full" v-if="form.mode === 'download_ids'">
+        <span>
+          粘贴 ID 列表
+          <span class="muted compact-text">
+            (支持逗号 / 空格 / 换行 / URL 混合粘贴；留空则使用已收集的 ids_data.json)
+          </span>
+        </span>
+        <textarea
+          v-model="form.idsText"
+          rows="4"
+          placeholder="例如: 8123456,8456789,8987654  或一行一个，或直接粘贴别人复制过来的内容"
+          style="font-family: Consolas, monospace; font-size: 12px; resize: vertical; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,0.6);"
+        />
+        <div class="muted compact-text" style="margin-top: 4px;">
+          已解析到 <strong>{{ parsedPastedIds.length }}</strong> 个 ID
+          <span v-if="parsedPastedIds.length"> · 将下载到{{ form.targetDate || '今天' }}的图库</span>
+        </div>
+      </label>
       <div class="field-grid" v-if="form.mode === 'popular_range'">
         <label>
           <span>起始日期</span>
@@ -1822,6 +1944,12 @@ const modeDescription = computed(() => {
           </span>
         </div>
         <div class="gallery-tools">
+          <button
+            class="secondary tool-btn select-mode-btn"
+            :class="{ active: selection.enabled }"
+            @click="setSelectionEnabled(!selection.enabled)"
+            :title="selection.enabled ? '退出选择模式（已选记录会保留）' : '进入选择模式：可勾选多张图片分享；也可按 Ctrl+点击图片快速选择'"
+          >{{ selection.enabled ? `✓ 选择中 (${selection.ids.size})` : (selection.ids.size ? `☐ 选择模式 (${selection.ids.size})` : '☐ 选择模式') }}</button>
           <select v-model="gallery.sortBy" class="search-input gallery-sort-select" style="width: auto;" title="排序方式">
             <option value="default">默认抓取顺序</option>
             <option value="score">按 score 排序</option>
@@ -1924,8 +2052,17 @@ const modeDescription = computed(() => {
       <div v-if="loadingGallery" class="gallery-empty">正在读取图库...</div>
       <div v-else-if="!activeItems.length" class="gallery-empty">当前日期没有图片</div>
       <div v-else class="gallery-grid" :style="`--card-min-w: ${gallery.cardSize}px`">
-        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item) }">
-          <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @click="openViewer(item)" />
+        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item) }">
+          <div class="thumb-wrap">
+            <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @click="onThumbClick($event, item)" />
+            <button
+              v-if="selection.enabled"
+              class="img-select-toggle"
+              :class="{ active: isItemSelected(item) }"
+              @click.stop="toggleItemSelection(item)"
+              :title="isItemSelected(item) ? '取消选择' : '加入选择'"
+            >{{ isItemSelected(item) ? '✓' : '' }}</button>
+          </div>
           <button
             class="img-fav-toggle"
             :class="{ active: isImageFavorited(item) }"
@@ -1966,8 +2103,15 @@ const modeDescription = computed(() => {
       </div>
     </section>
 
-    <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer">
-      <div class="viewer-toolbar">
+    <div v-if="selection.enabled" class="selection-bar">
+      <span class="selection-count">已选 <strong>{{ selection.ids.size }}</strong> 张</span>
+      <button class="secondary" @click="copySelectedIds" :disabled="!selection.ids.size" title="复制选中图片的 IDs 到剪贴板（逗号分隔）">📋 复制 IDs</button>
+      <button class="ghost" @click="clearSelection" :disabled="!selection.ids.size">清空</button>
+      <button class="ghost" @click="setSelectionEnabled(false)" title="退出选择模式（已选记录会保留）">退出</button>
+    </div>
+
+    <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer" @mousemove="onViewerMouseMove" @mouseleave="viewer.toolbarHovered = false">
+      <div class="viewer-toolbar" :class="{ 'is-hidden': !viewerToolbarVisible }">
         <div class="viewer-toolbar-info">
           <div class="viewer-meta-block">
             <span class="viewer-meta-label">画师</span>
@@ -2024,6 +2168,17 @@ const modeDescription = computed(() => {
           <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
           <button class="secondary" @click="stepViewer(1)" :disabled="viewer.index >= viewerItems.length - 1">下一张</button>
           <button
+            class="secondary"
+            @click="toggleViewerFitMode"
+            :title="viewer.fitMode === 'fit' ? '当前：适应窗口，点击切换为原始大小' : '当前：原始大小，点击切换为适应窗口'"
+          >{{ viewer.fitMode === 'fit' ? '⛶ 原始大小' : '▣ 适应窗口' }}</button>
+          <button
+            class="secondary"
+            :class="{ 'pin-active': viewer.toolbarPinned }"
+            @click="toggleViewerToolbarPin"
+            :title="viewer.toolbarPinned ? '已固定信息栏，点击取消固定（恢复鼠标悬浮显示）' : '固定信息栏（默认悬浮显示）'"
+          >{{ viewer.toolbarPinned ? '📌 已固定' : '📌 固定' }}</button>
+          <button
             class="viewer-fav-btn"
             :class="{ active: viewerItem && isImageFavorited(viewerItem) }"
             @click="viewerItem && toggleImageFavorite(viewerItem)"
@@ -2035,8 +2190,8 @@ const modeDescription = computed(() => {
           <button class="ghost" @click="closeViewer" style="color: #fff; border: 1px solid rgba(255,255,255,0.2);">关闭</button>
         </div>
       </div>
-      <div class="viewer-stage" @wheel="onViewerWheel" @click.self="closeViewer">
-        <div class="viewer-image-wrap" :style="{ zoom: viewer.zoom }">
+      <div class="viewer-stage" :class="{ 'is-fit': viewer.fitMode === 'fit' }" @wheel="onViewerWheel" @click.self="closeViewer">
+        <div class="viewer-image-wrap" :class="{ 'is-fit': viewer.fitMode === 'fit' }" :style="{ zoom: viewer.zoom }">
           <video
             v-if="viewer.imageUrl && viewerIsVideo"
             class="viewer-image"
@@ -3453,6 +3608,89 @@ const modeDescription = computed(() => {
   background: linear-gradient(135deg, #ff5b8a, #d12869);
   color: #fff;
   box-shadow: 0 2px 8px rgba(209, 40, 105, 0.5);
+}
+
+.img-select-toggle {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  z-index: 3;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 15px;
+  line-height: 1;
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.18s, transform 0.12s, border-color 0.18s;
+  backdrop-filter: blur(4px);
+}
+.thumb-wrap {
+  position: relative;
+  width: 100%;
+  line-height: 0;
+}
+.img-select-toggle:hover { background: rgba(0, 0, 0, 0.7); transform: scale(1.08); }
+.img-select-toggle.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  border-color: #fff;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+.image-card.is-selected {
+  outline: 3px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.select-mode-btn.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  border: none;
+  color: #fff;
+}
+
+.selection-bar {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: rgba(20, 16, 10, 0.88);
+  color: #fff;
+  box-shadow: 0 10px 32px rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(8px);
+}
+.selection-bar .selection-count {
+  font-size: 13px;
+  color: #fff;
+}
+.selection-bar .selection-count strong {
+  color: #ffd166;
+  font-size: 16px;
+  margin: 0 2px;
+}
+.selection-bar button {
+  padding: 6px 14px;
+  font-size: 13px;
+}
+.selection-bar .ghost {
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: transparent;
+}
+.selection-bar .ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
 }
 
 /* 大图浏览器底部的「收藏」切换按钮 */

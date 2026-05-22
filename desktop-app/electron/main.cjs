@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, clipboard, nativeImage, protocol, net } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard, nativeImage, protocol, net } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
@@ -55,12 +55,14 @@ function createWindow() {
     minWidth: 1240,
     minHeight: 760,
     backgroundColor: '#f3ede2',
+    autoHideMenuBar: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false
     }
   });
+  win.setMenuBarVisibility(false);
 
   if (isDev) {
     win.loadURL('http://localhost:5173');
@@ -488,6 +490,7 @@ ipcMain.handle('crawler:status', async () => {
 });
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   protocol.handle('local', (request) => {
     const url = request.url.replace(/^local:\/\//, '');
     const filePath = decodeURIComponent(url);

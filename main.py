@@ -328,6 +328,7 @@ class StartRequest(BaseModel):
     target_date: str = ""  # popular 模式用，可指定日期
     start_date: str = ""   # popular_range
     end_date: str = ""     # popular_range
+    ids: list = []         # download_ids 模式可选：内联 IDs；非空则覆盖目标日期的 ids_data.json
 
 class OpenLocalRequest(BaseModel):
     local_path: str
@@ -616,14 +617,30 @@ def grabber_collect_ids(db_data_inst, page_num, filter_tags):
     return new_hot_artists, page_need_update
 
 # --- mode: download_ids (从已收集的 IDs 批量下载) ---
-def task_download_ids(db_data_inst, filter_tags):
+def task_download_ids(db_data_inst, filter_tags, inline_ids=None):
     global daily_viewer_data
     _ensure_today(db_data_inst)
     daily_viewer_data = db_data_inst.load_viewer_data()
-    ids_data = db_data_inst.load_ids_data()
+
+    if inline_ids:
+        # 用户从别的客户端复制 IDs 粘贴过来：去重 + 仅保留纯数字串，写入当天 ids_data.json
+        cleaned = []
+        seen = set()
+        for raw in inline_ids:
+            s = str(raw).strip()
+            if not s or not s.isdigit() or s in seen:
+                continue
+            seen.add(s)
+            cleaned.append(s)
+        ids_data = cleaned
+        if ids_data:
+            db_data_inst.save_ids_data(ids_data)
+            append_log(f"[DownloadIDs] 已写入 {len(ids_data)} 个粘贴的 ID 到 {db_data_inst.today_str}/ids_data.json")
+    else:
+        ids_data = db_data_inst.load_ids_data()
 
     if not ids_data:
-        append_log("[DownloadIDs] 没有已收集的 ID，请先用「仅收集ID」模式收集。")
+        append_log("[DownloadIDs] 没有可下载的 ID（既未粘贴也未先用「仅收集ID」模式收集）。")
         return
 
     append_log(f"[DownloadIDs] 开始下载，共 {len(ids_data)} 个 ID")
@@ -685,11 +702,11 @@ def task_download_ids(db_data_inst, filter_tags):
     append_log(f"[DownloadIDs] 完成，成功下载 {success_count} 张图片。")
 
 
-def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="", end_date=""):
+def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="", end_date="", inline_ids=None):
     global scraper_thread
     try:
         if mode == "download_ids":
-            task_download_ids(db_data, state.filter_tags)
+            task_download_ids(db_data, state.filter_tags, inline_ids)
         elif mode == "popular_range":
             if not start_date or not end_date:
                 append_log("日期范围缺失。")
@@ -816,7 +833,7 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
 
     scraper_thread = threading.Thread(
         target=scraper_task,
-        args=(req.start_page, req.end_page, req.mode, req.target_date, req.start_date, req.end_date),
+        args=(req.start_page, req.end_page, req.mode, req.target_date, req.start_date, req.end_date, req.ids),
         daemon=True
     )
     scraper_thread.start()
