@@ -35,9 +35,13 @@ const editor = reactive({
   fillMode: 'mosaic',
   opacity: 1,
   stripeText: '该信息已被管理员撤回',
-  stripeFontFamily: 'Microsoft YaHei',
-  stripeFontSize: 26,
-  stripeOrientation: 'horizontal',
+  stripeFontFamily: typeof editorHabits.stripeFontFamily === 'string' && editorHabits.stripeFontFamily
+    ? editorHabits.stripeFontFamily
+    : 'Microsoft YaHei',
+  stripeFontSize: Number.isFinite(editorHabits.stripeFontSize) && editorHabits.stripeFontSize > 0
+    ? editorHabits.stripeFontSize
+    : 26,
+  stripeOrientation: editorHabits.stripeOrientation === 'vertical' ? 'vertical' : 'horizontal',
   imageDataUrl: null,
   imageOverlayName: '',
   revealColor: '#000000',
@@ -55,6 +59,14 @@ watch(() => editor.outputMaxEdge, (v) => {
   // 0 / 负数都按"原图"处理；写盘的值统一规范化一下，避免下次进来加载到 NaN
   const normalized = Number.isFinite(v) && v > 0 ? Math.round(v) : 0;
   editorHabits.outputMaxEdge = normalized;
+  try { localStorage.setItem(STORAGE_KEY_EDITOR_HABITS, JSON.stringify(editorHabits)); }
+  catch { /* localStorage 异常时静默 */ }
+});
+
+watch(() => [editor.stripeFontSize, editor.stripeFontFamily, editor.stripeOrientation], ([size, family, orientation]) => {
+  if (Number.isFinite(size) && size > 0) editorHabits.stripeFontSize = Math.round(size);
+  if (typeof family === 'string' && family) editorHabits.stripeFontFamily = family;
+  editorHabits.stripeOrientation = orientation === 'vertical' ? 'vertical' : 'horizontal';
   try { localStorage.setItem(STORAGE_KEY_EDITOR_HABITS, JSON.stringify(editorHabits)); }
   catch { /* localStorage 异常时静默 */ }
 });
@@ -208,21 +220,24 @@ function drawStripe(ctx, layer, scale) {
   const h = layer.height * scale;
   ctx.save();
   ctx.globalAlpha = layer.opacity;
-  
+
   // Removed background box for watermark style
 
   ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-  ctx.font = `900 ${Math.max(12, layer.stripeFontSize * scale)}px "${layer.stripeFontFamily}"`;
+  // 不再用 Math.max 兜底，保证预览 ↔ 导出严格按 scale 等比；
+  // 否则缩小到 scale*fontSize < 12 时预览会偷偷把字体撑大到 12，
+  // 而导出永远 scale=1（不触发下限）→ 视觉上"字 vs 图"比例对不上。
+  ctx.font = `900 ${layer.stripeFontSize * scale}px "${layer.stripeFontFamily}"`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  
+
   ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
   ctx.shadowBlur = 4 * scale;
   ctx.shadowOffsetX = 2 * scale;
   ctx.shadowOffsetY = 2 * scale;
 
   ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
-  ctx.lineWidth = Math.max(1, 3 * scale);
+  ctx.lineWidth = 3 * scale;
   ctx.lineJoin = 'round';
 
   if (layer.stripeOrientation === 'vertical') {
@@ -481,7 +496,7 @@ async function loadImageFromDataUrl(dataUrl, meta = {}) {
   editor.nextId = 1;
   if (editor.sourceMeta.artist) editor.stripeText = editor.sourceMeta.artist;
   await nextTick();
-  fitToWindow();
+  actualSize();
 }
 
 async function loadImageFromPath(filePath, meta = {}) {
@@ -941,11 +956,7 @@ onBeforeUnmount(() => {
     </aside>
 
     <section class="panel card gallery-panel">
-      <div class="canvas-head">
-        <div>
-          <h2>{{ editor.imageName || '未载入图片' }}</h2>
-          <p class="inline-note">拖拽矩形创建区域。透明背景文字不会铺白底，作者和角色可以一键填入。</p>
-        </div>
+      <div class="canvas-head canvas-head-compact">
         <div class="stats">
           <span>{{ editor.image ? `${editor.image.width} x ${editor.image.height}` : '无图片' }}</span>
           <span>{{ Math.round(editor.zoom * 100) }}%</span>

@@ -151,23 +151,114 @@ function clearSelection() {
   selection.value.ids.clear();
   persistSelection();
 }
+// 压缩 IDs：排序后保存"首 ID + 后续 delta"，每个数转 base36，点号分隔
+// 例：[11429753, 11430253] → "dbids:6tewdt.dw"（~25% 收益，多 ID 时 65%+）
+function compressIds(idStrings) {
+  const nums = Array.from(idStrings).map(s => Number(s)).filter(n => Number.isFinite(n) && n > 0);
+  if (!nums.length) return '';
+  nums.sort((a, b) => a - b);
+  const dedup = [];
+  let last = -1;
+  for (const n of nums) {
+    if (n !== last) { dedup.push(n); last = n; }
+  }
+  const parts = [dedup[0].toString(36)];
+  for (let i = 1; i < dedup.length; i++) {
+    parts.push((dedup[i] - dedup[i - 1]).toString(36));
+  }
+  return 'dbids:' + parts.join('.');
+}
+function decompressIds(text) {
+  // 返回 string[] 或 null（不是压缩格式时）
+  const m = String(text || '').match(/dbids:([0-9a-z.]+)/i);
+  if (!m) return null;
+  const parts = m[1].split('.').filter(Boolean);
+  if (!parts.length) return null;
+  const result = [];
+  let cur = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const v = parseInt(parts[i], 36);
+    if (!Number.isFinite(v) || v < 0) return null;
+    cur = i === 0 ? v : cur + v;
+    if (cur <= 0) return null;
+    result.push(String(cur));
+  }
+  return result;
+}
+
 async function copySelectedIds() {
   const ids = Array.from(selection.value.ids);
   if (!ids.length) { showToast('还没有勾选任何图片', 'warning'); return; }
   const text = ids.join(',');
   try {
     await navigator.clipboard.writeText(text);
-    showToast(`已复制 ${ids.length} 个 ID 到剪贴板`, 'success');
+    showToast(`已复制 ${ids.length} 个 ID（${text.length} 字符）`, 'success');
   } catch (e) {
     showToast(`复制失败: ${e.message}`, 'error');
   }
 }
+
+// ID 压缩工具（独立面板）：把任意 IDs 文本压成 dbids:... ，或反向解出明文
+const cryptoTool = ref({ open: false, input: '', output: '' });
+function openCryptoTool() {
+  cryptoTool.value.open = true;
+}
+function closeCryptoTool() {
+  cryptoTool.value.open = false;
+}
+function loadSelectionToCryptoInput() {
+  const ids = Array.from(selection.value.ids);
+  if (!ids.length) { showToast('当前没有已选图片', 'warning'); return; }
+  cryptoTool.value.input = ids.join(',');
+}
+function cryptoEncrypt() {
+  const ids = parsePastedIds(cryptoTool.value.input);
+  if (!ids.length) { showToast('没解析到任何 ID', 'warning'); return; }
+  const out = compressIds(ids);
+  cryptoTool.value.output = out;
+  const savedPct = cryptoTool.value.input.length > 0
+    ? Math.round((1 - out.length / cryptoTool.value.input.length) * 100)
+    : 0;
+  showToast(`加密完成 · ${ids.length} 个 ID · ${out.length} 字符（比输入省 ${savedPct >= 0 ? savedPct : 0}%）`, 'success');
+}
+function cryptoDecrypt() {
+  const decoded = decompressIds(cryptoTool.value.input);
+  if (!decoded || !decoded.length) {
+    // 不是压缩格式：尝试明文解析，让用户也能用来"规范化/去重"
+    const fallback = parsePastedIds(cryptoTool.value.input);
+    if (!fallback.length) { showToast('没解析到任何 ID', 'warning'); return; }
+    cryptoTool.value.output = fallback.join(',');
+    showToast(`输入是明文，已规范化为 ${fallback.length} 个 ID（${cryptoTool.value.output.length} 字符）`, 'info');
+    return;
+  }
+  cryptoTool.value.output = decoded.join(',');
+  showToast(`解密完成 · ${decoded.length} 个 ID（${cryptoTool.value.output.length} 字符）`, 'success');
+}
+async function copyCryptoOutput() {
+  if (!cryptoTool.value.output) { showToast('输出框是空的', 'warning'); return; }
+  try {
+    await navigator.clipboard.writeText(cryptoTool.value.output);
+    showToast(`已复制输出（${cryptoTool.value.output.length} 字符）`, 'success');
+  } catch (e) {
+    showToast(`复制失败: ${e.message}`, 'error');
+  }
+}
+function swapCryptoIO() {
+  const tmp = cryptoTool.value.input;
+  cryptoTool.value.input = cryptoTool.value.output;
+  cryptoTool.value.output = tmp;
+}
 function parsePastedIds(text) {
   if (!text) return [];
+  // 优先识别压缩格式
+  const decompressed = decompressIds(text);
+  if (decompressed && decompressed.length) return decompressed;
+  // 回退：从任意文本中抠出 3 位以上数字（兼容旧的逗号/空格/换行/URL 混合）
   const matches = String(text).match(/\d{3,}/g) || [];
   return Array.from(new Set(matches));
 }
 const parsedPastedIds = computed(() => parsePastedIds(form.value.idsText));
+const isPastedCompressed = computed(() => /dbids:[0-9a-z.]+/i.test(form.value.idsText || ''));
 function onThumbClick(event, item) {
   if (event.ctrlKey || event.metaKey) {
     if (!selection.value.enabled) setSelectionEnabled(true);
@@ -175,6 +266,53 @@ function onThumbClick(event, item) {
     return;
   }
   openViewer(item);
+}
+
+// 只看已选 / 已选清单 / 翻页选择器
+const showOnlySelected = ref(false);
+const selectionListOpen = ref(false);
+const pagePicker = ref({ open: false });
+
+// 已选清零时自动关掉「只看已选」，否则界面会一张图都不剩且按钮被禁用导致卡死
+watch(() => selection.value.ids.size, (size) => {
+  if (!size && showOnlySelected.value) showOnlySelected.value = false;
+});
+
+function removeFromSelection(id) {
+  selection.value.ids.delete(id);
+  persistSelection();
+}
+
+// 当前日期里能找到的已选 ID → 第几页 & item 映射
+const selectionIndex = computed(() => {
+  const map = new Map();
+  const list = filteredLocalImages.value;
+  const ps = gallery.value.pageSize || 1;
+  for (let i = 0; i < list.length; i++) {
+    const id = extractPostId(list[i]);
+    if (id && selection.value.ids.has(id)) {
+      map.set(id, { item: list[i], page: Math.floor(i / ps) + 1, indexInFiltered: i });
+    }
+  }
+  return map;
+});
+const selectionInCurrentDate = computed(() => {
+  const idx = selectionIndex.value;
+  return Array.from(selection.value.ids).filter(id => idx.has(id)).map(id => ({
+    id,
+    ...idx.get(id)
+  }));
+});
+const selectionOtherDates = computed(() => {
+  const idx = selectionIndex.value;
+  return Array.from(selection.value.ids).filter(id => !idx.has(id));
+});
+
+function jumpToSelected(id) {
+  const found = selectionIndex.value.get(id);
+  if (!found) return;
+  gallery.value.page = found.page;
+  selectionListOpen.value = false;
 }
 
 const refresh = ref({
@@ -249,6 +387,11 @@ const filteredLocalImages = computed(() => {
 
     if (hotOnly && (item.score || 0) < threshold) return false;
 
+    if (showOnlySelected.value) {
+      const id = extractPostId(item);
+      if (!id || !selection.value.ids.has(id)) return false;
+    }
+
     if (!keyword) return true;
     const artistMatch = (item.artist || '').toLowerCase().includes(keyword);
     let charMatch = false;
@@ -309,13 +452,16 @@ const activePage = computed({
 const pageNumbers = computed(() => {
   const total = activeTotalPages.value;
   const cur = activePage.value;
-  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  if (total <= 9) return Array.from({ length: total }, (_, i) => i + 1);
+  // 中间窗口默认覆盖 cur±2 共 5 个；贴边时把窗口往里挪，保证至少看到 5 个连号
+  let start = Math.max(2, cur - 2);
+  let end = Math.min(total - 1, cur + 2);
+  if (cur <= 4) { start = 2; end = 6; }
+  else if (cur >= total - 3) { start = total - 5; end = total - 1; }
   const out = [1];
-  if (cur > 3) out.push('…');
-  const start = Math.max(2, cur - 1);
-  const end = Math.min(total - 1, cur + 1);
+  if (start > 2) out.push('…');
   for (let i = start; i <= end; i++) out.push(i);
-  if (cur < total - 2) out.push('…');
+  if (end < total - 1) out.push('…');
   out.push(total);
   return out;
 });
@@ -929,6 +1075,13 @@ function onDocClickForTranslateMenu(e) {
   const dropdown = document.querySelector('.translate-dropdown');
   if (dropdown && !dropdown.contains(e.target)) {
     translateMenu.value.open = false;
+  }
+}
+function onDocClickForPagePicker(e) {
+  if (!pagePicker.value.open) return;
+  const host = document.querySelector('.pg-picker-host');
+  if (host && !host.contains(e.target)) {
+    pagePicker.value.open = false;
   }
 }
 
@@ -1762,6 +1915,7 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeyDown);
   document.addEventListener('click', onDocClickForRefreshMenu);
   document.addEventListener('click', onDocClickForTranslateMenu);
+  document.addEventListener('click', onDocClickForPagePicker);
 });
 
 onBeforeUnmount(() => {
@@ -1769,6 +1923,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown);
   document.removeEventListener('click', onDocClickForRefreshMenu);
   document.removeEventListener('click', onDocClickForTranslateMenu);
+  document.removeEventListener('click', onDocClickForPagePicker);
 });
 
 const modeDescription = computed(() => {
@@ -1825,17 +1980,18 @@ const modeDescription = computed(() => {
         <span>
           粘贴 ID 列表
           <span class="muted compact-text">
-            (支持逗号 / 空格 / 换行 / URL 混合粘贴；留空则使用已收集的 ids_data.json)
+            (支持压缩格式 dbids:… / 逗号 / 空格 / 换行 / URL 混合粘贴；留空则使用已收集的 ids_data.json)
           </span>
         </span>
         <textarea
           v-model="form.idsText"
           rows="4"
-          placeholder="例如: 8123456,8456789,8987654  或一行一个，或直接粘贴别人复制过来的内容"
+          placeholder="支持两种格式：&#10;1) 压缩：dbids:6tewdt.dw （别人复制按钮生成的）&#10;2) 明文：8123456,8456789,8987654 或一行一个 或直接粘贴 URL"
           style="font-family: Consolas, monospace; font-size: 12px; resize: vertical; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,0.6);"
         />
         <div class="muted compact-text" style="margin-top: 4px;">
           已解析到 <strong>{{ parsedPastedIds.length }}</strong> 个 ID
+          <span v-if="isPastedCompressed"> · 🗜 识别为压缩格式</span>
           <span v-if="parsedPastedIds.length"> · 将下载到{{ form.targetDate || '今天' }}的图库</span>
         </div>
       </label>
@@ -2049,8 +2205,31 @@ const modeDescription = computed(() => {
         @select="loadGallery"
       />
 
+      <div v-if="selection.enabled" class="selection-bar inline-bar">
+        <span class="selection-count">已选 <strong>{{ selection.ids.size }}</strong> 张</span>
+        <button
+          class="secondary"
+          :class="{ active: showOnlySelected }"
+          @click="showOnlySelected = !showOnlySelected"
+          :disabled="!showOnlySelected && !selection.ids.size"
+          title="切换：只显示当前日期里已选的图片"
+        >{{ showOnlySelected ? '✓ 只看已选' : '👁 只看已选' }}</button>
+        <button
+          class="secondary"
+          @click="selectionListOpen = true"
+          :disabled="!selection.ids.size"
+          title="查看所有已选 ID（可逐个跳转/移除）"
+        >📋 已选清单</button>
+        <button class="secondary" @click="copySelectedIds" :disabled="!selection.ids.size" title="复制选中图片的 IDs 到剪贴板（明文逗号分隔）">📤 复制 IDs</button>
+        <button class="secondary" @click="openCryptoTool" title="打开加密工具：把任意 IDs 文本压缩成短字符串方便分享">🗜 加密工具</button>
+        <button class="ghost" @click="clearSelection" :disabled="!selection.ids.size">清空</button>
+        <button class="ghost" @click="setSelectionEnabled(false)" title="退出选择模式（已选记录会保留）">退出</button>
+      </div>
+
       <div v-if="loadingGallery" class="gallery-empty">正在读取图库...</div>
-      <div v-else-if="!activeItems.length" class="gallery-empty">当前日期没有图片</div>
+      <div v-else-if="!activeItems.length" class="gallery-empty">
+        {{ showOnlySelected ? '当前日期没有已选图片，切换日期试试' : '当前日期没有图片' }}
+      </div>
       <div v-else class="gallery-grid" :style="`--card-min-w: ${gallery.cardSize}px`">
         <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item) }">
           <div class="thumb-wrap">
@@ -2095,19 +2274,123 @@ const modeDescription = computed(() => {
         >{{ n }}</button>
         <button class="ghost pg-btn" @click="gotoPage(activePage + 1)" :disabled="activePage >= activeTotalPages" title="下一页 (→)">›</button>
         <button class="ghost pg-btn" @click="gotoPage(activeTotalPages)" :disabled="activePage >= activeTotalPages" title="末页">»</button>
-        <span class="pg-jump">
-          跳转
+        <span class="pg-jump pg-picker-host">
+          <button class="pg-jump-btn" @click="doJump" title="跳转到输入的页码">跳转</button>
           <input type="number" min="1" :max="activeTotalPages" v-model.number="jumpInput" @keyup.enter="doJump" />
+          <button
+            class="pg-jump-btn pg-jump-go"
+            :class="{ active: pagePicker.open }"
+            @click.stop="pagePicker.open = !pagePicker.open"
+            :title="pagePicker.open ? '关闭页码列表' : '展开页码列表（10列/行）'"
+          >👆</button>
           / {{ activeTotalPages }}
+          <div v-if="pagePicker.open" class="pg-picker-panel" @click.stop>
+            <div class="pg-picker-head">
+              <span>共 {{ activeTotalPages }} 页 · 点击跳转</span>
+              <button class="ghost" @click="pagePicker.open = false">×</button>
+            </div>
+            <div class="pg-picker-grid">
+              <button
+                v-for="n in activeTotalPages"
+                :key="`picker-${n}`"
+                class="pg-picker-cell"
+                :class="{ active: n === activePage }"
+                @click="gotoPage(n); pagePicker.open = false"
+              >{{ n }}</button>
+            </div>
+          </div>
         </span>
       </div>
     </section>
 
-    <div v-if="selection.enabled" class="selection-bar">
-      <span class="selection-count">已选 <strong>{{ selection.ids.size }}</strong> 张</span>
-      <button class="secondary" @click="copySelectedIds" :disabled="!selection.ids.size" title="复制选中图片的 IDs 到剪贴板（逗号分隔）">📋 复制 IDs</button>
-      <button class="ghost" @click="clearSelection" :disabled="!selection.ids.size">清空</button>
-      <button class="ghost" @click="setSelectionEnabled(false)" title="退出选择模式（已选记录会保留）">退出</button>
+    <div v-if="selectionListOpen" class="viewer-overlay" @click.self="selectionListOpen = false" style="z-index: 10000; display: flex; justify-content: center; align-items: center; padding: 24px;">
+      <div class="selection-list-card">
+        <div class="selection-list-head">
+          <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">已选清单 · {{ selection.ids.size }} 个</h3>
+          <button class="ghost" @click="selectionListOpen = false" style="color: var(--muted);">×</button>
+        </div>
+        <div v-if="!selection.ids.size" class="gallery-empty" style="min-height: 120px;">还没有选择任何图片</div>
+        <div v-else class="selection-list-body">
+          <div v-if="selectionInCurrentDate.length" class="selection-list-section">
+            <div class="selection-list-section-title">本日期可定位 · {{ selectionInCurrentDate.length }} 个</div>
+            <div class="selection-list-grid">
+              <div v-for="entry in selectionInCurrentDate" :key="`cur-${entry.id}`" class="selection-list-item">
+                <img class="selection-list-thumb" :src="entry.item.thumbUrl" :alt="entry.id" loading="lazy" />
+                <div class="selection-list-item-info">
+                  <span class="selection-list-id">#{{ entry.id }}</span>
+                  <span class="muted compact-text">第 {{ entry.page }} 页</span>
+                </div>
+                <div class="selection-list-item-actions">
+                  <button class="secondary" @click="jumpToSelected(entry.id)" title="跳转到该图所在页">跳转</button>
+                  <button class="ghost" @click="removeFromSelection(entry.id)" title="从选择中移除">移除</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-if="selectionOtherDates.length" class="selection-list-section">
+            <div class="selection-list-section-title">其他日期 / 当前过滤外 · {{ selectionOtherDates.length }} 个</div>
+            <div class="selection-list-other">
+              <span v-for="id in selectionOtherDates" :key="`oth-${id}`" class="selection-chip">
+                #{{ id }}
+                <button @click="removeFromSelection(id)" title="移除">×</button>
+              </span>
+            </div>
+            <p class="muted compact-text" style="margin: 8px 0 0;">提示：这些 ID 在当前日期 / 过滤条件下找不到。切换日期或关掉「只看高分」「格式过滤」可能能看到。</p>
+          </div>
+        </div>
+        <div class="selection-list-foot">
+          <button class="ghost" @click="selectionListOpen = false">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="cryptoTool.open" class="viewer-overlay" @click.self="closeCryptoTool" style="z-index: 10000; display: flex; justify-content: center; align-items: center; padding: 24px;">
+      <div class="crypto-tool-card">
+        <div class="crypto-tool-head">
+          <div>
+            <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">🗜 ID 加密 / 解密工具</h3>
+            <p class="muted compact-text" style="margin: 4px 0 0;">把长长的 ID 列表压成短字符串方便分享；也能反向还原。</p>
+          </div>
+          <button class="ghost" @click="closeCryptoTool" style="color: var(--muted);">×</button>
+        </div>
+
+        <div class="crypto-tool-row">
+          <span class="crypto-tool-label">输入</span>
+          <span class="muted compact-text">{{ cryptoTool.input.length }} 字符</span>
+          <button class="ghost crypto-tool-mini" @click="loadSelectionToCryptoInput" :disabled="!selection.ids.size" title="把当前选择的所有 IDs 填到输入框">⬇ 载入当前选择 ({{ selection.ids.size }})</button>
+          <button class="ghost crypto-tool-mini" @click="cryptoTool.input = ''" :disabled="!cryptoTool.input">清空</button>
+        </div>
+        <textarea
+          v-model="cryptoTool.input"
+          class="crypto-tool-textarea"
+          rows="4"
+          placeholder="粘贴你要加密的明文 IDs（逗号 / 空格 / 换行 / URL 都行），或粘贴压缩格式 dbids:... 用于解密"
+        />
+
+        <div class="crypto-tool-actions">
+          <button class="secondary" @click="cryptoEncrypt" :disabled="!cryptoTool.input.trim()">🗜 加密（压缩）</button>
+          <button class="secondary" @click="cryptoDecrypt" :disabled="!cryptoTool.input.trim()">🔓 解密（还原）</button>
+          <button class="ghost" @click="swapCryptoIO" :disabled="!cryptoTool.output" title="把输出搬回输入，方便再次加/解密">⇅ 交换</button>
+        </div>
+
+        <div class="crypto-tool-row">
+          <span class="crypto-tool-label">输出</span>
+          <span class="muted compact-text">{{ cryptoTool.output.length }} 字符</span>
+        </div>
+        <textarea
+          v-model="cryptoTool.output"
+          class="crypto-tool-textarea"
+          rows="4"
+          readonly
+          placeholder="结果会出现在这里"
+        />
+
+        <div class="crypto-tool-foot">
+          <span class="muted compact-text">压缩格式 = base36 增量编码，100+ 个 ID 通常省 60%+</span>
+          <button class="ghost" @click="closeCryptoTool">关闭</button>
+          <button @click="copyCryptoOutput" :disabled="!cryptoTool.output">📋 复制输出</button>
+        </div>
+      </div>
     </div>
 
     <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer" @mousemove="onViewerMouseMove" @mouseleave="viewer.toolbarHovered = false">
@@ -3671,11 +3954,54 @@ const modeDescription = computed(() => {
   border: 1px solid rgba(255, 255, 255, 0.15);
   backdrop-filter: blur(8px);
 }
-.selection-bar .selection-count {
+.selection-bar.inline-bar {
+  position: relative;
+  bottom: auto;
+  left: auto;
+  transform: none;
+  z-index: 1;
+  margin: 6px 0 4px;
+  padding: 8px 14px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, rgba(243, 223, 212, 0.85), rgba(235, 208, 192, 0.85));
+  color: var(--ink);
+  border: 1px solid rgba(182, 84, 52, 0.2);
+  box-shadow: 0 2px 10px rgba(74, 53, 25, 0.08);
+  backdrop-filter: none;
+  flex-wrap: wrap;
+}
+.selection-bar.inline-bar .selection-count {
+  color: var(--ink);
+  font-size: 13px;
+}
+.selection-bar.inline-bar .selection-count strong {
+  color: var(--accent-deep);
+  font-size: 15px;
+  margin: 0 2px;
+}
+.selection-bar.inline-bar button {
+  padding: 5px 12px;
+  font-size: 12px;
+}
+.selection-bar.inline-bar .ghost {
+  color: var(--muted);
+  border: 1px solid rgba(74, 53, 25, 0.18);
+  background: rgba(255, 255, 255, 0.5);
+}
+.selection-bar.inline-bar .ghost:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.85);
+  color: var(--ink);
+}
+.selection-bar.inline-bar .secondary.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+  border: none;
+}
+.selection-count {
   font-size: 13px;
   color: #fff;
 }
-.selection-bar .selection-count strong {
+.selection-count strong {
   color: #ffd166;
   font-size: 16px;
   margin: 0 2px;
@@ -3691,6 +4017,251 @@ const modeDescription = computed(() => {
 }
 .selection-bar .ghost:hover:not(:disabled) {
   background: rgba(255, 255, 255, 0.1);
+}
+
+/* 页码列表选择器 */
+.pg-picker-host {
+  position: relative;
+}
+.pg-jump-btn.pg-jump-go.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+  border-color: transparent;
+}
+.pg-picker-panel {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  z-index: 50;
+  background: #fff;
+  border: 1px solid rgba(74, 53, 25, 0.18);
+  border-radius: 12px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
+  padding: 10px 12px;
+  min-width: 360px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+}
+.pg-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.pg-picker-head .ghost {
+  background: transparent;
+  border: none;
+  font-size: 16px;
+  color: var(--muted);
+  padding: 0 4px;
+  cursor: pointer;
+}
+.pg-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  gap: 4px;
+  overflow-y: auto;
+  padding: 2px;
+}
+.pg-picker-cell {
+  min-width: 30px;
+  padding: 5px 0;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 6px;
+  background: linear-gradient(135deg, #fbf4eb, #f2e8db);
+  color: var(--ink);
+  border: 1px solid rgba(74, 53, 25, 0.08);
+  cursor: pointer;
+  transition: background 0.15s, transform 0.1s;
+}
+.pg-picker-cell:hover {
+  background: linear-gradient(135deg, #f3dfd4, #ebd0c0);
+}
+.pg-picker-cell.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+  box-shadow: 0 2px 6px rgba(182, 84, 52, 0.25);
+}
+
+/* 已选清单弹窗 */
+.selection-list-card {
+  width: 720px;
+  max-width: 92vw;
+  max-height: 86vh;
+  background: rgba(255, 255, 255, 0.97);
+  border-radius: 14px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.selection-list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.selection-list-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 4px;
+}
+.selection-list-section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-deep);
+  margin-bottom: 6px;
+}
+.selection-list-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+.selection-list-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  background: rgba(243, 223, 212, 0.4);
+  border: 1px solid rgba(182, 84, 52, 0.14);
+  border-radius: 10px;
+}
+.selection-list-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #eee;
+  flex: 0 0 auto;
+}
+.selection-list-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.selection-list-id {
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  color: var(--ink);
+  font-weight: 600;
+}
+.selection-list-item-actions {
+  display: flex;
+  gap: 4px;
+}
+.selection-list-item-actions button {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.selection-list-other {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.selection-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px 4px 10px;
+  border-radius: 999px;
+  background: rgba(243, 223, 212, 0.5);
+  border: 1px solid rgba(182, 84, 52, 0.18);
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  color: var(--ink);
+}
+.selection-chip button {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.selection-chip button:hover {
+  color: #d12869;
+}
+.selection-list-foot {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* 加密工具弹窗 */
+.crypto-tool-card {
+  width: 640px;
+  max-width: 92vw;
+  max-height: 86vh;
+  background: rgba(255, 255, 255, 0.97);
+  border-radius: 14px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+  padding: 18px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.crypto-tool-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.crypto-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+.crypto-tool-label {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--accent-deep);
+}
+.crypto-tool-mini {
+  padding: 3px 10px;
+  font-size: 11px;
+  margin-left: auto;
+}
+.crypto-tool-row .crypto-tool-mini + .crypto-tool-mini {
+  margin-left: 0;
+}
+.crypto-tool-textarea {
+  width: 100%;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  resize: vertical;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.6);
+}
+.crypto-tool-textarea[readonly] {
+  background: rgba(243, 223, 212, 0.25);
+}
+.crypto-tool-actions {
+  display: flex;
+  gap: 8px;
+  margin: 6px 0 2px;
+  flex-wrap: wrap;
+}
+.crypto-tool-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+}
+.crypto-tool-foot > .muted {
+  margin-right: auto;
 }
 
 /* 大图浏览器底部的「收藏」切换按钮 */

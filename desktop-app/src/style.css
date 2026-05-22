@@ -147,10 +147,55 @@ input, select {
 .content { min-width: 0; overflow-y: auto; max-height: calc(100vh - 32px); }
 .page-grid { display: grid; grid-template-columns: 340px 1fr; gap: 16px; height: 100%; }
 .crawler-layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; min-height: 100%; }
-.editor-layout { display: grid; grid-template-columns: 370px 1fr; gap: 14px; height: 100%; }
+.editor-layout { display: grid; grid-template-columns: 280px 1fr; gap: 12px; height: 100%; }
 .card { padding: 14px; }
 .gallery-panel { display: flex; flex-direction: column; min-height: 0; }
 .editor-side { overflow: auto; }
+/* 打码编辑左栏紧凑样式：让出更多空间给右边画布 */
+.editor-side {
+  font-size: 12px;
+  padding: 10px;
+}
+.editor-side h2 { font-size: 16px; }
+.editor-side h3 { font-size: 13px; margin: 0 0 8px; }
+.editor-side .panel-head { margin-bottom: 8px; }
+.editor-side .meta-card {
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.editor-side .meta-item {
+  font-size: 12px;
+}
+.editor-side label > span,
+.editor-side .field-full > span,
+.editor-side .field-grid label > span {
+  font-size: 11px;
+}
+.editor-side .field-full,
+.editor-side .field-grid label {
+  margin-bottom: 6px;
+  gap: 3px;
+}
+.editor-side input[type="text"],
+.editor-side input[type="number"],
+.editor-side select {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.editor-side button {
+  padding: 5px 10px;
+  font-size: 12px;
+}
+.editor-side .button-row {
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.editor-side .field-grid {
+  gap: 6px;
+}
+.editor-side .preset-grid {
+  gap: 6px;
+}
 .control-panel { display: flex; flex-direction: column; min-height: 0; position: sticky; top: 16px; max-height: calc(100vh - 32px); }
 
 .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
@@ -165,6 +210,14 @@ input, select {
   gap: 10px;
   margin-bottom: 12px;
   flex-wrap: wrap;
+}
+.canvas-head-compact {
+  margin-bottom: 4px;
+  justify-content: flex-end;
+}
+.canvas-head-compact .stats {
+  font-size: 12px;
+  color: var(--muted);
 }
 .gallery-tools {
   display: flex;
@@ -277,6 +330,24 @@ input, select {
   width: 56px;
   padding: 4px 6px;
   font-size: 12px;
+}
+.pg-jump-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #fbf4eb, #f2e8db);
+  color: var(--ink);
+  border: 1px solid rgba(74, 53, 25, 0.12);
+  cursor: pointer;
+  transition: background 0.18s, transform 0.12s;
+}
+.pg-jump-btn:hover { background: linear-gradient(135deg, #f3dfd4, #ebd0c0); }
+.pg-jump-btn:active { transform: translateY(1px); }
+.pg-jump-btn.pg-jump-go {
+  padding: 4px 8px;
+  font-size: 14px;
 }
 
 .hot-toggle {
