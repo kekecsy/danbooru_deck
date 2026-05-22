@@ -488,6 +488,14 @@ ipcMain.handle('crawler:status', async () => {
     backendError: crawlerLastError
   };
 });
+ipcMain.handle('crawler:set-safe-mode', async (_event, safe) => {
+  await ensureCrawlerService();
+  return apiFetchJson('/api/set_safe_mode', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ safe: !!safe })
+  });
+});
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);

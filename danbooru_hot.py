@@ -64,7 +64,7 @@ def grabber(db_data, page_num, log_callback=None, filter_tags=['furry', 'futanar
                 "artist": artist,
                 "filename": saved_filename,
                 "local_path": os.path.join(db_data.save_dir, saved_filename),
-                "post_url": f"https://danbooru.donmai.us/posts/{post_id}",
+                "post_url": danbooru_api.post_url(post_id),
                 "score": post.get('score', 0) or 0,
                 "fav_count": post.get('fav_count', 0) or 0,
                 "tags": {

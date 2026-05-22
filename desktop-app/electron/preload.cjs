@@ -14,7 +14,8 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     pause: () => ipcRenderer.invoke('crawler:pause'),
     resume: () => ipcRenderer.invoke('crawler:resume'),
     stop: () => ipcRenderer.invoke('crawler:stop'),
-    status: () => ipcRenderer.invoke('crawler:status')
+    status: () => ipcRenderer.invoke('crawler:status'),
+    setSafeMode: (safe) => ipcRenderer.invoke('crawler:set-safe-mode', !!safe)
   },
   external: {
     open: (url) => ipcRenderer.invoke('external:open', url)

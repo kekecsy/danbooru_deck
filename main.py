@@ -464,7 +464,7 @@ def _append_viewer(ids, artist, saved_filename, post):
     # 之前直接 return 会让图片下载到本地却没有热度信息条目 —— 改成用 "未知"
     # 作者占位，至少把 score / fav_count / post_url 这些热度元数据保留下来。
     artist_for_record = artist or "未知"
-    post_url = f"https://danbooru.donmai.us/posts/{ids}"
+    post_url = danbooru_api.post_url(ids)
     web_url = f"/images/{today_str}/{saved_filename}"
     # 同进程内防止同一个 id / filename 被追加两次（修复 popular_range 中
     # 历史出现的 17 条数据被重复写入的现象）
@@ -502,7 +502,7 @@ def grabber_rank(db_data_inst, page_num, filter_tags):
         return [], page_need_update
 
     try:
-        append_log(f"[Rank] 正在获取第 {page_num} 页...")
+        append_log(f"[Rank] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
         posts = danbooru_api.get_posts_by_rank(page_num)
     except Exception as e:
         append_log(f"获取页面失败: {e}")
@@ -548,7 +548,7 @@ def grabber_popular(db_data_inst, page_num, filter_tags, target_date):
         return [], page_need_update
 
     try:
-        append_log(f"[Popular] 正在获取 {target_date} 第 {page_num} 页...")
+        append_log(f"[Popular] 正在获取 {target_date} 第 {page_num} 页... (host={danbooru_api.get_host()})")
         posts = danbooru_api.get_popular_posts(target_date, page_num)
     except Exception as e:
         append_log(f"获取页面失败: {e}")
@@ -592,7 +592,7 @@ def grabber_collect_ids(db_data_inst, page_num, filter_tags):
         return [], page_need_update
 
     try:
-        append_log(f"[CollectIDs] 正在获取第 {page_num} 页...")
+        append_log(f"[CollectIDs] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
         posts = danbooru_api.get_posts_by_rank(page_num)
     except Exception as e:
         append_log(f"获取页面失败: {e}")
@@ -805,7 +805,7 @@ def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="
 # ==========================================
 @app.get("/api/proxy_check")
 def check_proxy():
-    url = "https://danbooru.donmai.us"
+    url = f"https://{danbooru_api.get_host()}"
     proxies = danbooru_api.PROXIES
     try:
         resp = danbooru_api.requests.get(url, timeout=5, headers=danbooru_api.HEADERS, proxies=proxies, impersonate="chrome120")
@@ -818,6 +818,20 @@ def check_proxy():
             return {"status": "error", "msg": f"访问异常 ({resp.status_code})", "color": "red"}
     except Exception as e:
         return {"status": "error", "msg": f"无法访问: {str(e)}", "color": "red"}
+
+class SafeModeRequest(BaseModel):
+    safe: bool = True
+
+@app.post("/api/set_safe_mode")
+def set_safe_mode_endpoint(req: SafeModeRequest):
+    """前端 SFW 开关：True 走 safebooru.donmai.us，False 走 danbooru.donmai.us。
+    设置后立即生效（影响所有后续 danbooru_api 请求），前端在 onMounted 和切换时调用。"""
+    danbooru_api.set_safe_mode(req.safe)
+    return {"safe": req.safe, "host": danbooru_api.get_host()}
+
+@app.get("/api/safe_mode")
+def get_safe_mode_endpoint():
+    return {"safe": danbooru_api.get_host() == danbooru_api.HOST_SAFE, "host": danbooru_api.get_host()}
 
 @app.post("/api/start")
 def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
@@ -1013,7 +1027,7 @@ def _backfill_orphan_entries(date_str: str, dd: DanbooruData) -> int:
             "artist": artist,
             "filename": name,
             "local_path": str(date_dir / name),
-            "post_url": f"https://danbooru.donmai.us/posts/{pid}",
+            "post_url": danbooru_api.post_url(pid),
             "web_url": f"/images/{date_str}/{name}",
             "score": post.get('score', 0) or 0,
             "fav_count": post.get('fav_count', 0) or 0,
@@ -1277,7 +1291,7 @@ def refresh_visible(req: RefreshVisibleRequest):
                              if s and not s.lower().endswith("(voice_actor)")]
             artist = ' '.join(artist_tokens) if artist_tokens else "未知"
             chars_str = post.get('tag_string_character', '') or ''
-            post_url = f"https://danbooru.donmai.us/posts/{post_id}"
+            post_url = danbooru_api.post_url(post_id)
             tags_full = {
                 "tag_string_general": post.get('tag_string_general', ''),
                 "tag_string_character": chars_str,

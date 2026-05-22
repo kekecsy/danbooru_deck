@@ -30,7 +30,8 @@
       "Bash(python -c \"from PIL import Image; print\\('LANCZOS attr:', hasattr\\(Image, 'LANCZOS'\\)\\); print\\('Resampling.LANCZOS:', Image.Resampling.LANCZOS\\)\")",
       "Bash(rmdir /S /Q hot_pic\\\\\\\\.thumb_cache)",
       "Bash(rm -rf hot_pic/.thumb_cache)",
-      "Bash(grep -E \"thumb|\\\\\\\\.\")"
+      "Bash(grep -E \"thumb|\\\\\\\\.\")",
+      "WebFetch(domain:safebooru.donmai.us)"
     ]
   }
 }

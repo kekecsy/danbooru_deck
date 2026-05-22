@@ -4,6 +4,7 @@ import json
 import requests
 from time import sleep
 from datetime import datetime
+import danbooru_api
 
 # --- 配置区 ---
 BASE_DIR = './hot_pic'
@@ -39,7 +40,7 @@ def get_actual_files(folder_path):
 
 def fetch_post_tags(post_id, retries=3):
     """获取指定ID的标签信息"""
-    url = f'https://danbooru.donmai.us/posts/{post_id}.json'
+    url = f'{danbooru_api.post_url(post_id)}.json'
     
     for attempt in range(retries):
         try:

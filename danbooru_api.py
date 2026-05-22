@@ -8,10 +8,28 @@ from my_utils import get_proxies_for_url
 COOKIES = "_danbooru2_session=dzlzD2gYvCdxOQfBzhHUpXyPWZdvd8kXWARK6n0KdX4VDPgzGj9sLOyHfTrMVFdFpaJLHAP3LfMiptyeQeiNGE1yNM8tY7IGQXtYV2u8aFKglH7khCVW8FVqurTZSNR25VdDBgoTBDzu9p/gTeTrazCCWzLRPlg7hglvs6F6Xmfd7VVN/Mb+HbA5y7HAykGYk9kXDOTbE5s/HTOvPZd3hT6t/WcVUL8VlEW0nv1aiJt2h0byWwJBgBDGIvPgTebOWaH+xlRuqaHPhU0BmTEP+MtffzowVs9EQBUaO6LCky5e+fYQmcxXl68ANSAF/DQmp1EqppEU/TDW86rPMwoLCJZmIfC+XaAe5Z+PnwLV+DeOrBVtWdYWa8klazul6KqGHX8W6Z7WYMOoB9LpDfCzVnyDXOqCA+w2wbM2GuAUI7uH3A3Nuc/Z73esVF/qhN3CyImze/KOleoApwSRSjMXeb6oSpks1MvFGvN2lADMAtibu3cEfpC0glc+0YieVxc2J8TTQFVAhhSb+PYzohNdDR533ubSH5fikI2D8hiZmR1WSl1gWTol2eDkohCDmi5S+tqGOE1em0ZzJ/lpdfBhoJcwMYMA7dWp--YLXy4wFzNb8Zce8g--/4vINxtQJS/LT/9J9QoqKA=="
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0"
 
+# ---------------- SFW 开关 ----------------
+# 默认走 safebooru（无 R-18 内容）；前端通过 /api/set_safe_mode 切换。
+# 所有需要拼 URL 的地方都通过 get_host()/post_url() 读，确保切换即时生效。
+HOST_SAFE = "safebooru.donmai.us"
+HOST_FULL = "danbooru.donmai.us"
+_HOST = HOST_SAFE
+
+def get_host():
+    return _HOST
+
+def set_safe_mode(safe: bool):
+    global _HOST, HEADERS
+    _HOST = HOST_SAFE if safe else HOST_FULL
+    HEADERS["Referer"] = f"https://{_HOST}/posts"
+
+def post_url(post_id):
+    return f"https://{_HOST}/posts/{post_id}"
+
 HEADERS = {
     "User-Agent": USER_AGENT,
     "Cookie": COOKIES,
-    "Referer": "https://danbooru.donmai.us/posts",
+    "Referer": f"https://{_HOST}/posts",
     "Accept": "application/json"
 }
 
@@ -34,7 +52,8 @@ def _proxy_alive(proxies, timeout=1.5):
         return False
 
 
-_RAW_PROXIES = get_proxies_for_url("https://danbooru.donmai.us")
+# 启动时按当前 _HOST 探测一次代理；切换 SFW 时如果 host 改了一般也不影响（同一 donmai.us 域）
+_RAW_PROXIES = get_proxies_for_url(f"https://{_HOST}")
 if _RAW_PROXIES and not _proxy_alive(_RAW_PROXIES):
     # 环境变量里写了代理但端口没人监听（典型场景：Clash/v2ray 没开），
     # 用户大概率本身可以直连 —— 直接清空 PROXIES，否则 curl_cffi 会卡死在
@@ -45,7 +64,7 @@ else:
     PROXIES = _RAW_PROXIES
 
 def check_proxy_simple():
-    url = "https://danbooru.donmai.us"
+    url = f"https://{_HOST}"
     try:
         resp = requests.get(url, timeout=10, proxies=PROXIES, headers=HEADERS, impersonate="chrome120")
         return resp.status_code == 200
@@ -59,7 +78,7 @@ def get_posts_by_rank(page, timeout=20):
         "tags": "order:rank"
     }
     r = requests.get(
-        "https://danbooru.donmai.us/posts.json",
+        f"https://{_HOST}/posts.json",
         params=params,
         headers=HEADERS,
         proxies=PROXIES,
@@ -76,7 +95,7 @@ def get_popular_posts(date_str, page, scale="day", timeout=20):
         "scale": scale
     }
     r = requests.get(
-        "https://danbooru.donmai.us/explore/posts/popular.json",
+        f"https://{_HOST}/explore/posts/popular.json",
         params=params,
         headers=HEADERS,
         proxies=PROXIES,
@@ -93,7 +112,7 @@ def get_wiki(name, timeout=10):
     成功返回 wiki API 的 list（通常 1 个元素，含 body / other_names）；失败/无结果返回 []。
     """
     encode_tag = urllib.parse.quote(name, safe='')
-    url = f"https://danbooru.donmai.us/wiki_pages.json?search[title]={encode_tag}"
+    url = f"https://{_HOST}/wiki_pages.json?search[title]={encode_tag}"
     proxies = get_proxies_for_url(url)
     try:
         resp = requests.get(
@@ -113,7 +132,7 @@ def get_wiki(name, timeout=10):
 
 
 def fetch_data_with_retry(post_id, retries=5, delay=3, timeout=10):
-    url = f'https://danbooru.donmai.us/posts/{post_id}.json'
+    url = f'https://{_HOST}/posts/{post_id}.json'
     attempt = 0
     while attempt < retries:
         try:

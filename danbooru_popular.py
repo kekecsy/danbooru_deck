@@ -77,7 +77,7 @@ def grabber(db_data, page_num, log_callback=None, filter_tags=['furry','futanari
                     new_hot_artists.append(artist)
 
             if saved_filename and artist:
-                post_url = f"https://danbooru.donmai.us/posts/{ids}"
+                post_url = danbooru_api.post_url(ids)
                 daily_viewer_data.append({
                     "artist": artist,
                     "filename": saved_filename,

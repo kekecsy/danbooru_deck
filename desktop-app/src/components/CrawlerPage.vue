@@ -7,10 +7,29 @@ const emit = defineEmits(['edit-image']);
 const savedHabitsStr = localStorage.getItem('crawlerHabits') || '{}';
 const habits = JSON.parse(savedHabitsStr);
 
+// SFW 开关：默认 true（走 safebooru，过滤 R-18）。toggle 立即推到后端 + 写盘
+const safeMode = ref(habits.safeMode !== false);
+async function syncSafeModeToBackend() {
+  try { await window.desktopAPI.crawler.setSafeMode(safeMode.value); }
+  catch (e) { /* ensureService 还没完成时静默，onMounted 会重试一次 */ }
+}
+async function toggleSafeMode() {
+  safeMode.value = !safeMode.value;
+  habits.safeMode = safeMode.value;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+  await syncSafeModeToBackend();
+  showToast(safeMode.value
+    ? '已切到 SFW：所有请求走 safebooru.donmai.us（无 R-18）'
+    : '已切到全部内容：请求走 danbooru.donmai.us（含 NSFW）',
+    safeMode.value ? 'success' : 'warning');
+}
+
 const form = ref({
   startPage: habits.rank_start || 1,
   endPage: habits.rank_end || 16,
-  tags: habits.tags || 'furry, futanari',
+  // 用 typeof 判断而不是 || ：用户可能故意把过滤标签清空（=不过滤任何 tag），
+  // 那种情况下应保留空串而不是回退到默认 "furry, futanari"
+  tags: typeof habits.tags === 'string' ? habits.tags : 'furry, futanari',
   mode: habits.mode || 'rank',
   targetDate: '',
   startDate: '',
@@ -26,6 +45,12 @@ watch(() => form.value.mode, (newMode) => {
     form.value.startPage = habits[`${newMode}_start`] || 1;
     form.value.endPage = habits[`${newMode}_end`] || 35;
   }
+});
+
+// 过滤标签单独写一个 watcher，确保即使用户清空成 "" 也立刻写盘
+watch(() => form.value.tags, (v) => {
+  habits.tags = typeof v === 'string' ? v : '';
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 });
 
 watch(form, (newForm) => {
@@ -1907,7 +1932,9 @@ watch(pagedLocalImages, async items => {
 onMounted(async () => {
   await loadGallery();
   await ensureService();
-  // 静默加载：Python 后端就绪后在后台刷新翻译，不再显示“正在读取”遮罩，消除闪烁
+  // Python 后端就绪后立刻把本地保存的 SFW 偏好推过去，确保即使是当前会话第一次请求也用对 host
+  await syncSafeModeToBackend();
+  // 静默加载：Python 后端就绪后在后台刷新翻译，不再显示”正在读取”遮罩，消除闪烁
   await loadGallery(gallery.value.selectedDate, true);
   await syncStatus();
   loadFavSnapshot();
@@ -1946,7 +1973,13 @@ const modeDescription = computed(() => {
           <h2>抓图任务</h2>
           <p class="inline-note">{{ modeDescription }}</p>
         </div>
-        <button class="ghost" @click="openHostsHint" style="margin-left: auto; color: #ff9800;">无法连接？修改Hosts教程</button>
+        <button class="ghost" @click="openHostsHint" style="margin-left: auto; color: #ff9800; font-size: 12px; padding: 4px 10px; white-space: nowrap;" title="无法连接 Danbooru / Safebooru 时，按此教程改 hosts">🛠 Hosts</button>
+        <button
+          class="ghost safe-mode-btn"
+          :class="{ 'is-safe': safeMode, 'is-unsafe': !safeMode }"
+          @click="toggleSafeMode"
+          :title="safeMode ? '当前走 safebooru.donmai.us（无 R-18）。点击切换为完整 danbooru' : '当前走 danbooru.donmai.us（含 NSFW）。点击切回 SFW'"
+        >{{ safeMode ? '🛡 SFW' : '🌶 全部内容' }}</button>
       </div>
 
       <div class="mode-selector">
@@ -2505,7 +2538,7 @@ const modeDescription = computed(() => {
         <p style="margin: 0; font-size: 13px;">请在记事本中打开以下路径的文件：</p>
         <code style="background: rgba(0,0,0,0.05); padding: 6px 10px; border-radius: 6px; font-size: 12px; user-select: all;">C:\Windows\System32\drivers\etc\hosts</code>
         <p style="margin: 0; font-size: 13px;">并在文件最末尾添加以下内容（可直接全选复制）：</p>
-        <textarea readonly style="width: 100%; height: 60px; font-family: Consolas, monospace; font-size: 13px; resize: none; background: rgba(0,0,0,0.03); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 10px; outline: none; cursor: text;" onfocus="this.select()">104.26.11.39 danbooru.donmai.us</textarea>
+        <textarea readonly style="width: 100%; height: 60px; font-family: Consolas, monospace; font-size: 13px; resize: none; background: rgba(0,0,0,0.03); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 10px; outline: none; cursor: text;" onfocus="this.select()">{{ safeMode ? '104.26.11.39 safebooru.donmai.us' : '104.26.11.39 danbooru.donmai.us' }}</textarea>
         <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
           <button @click="openHostsFolder" class="secondary">打开目录</button>
           <button @click="hostsModal.open = false" style="min-width: 80px;">确定</button>
@@ -4319,5 +4352,32 @@ const modeDescription = computed(() => {
 }
 .token-chip.is-favorited-chip:hover {
   background: linear-gradient(135deg, rgba(255, 188, 86, 0.65), rgba(212, 143, 47, 0.45));
+}
+
+/* SFW 开关按钮 */
+.safe-mode-btn {
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 12px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  transition: background 0.18s, color 0.18s, border-color 0.18s;
+}
+.safe-mode-btn.is-safe {
+  background: rgba(77, 145, 90, 0.15);
+  color: #2d7a3e;
+  border-color: rgba(77, 145, 90, 0.4);
+}
+.safe-mode-btn.is-safe:hover {
+  background: rgba(77, 145, 90, 0.25);
+}
+.safe-mode-btn.is-unsafe {
+  background: rgba(209, 86, 40, 0.18);
+  color: #b04420;
+  border-color: rgba(209, 86, 40, 0.45);
+}
+.safe-mode-btn.is-unsafe:hover {
+  background: rgba(209, 86, 40, 0.3);
 }
 </style>

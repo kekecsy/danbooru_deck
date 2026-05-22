@@ -70,7 +70,7 @@ def download_by_ids(post_ids, filter_tags=None):
             new_artist_counts[artist] = new_artist_counts.get(artist, 0) + 1
 
         # 构建 viewer 条目
-        post_url = f"https://danbooru.donmai.us/posts/{pid_str}"
+        post_url = danbooru_api.post_url(pid_str)
         viewer_entry = {
             "artist": artist,
             "filename": saved_filename,
