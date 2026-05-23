@@ -974,9 +974,10 @@ def _backfill_orphan_entries(date_str: str, dd: DanbooruData) -> int:
     known_fns = {item.get("filename") for item in data if item.get("filename")}
 
     # 反查表：filename -> post_id（取自全局 log.json）
+    # 用 list() 快照一份，避免后台下载线程同时写入 log_data 导致 RuntimeError
     global_log = db_data.log_data or {}
     fn_to_pid = {}
-    for pid, url in global_log.items():
+    for pid, url in list(global_log.items()):
         if not url:
             continue
         fn = url.split('/')[-1].split('?')[0]
@@ -1240,9 +1241,10 @@ def refresh_visible(req: RefreshVisibleRequest):
     fn_to_item = {it.get("filename"): it for it in data if it.get("filename")}
 
     # 全局 log.json 的反查表 —— 给孤立文件用
+    # 用 list() 快照一份，避免后台下载线程同时写入 log_data 导致 RuntimeError
     global_log = db_data.log_data or {}
     fn_to_pid_log = {}
-    for pid, url in global_log.items():
+    for pid, url in list(global_log.items()):
         if not url:
             continue
         fn = url.split('/')[-1].split('?')[0]

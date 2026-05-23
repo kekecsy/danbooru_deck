@@ -10926,10 +10926,10 @@
     "translated_description_zh": "她是动画/漫画《科学超电磁炮》中的角色。她是井野黑子的朋友，以及佐天泪子的同学，就读于佐贺川中学。她的超能力仅能通过等级1的“热手”保持午餐温度，使物体保持恒温。然而，她因可怕的黑客技术而臭名昭著，外号“守门员”，是审判的重要成员以及黑子的主要操作员。她有短黑发和棕色眼睛，通常佩戴花发带"
   },
   "mon3tr_(arknights)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "M3",
     "source_hint": "arknights",
-    "translated_description_zh": "这是一名可玩的医疗干员，出自[[Arknights]]。之前被称为[[Kal'tsit (arknights)|]]的可召唤使魔，后被拟人化并作为可玩干员发布。她的配音演员有[[Izumi Fuuka]]（JP），[[Chen Yixuan]]（CN），[[Molly Harris]]（EN），[[Lee Myung-ho]]（KR）。她的插画师是[[five-fall]]"
+    "translated_description_zh": "《明日方舟》中的一名可游玩医疗干员。此前作为凯尔希的可召唤眷属而为人所知，后拟人化并作为可游玩干员实装。其日语配音为和泉风花，汉语配音为陈奕雯，英语配音为Molly Harris，韩语配音为李明镐。角色画师为five-fall。"
   },
   "yoshikawa_chinatsu": {
     "has_chinese": false,
@@ -12270,10 +12270,10 @@
     "translated_description_zh": "舰队Collection中日本水上机母舰‘神威’的拟人化角色，由Akira设计，濑户麻美配音。外貌特征：中长多色发（外白内蓝及眉毛），戴有matanpus头带的折角马尾，蓝眼睛，巨乳。身着蓝色短上衣配长白无袖裙及过膝袜，基础形态为黑绷带过膝袜，Kai形态换大腿靴，Kai Bo形态头带失去图案。角色为少数在海外建造的日本舰只（在纽约造船厂，与萨拉托加同期），但在舰队中几乎不表现出生地特征，反而充当少数派代表。设计深受阿伊努文化影响，具备特殊纹样及服饰。她是游戏中唯一三次改变舰级且不可逆名义上返回原舰级的舰船；作为Kai Bo时，除秋津岛外唯一能搭载飞行艇的舰船"
   },
   "eunie_(xenoblade)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "xenoblade chronicles 3",
-    "translated_description_zh": "是[[Xenoblade Chronicles 3]]中的主要队伍成员。与[[Lanz (xenoblade)|]]和[[Noah (xenoblade)|]]是最好的朋友。她拥有[[medium_hair|medium]]长度的[[brown hair]]，配有[[head wings]]，[[blue eyes]]，以及[[large breasts]]，胸部有[[breast tattoo]]"
+    "has_chinese": true,
+    "chinese_name": "优妮",
+    "source_hint": "xenoblade",
+    "translated_description_zh": "《异度神剑3》中的主要派对成员。与兰兹（Lanz）和诺亚（Noah）是挚友。她留着棕色中发且头上长有羽翼（海恩塔族特征），拥有蓝色的双眸，以及带有胸部刺青的丰满身材。"
   },
   "zeta_(granblue_fantasy)": {
     "has_chinese": true,
@@ -12978,10 +12978,10 @@
     "translated_description_zh": "Nijisanji 的 Ange Katrina 默认服装，包括部分脱下的黑色外套、红色开衫、短款白色连衣裙、三角形发饰和黑色鞋子"
   },
   "kiran_(fire_emblem)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "fire emblem heroes",
-    "translated_description_zh": "《火焰之纹章：英雄》中的玩家角色，亦称为召唤师。使用 Breidablik（魔法枪）射出传送门召唤英雄。日文版默认名称为 Eclat（エクラ），英文版默认名称为 Kiran。角色官方性别未知，可根据外观使用男性或女性标签。在战斗中不直接参与，除非是 Mjölnir 的打击。担任战略家，负责队伍行动，类似于《火焰之纹章：烈火之剑》中的 Mark"
+    "has_chinese": true,
+    "chinese_name": "艾克拉",
+    "source_hint": "fire_emblem",
+    "translated_description_zh": "《火焰之纹章 英雄》中的玩家角色，也被称为“召唤师”。使用能够射出传送门以传唤英雄的魔枪“布雷达布利克”。该角色在日版中的默认名称为“艾克拉（エクラ）”，英版中为“Kiran”。他在游戏中担任与《火焰之纹章 烈火之剑》中马克类似的战术家角色，负责队伍的行动指挥，除在“妙尔尼尔的反击”中外不直接参与战斗。其官方性别不明。"
   },
   "scathach_(lancer)_(fate)": {
     "has_chinese": true,
@@ -14694,10 +14694,10 @@
     "translated_description_zh": "《逃げ上手の若君》中的雌雄同体男性主角，对应现实中同名的武士"
   },
   "kaela_kovalskia": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "hololive indonesia",
-    "translated_description_zh": "她是hololive Indonesia第三期成员的虚拟YouTuber（VTuber），是著名铁匠的学徒，为寻找传奇材料而加入秘密机构。角色由Yasuda Suzuhito设计，拥有中长金发、红眼，默认发型为双分刘海及侧边锁发，佩戴红色发带、红色蝴蝶结及焊接护目镜"
+    "has_chinese": true,
+    "chinese_name": "凯拉·科瓦尔斯基亚",
+    "source_hint": "hololive",
+    "translated_description_zh": "一名虚拟YouTuber（VTuber），也是hololive Indonesia（印尼组）三期生“holoh3roes”的成员。她是一位著名铁匠的学徒，为了寻找一种传奇材料而加入了秘密组织。角色由安田典生（Yasuda Suzuhito）设计。她留着金色中发，拥有红色的双眸和中等身材，戴着焊接护目镜，发饰包含红色发带与红蝴蝶结。"
   },
   "kino_(kino_no_tabi)": {
     "has_chinese": true,
@@ -16710,10 +16710,10 @@
     "translated_description_zh": "来自《偶像大师 闪耀色彩》的友好亚文化女孩，属于L'Antica单元。她是戴眼镜的自由奔放且难以捉摸的亚文化类型女孩，容易亲近，能够与初次见面的人交谈而不感到畏惧。是大学一年级学生。由[[Kisui Shio]]配音，取代退役的[[Narumi Runa]]"
   },
   "mr._squeaks_(hakos_baelz)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "hakos baelz",
-    "translated_description_zh": "Hakos Baelz 的吉祥物。一只小红色的老鼠，脸颊上有黄色的 X 形标记，下半身有蓝色火焰图案，尾巴上系着一个蓝色蝴蝶结。通常坐在 Baelz 的头上，表情与 Baelz 的表情相同"
+    "has_chinese": true,
+    "chinese_name": "Mr. Squeaks",
+    "source_hint": "hololive",
+    "translated_description_zh": "Hakos Baelz（哈客斯·贝尔茨）的吉祥物。它是一只红色的小老鼠，脸颊上有黄色的X标记，下半身有蓝色火焰图案，尾巴上系着一个蓝色蝴蝶结。通常坐在Baelz的头上，表情会同步模仿Baelz。"
   },
   "wakana_shiki": {
     "has_chinese": true,
@@ -26028,10 +26028,10 @@
     "translated_description_zh": "可不（KAFU）是CeVIO声库，于2021年7月7日发布，由KAMITSUBAKI STUDIO合作开发，属于Musical Isotrope系列，声优为虚拟歌手KAF。其形象与KAF相似，但头发为白色，角色道具是咖喱乌冬面。在官方四格漫画中，她拥有一只名为Hypnos的动物伙伴，为KAF的Laplace的黑白对应版本"
   },
   "male_kiran_(fire_emblem)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "fire emblem heroes",
-    "translated_description_zh": "这是一个明确男性的[[Kiran_(fire_emblem)|]]形象，出自[[Fire Emblem Heroes]]，Kiran 还有四种官方男性设计"
+    "has_chinese": true,
+    "chinese_name": "艾克拉（男）",
+    "source_hint": "fire_emblem",
+    "translated_description_zh": "《火焰之纹章 英雄》中明显具有男性特征的召唤师（艾克拉）的形象。在官方设定中，男性召唤师额外拥有4种不同的视觉设计。"
   },
   "deutschland_(azur_lane)": {
     "has_chinese": true,
@@ -67260,10 +67260,10 @@
     "translated_description_zh": "这是VSPO!角色一之濑宇留波的第六套官方替换服装。该服装将她变身为恶魔少女学生装，身着灰色西装外套，内搭衬衫，配有格子纹理、灰色领带和黑色领圈，以及格子印花的黑色百褶短裙、松垮袜子和乐福鞋。恶魔元素包括从黑到蓝渐变的角、渐变角、恶魔角；从黑到蓝渐变的翅膀、渐变翅膀、迷你翅膀、恶魔翅膀；以及从黑到蓝渐变的尾巴、渐变尾巴、恶魔尾巴。外观：!asset #47263789：个人资料。外部链接：《服装揭秘直播》https://www.youtube.com/watch?v=UxMmebChE"
   },
   "gunnthra_(fire_emblem)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "fire emblem heroes",
-    "translated_description_zh": "古恩特拉是《火焰之纹章 英雄》第二卷的角色，是尼弗尔的第一公主，也是赫里德的妹妹。她具备通过梦境与他人交流并接受预言性梦境的能力，这一能力她与兄弟姐妹共享。进行‘梦之仪式’能增强她对梦境的掌控，使她即使清醒也能详细回忆梦境"
+    "has_chinese": true,
+    "chinese_name": "斯利兹",
+    "source_hint": "fire_emblem",
+    "translated_description_zh": "Gunnthrá（斯利兹）是《火焰之纹章 英雄》第二部的登场角色。她是尼福尔王国的第一公主，也是库利德的妹妹。她拥有通过梦境与他人沟通以及接收预知梦的能力，并与兄弟姐妹共享这一能力。通过进行梦之仪式，她能获得更强的梦境掌控力，使其在清醒时也能清晰回忆梦境细节。"
   },
   "soul_linker_(ragnarok_online)": {
     "has_chinese": false,
@@ -77278,5 +77278,17 @@
     "chinese_name": "伪联邦学生会长(暂定)",
     "source_hint": "blue_archive",
     "translated_description_zh": "这是《蔚蓝档案》第7个PV中出现的金发角色的临时标签，她似乎接替了联邦学生会长的位置。该角色最初在《蔚蓝档案》的“4.5周年PV”中首次亮相。"
+  },
+  "seidr_(fire_emblem)": {
+    "has_chinese": true,
+    "chinese_name": "赛慈",
+    "source_hint": "fire_emblem",
+    "translated_description_zh": "《火焰之纹章 英雄》第七部中登场的角色。她是来自华纳海姆的女神，向召唤师揭示了古尔维格带来的毁灭未来的启示。与菲约尔姆类似，作品强烈暗示她对召唤师持有浪漫情感。她的方向感很差，经常迷路，并且因请求与召唤师“生孩子”而广为人知。她最终会变成为古尔维格，而克瓦希尔则是她的过去。"
+  },
+  "akatsuki_mikoto": {
+    "has_chinese": true,
+    "chinese_name": "晓月美琴",
+    "source_hint": "original",
+    "translated_description_zh": "画师九头龙（Kudo Eru）创作的原创角色（OC）。她是葵玲（Aoi Rei）的女友（百合情侣）。她拥有一头棕色长发和一双红色的眼睛。"
   }
 }

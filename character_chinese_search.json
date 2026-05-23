@@ -9676,5 +9676,59 @@
     "chinese_name": "伪联邦学生会长(暂定)",
     "source_hint": "blue_archive",
     "translated_description_zh": "这是《蔚蓝档案》第7个PV中出现的金发角色的临时标签，她似乎接替了联邦学生会长的位置。该角色最初在《蔚蓝档案》的“4.5周年PV”中首次亮相。"
+  },
+  "mr._squeaks_(hakos_baelz)": {
+    "has_chinese": true,
+    "chinese_name": "Mr. Squeaks",
+    "source_hint": "hololive",
+    "translated_description_zh": "Hakos Baelz（哈客斯·贝尔茨）的吉祥物。它是一只红色的小老鼠，脸颊上有黄色的X标记，下半身有蓝色火焰图案，尾巴上系着一个蓝色蝴蝶结。通常坐在Baelz的头上，表情会同步模仿Baelz。"
+  },
+  "gunnthra_(fire_emblem)": {
+    "has_chinese": true,
+    "chinese_name": "斯利兹",
+    "source_hint": "fire_emblem",
+    "translated_description_zh": "Gunnthrá（斯利兹）是《火焰之纹章 英雄》第二部的登场角色。她是尼福尔王国的第一公主，也是库利德的妹妹。她拥有通过梦境与他人沟通以及接收预知梦的能力，并与兄弟姐妹共享这一能力。通过进行梦之仪式，她能获得更强的梦境掌控力，使其在清醒时也能清晰回忆梦境细节。"
+  },
+  "kaela_kovalskia": {
+    "has_chinese": true,
+    "chinese_name": "凯拉·科瓦尔斯基亚",
+    "source_hint": "hololive",
+    "translated_description_zh": "一名虚拟YouTuber（VTuber），也是hololive Indonesia（印尼组）三期生“holoh3roes”的成员。她是一位著名铁匠的学徒，为了寻找一种传奇材料而加入了秘密组织。角色由安田典生（Yasuda Suzuhito）设计。她留着金色中发，拥有红色的双眸和中等身材，戴着焊接护目镜，发饰包含红色发带与红蝴蝶结。"
+  },
+  "seidr_(fire_emblem)": {
+    "has_chinese": true,
+    "chinese_name": "赛慈",
+    "source_hint": "fire_emblem",
+    "translated_description_zh": "《火焰之纹章 英雄》第七部中登场的角色。她是来自华纳海姆的女神，向召唤师揭示了古尔维格带来的毁灭未来的启示。与菲约尔姆类似，作品强烈暗示她对召唤师持有浪漫情感。她的方向感很差，经常迷路，并且因请求与召唤师“生孩子”而广为人知。她最终会变成为古尔维格，而克瓦希尔则是她的过去。"
+  },
+  "kiran_(fire_emblem)": {
+    "has_chinese": true,
+    "chinese_name": "艾克拉",
+    "source_hint": "fire_emblem",
+    "translated_description_zh": "《火焰之纹章 英雄》中的玩家角色，也被称为“召唤师”。使用能够射出传送门以传唤英雄的魔枪“布雷达布利克”。该角色在日版中的默认名称为“艾克拉（エクラ）”，英版中为“Kiran”。他在游戏中担任与《火焰之纹章 烈火之剑》中马克类似的战术家角色，负责队伍的行动指挥，除在“妙尔尼尔的反击”中外不直接参与战斗。其官方性别不明。"
+  },
+  "male_kiran_(fire_emblem)": {
+    "has_chinese": true,
+    "chinese_name": "艾克拉（男）",
+    "source_hint": "fire_emblem",
+    "translated_description_zh": "《火焰之纹章 英雄》中明显具有男性特征的召唤师（艾克拉）的形象。在官方设定中，男性召唤师额外拥有4种不同的视觉设计。"
+  },
+  "mon3tr_(arknights)": {
+    "has_chinese": true,
+    "chinese_name": "M3",
+    "source_hint": "arknights",
+    "translated_description_zh": "《明日方舟》中的一名可游玩医疗干员。此前作为凯尔希的可召唤眷属而为人所知，后拟人化并作为可游玩干员实装。其日语配音为和泉风花，汉语配音为陈奕雯，英语配音为Molly Harris，韩语配音为李明镐。角色画师为five-fall。"
+  },
+  "eunie_(xenoblade)": {
+    "has_chinese": true,
+    "chinese_name": "优妮",
+    "source_hint": "xenoblade",
+    "translated_description_zh": "《异度神剑3》中的主要派对成员。与兰兹（Lanz）和诺亚（Noah）是挚友。她留着棕色中发且头上长有羽翼（海恩塔族特征），拥有蓝色的双眸，以及带有胸部刺青的丰满身材。"
+  },
+  "akatsuki_mikoto": {
+    "has_chinese": true,
+    "chinese_name": "晓月美琴",
+    "source_hint": "original",
+    "translated_description_zh": "画师九头龙（Kudo Eru）创作的原创角色（OC）。她是葵玲（Aoi Rei）的女友（百合情侣）。她拥有一头棕色长发和一双红色的眼睛。"
   }
 }
