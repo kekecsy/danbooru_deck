@@ -109,6 +109,320 @@ const viewer = ref({
 
 const viewerToolbarVisible = computed(() => viewer.value.toolbarPinned || viewer.value.toolbarHovered);
 
+// ---------------- Caption 悬浮窗口 ----------------
+const caption = ref({
+  open: false,
+  loading: false,
+  saving: false,
+  withArtist: habits.captionWithArtist === true,
+  mode: 'mark',          // 'mark' 标记模式（红） | 'edit' 输入模式（绿）
+  text: '',
+  errors: [],            // [{start, end, text}]
+  edits: [],             // [{start, end, original, replacement}]
+  meta: null,            // {artist, characters, copyright}
+  message: '',
+  imagePath: '',
+  loaded: false,
+  dirty: false,
+  pos: { x: 0, y: 0, initialized: false },
+  // 待输入替换文本时的临时状态
+  editDraft: { open: false, start: 0, end: 0, original: '', replacement: '' }
+});
+const captionTextRef = ref(null);
+const captionDrag = ref({ active: false, dx: 0, dy: 0 });
+
+const PUNCT_RE = /[，。、；：！？,.;:!?…—]/u;
+
+function openCaptionWindow() {
+  const item = viewerItem.value;
+  if (!item?.localPath) return;
+  caption.value.imagePath = item.localPath;
+  caption.value.message = '';
+  caption.value.errors = [];
+  caption.value.edits = [];
+  caption.value.text = '';
+  caption.value.meta = null;
+  caption.value.loaded = false;
+  caption.value.dirty = false;
+  caption.value.editDraft.open = false;
+  caption.value.open = true;
+  if (!caption.value.pos.initialized) {
+    const panelWidth = 480;
+    caption.value.pos.x = Math.max(20, window.innerWidth - panelWidth - 32);
+    caption.value.pos.y = 80;
+    caption.value.pos.initialized = true;
+  }
+  loadExistingCaption();
+}
+
+function closeCaptionWindow() {
+  caption.value.open = false;
+}
+
+// 浮窗拖动：mousedown 在 header 上启动
+function onCaptionDragStart(e) {
+  // 忽略关闭按钮等子元素上的点击
+  if (e.target.closest('button')) return;
+  captionDrag.value.active = true;
+  captionDrag.value.dx = e.clientX - caption.value.pos.x;
+  captionDrag.value.dy = e.clientY - caption.value.pos.y;
+  window.addEventListener('mousemove', onCaptionDragMove);
+  window.addEventListener('mouseup', onCaptionDragEnd);
+  e.preventDefault();
+}
+function onCaptionDragMove(e) {
+  if (!captionDrag.value.active) return;
+  const maxX = window.innerWidth - 120;
+  const maxY = window.innerHeight - 60;
+  caption.value.pos.x = Math.max(-200, Math.min(maxX, e.clientX - captionDrag.value.dx));
+  caption.value.pos.y = Math.max(0, Math.min(maxY, e.clientY - captionDrag.value.dy));
+}
+function onCaptionDragEnd() {
+  captionDrag.value.active = false;
+  window.removeEventListener('mousemove', onCaptionDragMove);
+  window.removeEventListener('mouseup', onCaptionDragEnd);
+}
+
+async function loadExistingCaption() {
+  try {
+    const entry = await window.desktopAPI.caption.read(caption.value.imagePath);
+    if (entry) {
+      caption.value.text = entry.caption || '';
+      caption.value.errors = Array.isArray(entry.errors) ? entry.errors : [];
+      caption.value.edits = Array.isArray(entry.edits) ? entry.edits : [];
+      caption.value.meta = {
+        artist: entry.artist,
+        characters: entry.characters,
+        copyright: entry.copyright
+      };
+      caption.value.withArtist = !!entry.with_artist;
+      caption.value.loaded = true;
+    }
+  } catch (e) {
+    // 忽略
+  }
+}
+
+async function generateCaption() {
+  if (!caption.value.imagePath || caption.value.loading) return;
+  caption.value.loading = true;
+  caption.value.message = '正在调用 Gemini API 生成描述...';
+  try {
+    const result = await window.desktopAPI.caption.generate(caption.value.imagePath, caption.value.withArtist);
+    if (!result || !result.ok) {
+      caption.value.message = `生成失败：${result?.error || '未知错误'}`;
+      return;
+    }
+    caption.value.text = result.caption || '';
+    caption.value.meta = {
+      artist: result.artist,
+      characters: result.characters,
+      copyright: result.copyright
+    };
+    caption.value.errors = [];
+    caption.value.edits = [];
+    caption.value.loaded = true;
+    caption.value.dirty = true;
+    caption.value.message = '生成完成，已可标注错误段。';
+  } catch (e) {
+    caption.value.message = `生成失败：${e.message || e}`;
+  } finally {
+    caption.value.loading = false;
+  }
+}
+
+// 标点吸附：如果选区的首/尾紧贴标点，把标点纳入
+function snapToPunctuation(text, start, end) {
+  while (start > 0 && PUNCT_RE.test(text[start - 1])) start -= 1;
+  while (end < text.length && PUNCT_RE.test(text[end])) end += 1;
+  return [start, end];
+}
+
+function _allSpans() {
+  // 合并 errors + edits 用于重叠检测（不修改原数组）
+  return [
+    ...caption.value.errors.map(e => ({ ...e, kind: 'error' })),
+    ...caption.value.edits.map(e => ({ ...e, kind: 'edit' }))
+  ];
+}
+function _overlapsExisting(start, end) {
+  return _allSpans().some(s => !(s.end <= start || s.start >= end));
+}
+
+function markCurrentSelection() {
+  const el = captionTextRef.value;
+  if (!el) return;
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
+  const range = sel.getRangeAt(0);
+  if (!el.contains(range.startContainer) || !el.contains(range.endContainer)) return;
+  const preRange = document.createRange();
+  preRange.selectNodeContents(el);
+  preRange.setEnd(range.startContainer, range.startOffset);
+  const start0 = preRange.toString().length;
+  const end0 = start0 + range.toString().length;
+  const text = caption.value.text;
+  let [start, end] = snapToPunctuation(text, start0, end0);
+  if (start >= end) return;
+
+  if (caption.value.mode === 'edit') {
+    // 输入模式：打开替换草稿，让用户填入替换文本
+    if (_overlapsExisting(start, end)) {
+      caption.value.message = '选区与已有标记/替换重叠，请先撤销冲突项再操作。';
+      sel.removeAllRanges();
+      return;
+    }
+    caption.value.editDraft.open = true;
+    caption.value.editDraft.start = start;
+    caption.value.editDraft.end = end;
+    caption.value.editDraft.original = text.slice(start, end);
+    caption.value.editDraft.replacement = text.slice(start, end);
+    caption.value.message = '';
+    sel.removeAllRanges();
+    nextTick(() => {
+      const input = document.getElementById('caption-edit-input');
+      if (input) { input.focus(); input.select(); }
+    });
+    return;
+  }
+
+  // 标记模式：合并相邻 error；如果选区落在 edit 上则拒绝
+  if (caption.value.edits.some(e => !(e.end <= start || e.start >= end))) {
+    caption.value.message = '不能在已替换段（绿）上再标红，请先撤销该替换。';
+    sel.removeAllRanges();
+    return;
+  }
+  const next = [];
+  let merged = { start, end };
+  for (const e of caption.value.errors) {
+    if (e.end < merged.start || e.start > merged.end) {
+      next.push(e);
+    } else {
+      merged.start = Math.min(merged.start, e.start);
+      merged.end = Math.max(merged.end, e.end);
+    }
+  }
+  next.push({ start: merged.start, end: merged.end, text: text.slice(merged.start, merged.end) });
+  next.sort((a, b) => a.start - b.start);
+  caption.value.errors = next;
+  caption.value.dirty = true;
+  sel.removeAllRanges();
+}
+
+function confirmEditDraft() {
+  const d = caption.value.editDraft;
+  if (!d.open) return;
+  const replacement = (d.replacement || '').trim();
+  if (!replacement) {
+    caption.value.message = '替换文本不能为空。';
+    return;
+  }
+  caption.value.edits = [
+    ...caption.value.edits,
+    { start: d.start, end: d.end, original: d.original, replacement }
+  ].sort((a, b) => a.start - b.start);
+  caption.value.editDraft.open = false;
+  caption.value.dirty = true;
+  caption.value.message = '已记录替换。';
+}
+
+function cancelEditDraft() {
+  caption.value.editDraft.open = false;
+}
+
+function removeErrorSpan(idx) {
+  caption.value.errors = caption.value.errors.filter((_, i) => i !== idx);
+  caption.value.dirty = true;
+}
+
+function removeEditSpan(idx) {
+  caption.value.edits = caption.value.edits.filter((_, i) => i !== idx);
+  caption.value.dirty = true;
+}
+
+function clearAllErrors() {
+  caption.value.errors = [];
+  caption.value.dirty = true;
+}
+
+function clearAllEdits() {
+  caption.value.edits = [];
+  caption.value.dirty = true;
+}
+
+// 渲染：把 errors（红）和 edits（绿）合并按 start 排序，分段输出。
+// edits 段显示 replacement，errors 段显示原文。
+const captionRenderSegments = computed(() => {
+  const text = caption.value.text || '';
+  const spans = [
+    ...caption.value.errors.map((e, i) => ({ ...e, kind: 'error', idx: i })),
+    ...caption.value.edits.map((e, i) => ({ ...e, kind: 'edit', idx: i }))
+  ].sort((a, b) => a.start - b.start);
+  const segs = [];
+  let cursor = 0;
+  for (const s of spans) {
+    if (s.start > cursor) segs.push({ type: 'text', text: text.slice(cursor, s.start) });
+    if (s.kind === 'error') {
+      segs.push({ type: 'error', text: text.slice(s.start, s.end), idx: s.idx });
+    } else {
+      segs.push({ type: 'edit', text: s.replacement, original: s.original, idx: s.idx });
+    }
+    cursor = Math.max(cursor, s.end);
+  }
+  if (cursor < text.length) segs.push({ type: 'text', text: text.slice(cursor) });
+  return segs;
+});
+
+async function saveCaption() {
+  if (!caption.value.imagePath || caption.value.saving) return;
+  if (!window.desktopAPI?.caption?.save) {
+    caption.value.message = '保存失败：window.desktopAPI.caption.save 不存在。请完全关闭并重启 Electron（preload 改动需要重启进程，仅热重载渲染端不会更新）。';
+    return;
+  }
+  // JSON 深拷贝去掉 Vue reactive proxy，避免 IPC structuredClone 报「could not be cloned」
+  const entry = JSON.parse(JSON.stringify({
+    caption: caption.value.text,
+    with_artist: caption.value.withArtist,
+    artist: caption.value.meta?.artist || null,
+    characters: caption.value.meta?.characters || null,
+    copyright: caption.value.meta?.copyright || null,
+    errors: caption.value.errors,
+    edits: caption.value.edits
+  }));
+  const imagePath = String(caption.value.imagePath);
+  caption.value.saving = true;
+  caption.value.message = '保存中...';
+  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('保存超时（IPC 无响应，可能需要重启 Electron）')), 8000));
+  try {
+    const result = await Promise.race([
+      window.desktopAPI.caption.save(imagePath, entry),
+      timeout
+    ]);
+    if (result?.ok) {
+      caption.value.message = `已保存到 ${result.path}`;
+      caption.value.dirty = false;
+      // 立即更新画廊标记
+      const fname = caption.value.imagePath.split(/[\\/]/).pop();
+      if (fname) {
+        const next = new Set(captionedSet.value);
+        next.add(fname);
+        captionedSet.value = next;
+      }
+    } else {
+      caption.value.message = `保存失败：${result?.error || '未知错误'}`;
+    }
+  } catch (e) {
+    caption.value.message = `保存失败：${e.message || e}`;
+  } finally {
+    caption.value.saving = false;
+  }
+}
+
+watch(() => caption.value.withArtist, (v) => {
+  habits.captionWithArtist = v;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+});
+
 function toggleViewerFitMode() {
   viewer.value.fitMode = viewer.value.fitMode === 'fit' ? 'actual' : 'fit';
   viewer.value.zoom = 1;
@@ -408,6 +722,9 @@ const filteredLocalImages = computed(() => {
       if (format === 'zip' && !['zip', 'gif'].includes(ext)) return false;
       if (format === 'video' && !['mp4', 'webm', 'avi', 'mov', 'mkv'].includes(ext)) return false;
       if (format === 'image' && !['jpg', 'jpeg', 'png', 'webp', 'bmp', 'avif'].includes(ext)) return false;
+      if (format === 'favorited' && !isCardFavorited(item)) return false;
+      if (format === 'captioned' && !hasCaption(item)) return false;
+      if (format === 'not_captioned' && hasCaption(item)) return false;
     }
 
     if (hotOnly && (item.score || 0) < threshold) return false;
@@ -666,9 +983,29 @@ async function loadGallery(date, silent = false) {
     gallery.value.page = 1;
     rebuildSortSnapshot();
     await hydrateThumbs(pagedLocalImages.value);
+    refreshCaptionedSet();
   } finally {
     if (!silent) loadingGallery.value = false;
   }
+}
+
+// 已生成 caption 的文件名集合（按当前日期目录）
+const captionedSet = ref(new Set());
+async function refreshCaptionedSet() {
+  const date = gallery.value.selectedDate;
+  if (!date || !window.desktopAPI?.caption?.listForDate) {
+    captionedSet.value = new Set();
+    return;
+  }
+  try {
+    const names = await window.desktopAPI.caption.listForDate(date);
+    captionedSet.value = new Set(Array.isArray(names) ? names : []);
+  } catch {
+    captionedSet.value = new Set();
+  }
+}
+function hasCaption(item) {
+  return !!item?.filename && captionedSet.value.has(item.filename);
 }
 
 async function syncStatus() {
@@ -2155,6 +2492,9 @@ const modeDescription = computed(() => {
             <option value="image">图片</option>
             <option value="video">视频</option>
             <option value="zip">动图ZIP</option>
+            <option value="favorited">⭐ 仅收藏画师/角色</option>
+            <option value="captioned">📝 仅已生成 Caption</option>
+            <option value="not_captioned">📝 仅未生成 Caption</option>
           </select>
           <select v-model.number="gallery.cardSize" class="search-input" style="width: auto;" title="卡片大小">
             <option :value="120">紧凑</option>
@@ -2264,7 +2604,7 @@ const modeDescription = computed(() => {
         {{ showOnlySelected ? '当前日期没有已选图片，切换日期试试' : '当前日期没有图片' }}
       </div>
       <div v-else class="gallery-grid" :style="`--card-min-w: ${gallery.cardSize}px`">
-        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item) }">
+        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item), 'has-caption': hasCaption(item) }">
           <div class="thumb-wrap">
             <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @click="onThumbClick($event, item)" />
             <button
@@ -2274,6 +2614,7 @@ const modeDescription = computed(() => {
               @click.stop="toggleItemSelection(item)"
               :title="isItemSelected(item) ? '取消选择' : '加入选择'"
             >{{ isItemSelected(item) ? '✓' : '' }}</button>
+            <span v-if="hasCaption(item)" class="caption-badge" title="已生成 Caption，点击查看/编辑">📝</span>
           </div>
           <button
             class="img-fav-toggle"
@@ -2502,6 +2843,13 @@ const modeDescription = computed(() => {
             :title="viewerItem && isImageFavorited(viewerItem) ? '取消图片收藏' : '加入图片收藏'"
           >{{ viewerItem && isImageFavorited(viewerItem) ? '♥ 已收藏' : '♡ 收藏' }}</button>
           <button v-if="viewerItem?.filename?.toLowerCase().endsWith('.zip')" class="secondary" @click="convertGif(viewerItem)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
+          <button
+            @click="openCaptionWindow"
+            :style="hasCaption(viewerItem)
+              ? 'background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;'
+              : 'background: linear-gradient(135deg, #8b5cf6, #6d28d9); border: none; color: white;'"
+            :title="hasCaption(viewerItem) ? '已生成 Caption，点击查看/编辑' : '为这张图生成 AI 描述'"
+          >{{ hasCaption(viewerItem) ? '📝 Caption ✓' : '📝 Caption' }}</button>
           <button @click="editItem(viewerItem)" style="background: linear-gradient(135deg, var(--accent), var(--accent-deep)); border: none; color: white;">编辑图片</button>
           <button class="ghost" @click="closeViewer" style="color: #fff; border: 1px solid rgba(255,255,255,0.2);">关闭</button>
         </div>
@@ -2526,7 +2874,108 @@ const modeDescription = computed(() => {
       </div>
     </div>
 
-    <!-- Toast Notification -->
+    <!-- Caption 悬浮窗口（可拖动，不全屏遮罩，可同时看图） -->
+    <div
+      v-if="caption.open"
+      class="caption-panel floating"
+      :style="{ left: caption.pos.x + 'px', top: caption.pos.y + 'px' }"
+    >
+        <div class="caption-panel-header" @mousedown="onCaptionDragStart">
+          <h3>📝 图片描述 (Caption) <span class="caption-drag-hint">拖动标题栏移动窗口</span></h3>
+          <button class="ghost" @click="closeCaptionWindow" title="关闭">✕</button>
+        </div>
+        <div class="caption-panel-meta" v-if="caption.meta">
+          <span v-if="caption.meta.characters"><b>角色：</b>{{ caption.meta.characters }}</span>
+          <span v-if="caption.meta.copyright"><b>作品：</b>{{ caption.meta.copyright }}</span>
+          <span v-if="caption.withArtist && caption.meta.artist"><b>画师：</b>{{ caption.meta.artist }}</span>
+        </div>
+        <div class="caption-panel-controls">
+          <label class="caption-toggle">
+            <input type="checkbox" v-model="caption.withArtist" />
+            包含画师信息（重新生成时生效）
+          </label>
+          <div class="caption-mode-switch" role="tablist">
+            <button :class="{ active: caption.mode === 'mark' }" @click="caption.mode = 'mark'; caption.editDraft.open = false;" title="拖选标红错误段">🖍 标记模式</button>
+            <button :class="{ active: caption.mode === 'edit' }" @click="caption.mode = 'edit'" title="拖选后输入正确文本替换">✏️ 输入模式</button>
+          </div>
+          <div class="caption-panel-actions">
+            <button class="secondary" :disabled="caption.loading" @click="generateCaption">
+              {{ caption.loading ? '生成中...' : (caption.text ? '重新生成' : '生成描述') }}
+            </button>
+            <button :disabled="!caption.text || caption.saving" @click="saveCaption" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">
+              {{ caption.saving ? '保存中...' : '保存' }}
+            </button>
+          </div>
+        </div>
+        <div class="caption-hint" v-if="caption.text">
+          <template v-if="caption.mode === 'mark'">
+            <b>标记模式</b>：拖选错误片段 → 标红（首尾紧贴标点自动吸附）；点击红段撤销。
+          </template>
+          <template v-else>
+            <b>输入模式</b>：拖选要修改的片段 → 在弹出输入框中填入正确文本 → 确认（绿字）；点击绿段撤销。
+          </template>
+        </div>
+
+        <!-- 替换草稿（输入模式选区确认） -->
+        <div v-if="caption.editDraft.open" class="caption-edit-draft">
+          <div class="caption-edit-draft-row">
+            <span class="caption-edit-draft-label">原文：</span>
+            <span class="caption-edit-draft-original">{{ caption.editDraft.original }}</span>
+          </div>
+          <div class="caption-edit-draft-row">
+            <span class="caption-edit-draft-label">替换为：</span>
+            <input
+              id="caption-edit-input"
+              type="text"
+              v-model="caption.editDraft.replacement"
+              @keyup.enter="confirmEditDraft"
+              @keyup.esc="cancelEditDraft"
+              class="caption-edit-input"
+              placeholder="输入正确的描述文本..."
+            />
+            <button class="secondary" @click="confirmEditDraft">确认</button>
+            <button class="ghost" @click="cancelEditDraft">取消</button>
+          </div>
+        </div>
+
+        <div v-if="caption.loading" class="caption-loading">⏳ Gemini 正在分析图片，请稍候...</div>
+        <div v-else-if="!caption.text" class="caption-empty">尚未生成。点击「生成描述」开始。</div>
+        <div v-else class="caption-text-area" :class="{ 'mode-edit': caption.mode === 'edit' }" ref="captionTextRef" @mouseup="markCurrentSelection">
+          <template v-for="(seg, i) in captionRenderSegments" :key="i">
+            <span v-if="seg.type === 'text'">{{ seg.text }}</span>
+            <span v-else-if="seg.type === 'error'" class="caption-error" @click.stop="removeErrorSpan(seg.idx)" :title="`点击撤销标红：${seg.text}`">{{ seg.text }}</span>
+            <span v-else class="caption-edit" @click.stop="removeEditSpan(seg.idx)" :title="`原文：${seg.original}\n点击撤销替换`">{{ seg.text }}</span>
+          </template>
+        </div>
+        <div v-if="caption.errors.length || caption.edits.length" class="caption-marks-summary">
+          <div v-if="caption.errors.length" class="caption-error-list">
+            <div class="caption-error-list-title">
+              <span>🔴 错误标记（{{ caption.errors.length }}）</span>
+              <button class="ghost" @click="clearAllErrors">全部清除</button>
+            </div>
+            <ol>
+              <li v-for="(e, i) in caption.errors" :key="`err-${i}`">
+                <span>{{ e.text }}</span>
+                <button class="ghost" @click="removeErrorSpan(i)" title="移除">✕</button>
+              </li>
+            </ol>
+          </div>
+          <div v-if="caption.edits.length" class="caption-edit-list">
+            <div class="caption-edit-list-title">
+              <span>🟢 替换记录（{{ caption.edits.length }}）</span>
+              <button class="ghost" @click="clearAllEdits">全部清除</button>
+            </div>
+            <ol>
+              <li v-for="(e, i) in caption.edits" :key="`edit-${i}`">
+                <span><s>{{ e.original }}</s> → <b>{{ e.replacement }}</b></span>
+                <button class="ghost" @click="removeEditSpan(i)" title="移除">✕</button>
+              </li>
+            </ol>
+          </div>
+        </div>
+        <div v-if="caption.message" class="caption-message">{{ caption.message }}</div>
+    </div>
+
     <div v-if="toast.show" class="toast-overlay" :class="toast.type">
       {{ toast.msg }}
     </div>
@@ -3091,11 +3540,327 @@ const modeDescription = computed(() => {
 .viewer-actions {
   flex-wrap: nowrap !important;
   justify-content: center;
-  gap: 8px;
+  gap: 10px;
 }
 .viewer-actions button {
   flex: 0 0 auto;
   white-space: nowrap;
+  /* 加大按钮以适配新增的 Caption 按钮，防止挤压换行 */
+  padding: 8px 16px;
+  font-size: 13.5px;
+  min-height: 36px;
+}
+.viewer-toolbar {
+  padding: 12px 18px;
+}
+
+/* ---------------- Caption 悬浮窗口 ---------------- */
+.caption-panel.floating {
+  position: fixed;
+  width: min(480px, 92vw);
+  max-height: 88vh;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(250, 246, 239, 0.98));
+  border-radius: 14px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+  overflow: hidden;
+  /* 高于 viewer overlay 的 9999 / 默认值，确保浮窗在图像之上 */
+  z-index: 10025;
+  backdrop-filter: blur(6px);
+}
+.caption-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  cursor: move;
+  user-select: none;
+  padding: 2px 0 6px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+.caption-panel-header h3 {
+  margin: 0;
+  font-size: 15px;
+  color: var(--accent-deep);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.caption-drag-hint {
+  font-size: 11px;
+  font-weight: normal;
+  color: rgba(0, 0, 0, 0.4);
+}
+.caption-panel-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12px;
+  color: var(--ink);
+  background: rgba(0, 0, 0, 0.04);
+  padding: 6px 10px;
+  border-radius: 6px;
+}
+.caption-panel-meta b {
+  color: var(--accent-deep);
+}
+.caption-panel-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.caption-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  cursor: pointer;
+  user-select: none;
+}
+.caption-panel-actions {
+  display: flex;
+  gap: 6px;
+}
+.caption-panel-actions button {
+  padding: 6px 12px;
+  font-size: 12.5px;
+}
+.caption-hint {
+  font-size: 11.5px;
+  color: rgba(0, 0, 0, 0.55);
+  background: rgba(139, 92, 246, 0.08);
+  padding: 5px 9px;
+  border-radius: 6px;
+  border-left: 3px solid #8b5cf6;
+}
+.caption-loading, .caption-empty {
+  padding: 22px 12px;
+  text-align: center;
+  color: rgba(0, 0, 0, 0.5);
+  font-size: 13px;
+  background: rgba(0, 0, 0, 0.03);
+  border-radius: 8px;
+}
+.caption-text-area {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px 14px;
+  line-height: 1.8;
+  font-size: 13.5px;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-y: auto;
+  max-height: 40vh;
+  user-select: text;
+  cursor: text;
+}
+.caption-error {
+  background: rgba(239, 68, 68, 0.18);
+  color: #b91c1c;
+  border-bottom: 2px solid #ef4444;
+  border-radius: 3px;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.caption-error:hover {
+  background: rgba(239, 68, 68, 0.3);
+}
+.caption-error-list {
+  background: rgba(239, 68, 68, 0.06);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  max-height: 16vh;
+  overflow-y: auto;
+}
+.caption-error-list-title {
+  font-weight: 700;
+  color: #b91c1c;
+  margin-bottom: 3px;
+}
+.caption-error-list ol {
+  margin: 0;
+  padding-left: 18px;
+}
+.caption-error-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 2px 0;
+}
+.caption-error-list li button {
+  font-size: 11px;
+  padding: 1px 6px;
+  color: #b91c1c;
+}
+.caption-message {
+  font-size: 12px;
+  color: var(--accent-deep);
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 6px;
+  padding: 5px 9px;
+}
+
+/* 卡片上的「已生成 caption」角标 */
+.caption-badge {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: #fff;
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(16, 185, 129, 0.4);
+  pointer-events: none;
+  z-index: 3;
+  user-select: none;
+}
+.image-card.has-caption {
+  outline: 2px solid rgba(16, 185, 129, 0.55);
+  outline-offset: -2px;
+}
+
+/* 模式切换（标记 / 输入） */
+.caption-mode-switch {
+  display: inline-flex;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 8px;
+  padding: 2px;
+  gap: 2px;
+}
+.caption-mode-switch button {
+  border: none;
+  background: transparent;
+  padding: 5px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  color: rgba(0, 0, 0, 0.6);
+}
+.caption-mode-switch button.active {
+  background: #fff;
+  color: var(--accent-deep);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+  font-weight: 700;
+}
+.caption-text-area.mode-edit {
+  background: linear-gradient(180deg, #fff, #f0fdf4);
+}
+
+/* 替换段（绿） */
+.caption-edit {
+  background: rgba(34, 197, 94, 0.18);
+  color: #15803d;
+  border-bottom: 2px solid #22c55e;
+  border-radius: 3px;
+  padding: 0 2px;
+  cursor: pointer;
+  font-weight: 600;
+}
+.caption-edit:hover {
+  background: rgba(34, 197, 94, 0.3);
+}
+
+/* 输入草稿框 */
+.caption-edit-draft {
+  background: rgba(34, 197, 94, 0.08);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+  border-radius: 8px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.caption-edit-draft-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+}
+.caption-edit-draft-label {
+  font-weight: 700;
+  color: #15803d;
+  white-space: nowrap;
+}
+.caption-edit-draft-original {
+  background: rgba(0, 0, 0, 0.05);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--ink);
+  word-break: break-word;
+  flex: 1;
+}
+.caption-edit-input {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 13px;
+  outline: none;
+}
+.caption-edit-input:focus {
+  border-color: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.18);
+}
+
+/* 标记 + 替换汇总区 */
+.caption-marks-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.caption-edit-list {
+  background: rgba(34, 197, 94, 0.06);
+  border: 1px solid rgba(34, 197, 94, 0.25);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  max-height: 16vh;
+  overflow-y: auto;
+}
+.caption-edit-list-title, .caption-error-list-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+.caption-edit-list-title { color: #15803d; }
+.caption-error-list-title { color: #b91c1c; }
+.caption-edit-list-title button, .caption-error-list-title button {
+  font-size: 11px;
+  padding: 1px 6px;
+  font-weight: normal;
+}
+.caption-edit-list ol {
+  margin: 0;
+  padding-left: 18px;
+}
+.caption-edit-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 2px 0;
+}
+.caption-edit-list li button {
+  font-size: 11px;
+  padding: 1px 6px;
+  color: #15803d;
+}
+.caption-edit-list li s {
+  color: rgba(0, 0, 0, 0.45);
 }
 
 /* Modern Log UI */
