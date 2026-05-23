@@ -8,3 +8,4 @@ desktop-app/dist/assets
 artist_favorites.json
 character_favorites.json
 image_favorites.json
+.claude
