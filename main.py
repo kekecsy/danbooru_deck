@@ -714,9 +714,18 @@ def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="
             s_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
             e_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
             if s_dt > e_dt: s_dt, e_dt = e_dt, s_dt
-            
-            curr_dt = e_dt
-            while curr_dt >= s_dt:
+
+            # 按时间顺序（早 → 晚）抓取；超过 2 天时每抓完 2 天休息 10 分钟防风控
+            total_days = (e_dt - s_dt).days + 1
+            REST_AFTER_DAYS = 2
+            REST_SECONDS = 600
+            need_throttle = total_days > REST_AFTER_DAYS
+            if need_throttle:
+                append_log(f"日期范围共 {total_days} 天，将每 {REST_AFTER_DAYS} 天休息 {REST_SECONDS // 60} 分钟防风控。")
+
+            curr_dt = s_dt
+            days_since_rest = 0
+            while curr_dt <= e_dt:
                 if not state.is_running: break
                 pop_date = curr_dt.strftime("%Y-%m-%d")
                 append_log(f"=== 开始抓取日期: {pop_date} ===")
@@ -744,7 +753,24 @@ def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="
                 # 否则会留下陈旧的 _runtime_snapshot.json
                 if state.is_running:
                     clear_runtime_snapshot(pop_snapshot_path)
-                curr_dt -= datetime.timedelta(days=1)
+                days_since_rest += 1
+                curr_dt += datetime.timedelta(days=1)
+
+                # 还有剩余日期、累计达到 REST_AFTER_DAYS 时休息（可被暂停/停止打断）
+                if (need_throttle
+                        and state.is_running
+                        and curr_dt <= e_dt
+                        and days_since_rest >= REST_AFTER_DAYS):
+                    append_log(f"已抓取 {days_since_rest} 天，休息 {REST_SECONDS // 60} 分钟防风控（可暂停/停止打断）...")
+                    slept = 0
+                    while slept < REST_SECONDS:
+                        if not state.is_running: break
+                        state.play_event.wait()
+                        sleep(1)
+                        slept += 1
+                    days_since_rest = 0
+                    if state.is_running:
+                        append_log("休息结束，继续抓取下一天。")
         else:
             output = db_data.load_hot_drawer()
             nu_sets = db_data.load_need_update()

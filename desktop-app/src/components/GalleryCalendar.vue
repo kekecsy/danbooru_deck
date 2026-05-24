@@ -100,7 +100,7 @@ function pickDate(date) {
       <button class="small-btn" :disabled="selectedIndex < 0 || selectedIndex >= props.availableDates.length - 1" @click="$emit('select', props.availableDates[selectedIndex + 1])">上一天</button>
       <button class="calendar-trigger" @click="open = !open">{{ props.selectedDate || '选择日期' }}</button>
       <button class="small-btn" :disabled="selectedIndex <= 0" @click="$emit('select', props.availableDates[selectedIndex - 1])">下一天</button>
-      <button class="today-btn" :disabled="!canJumpToday" @click="$emit('select', props.today)">今日</button>
+      <button class="today-btn" :disabled="!canJumpToday" @click="$emit('select', props.today)">当前正在下载的日期</button>
     </div>
 
     <div v-if="open" class="calendar-panel">

@@ -45,7 +45,54 @@ watch(() => form.value.mode, (newMode) => {
     form.value.startPage = habits[`${newMode}_start`] || 1;
     form.value.endPage = habits[`${newMode}_end`] || 35;
   }
+  recentStartPages.value = loadRecentPages(newMode, 'start');
+  recentEndPages.value = loadRecentPages(newMode, 'end');
 });
+
+// ---------------- 起始页 / 结束页「最近使用」历史 ----------------
+// 每个模式（rank / popular / popular_range / collect_ids）按 start / end 各自存最近 2 个值
+// 历史在 startTask 时写入；删除按钮立即从 habits.recentPages 中移除
+function loadRecentPages(mode, field) {
+  const rp = habits.recentPages || {};
+  const list = rp[mode] && rp[mode][field];
+  return Array.isArray(list) ? list.filter(n => Number.isFinite(n) && n > 0) : [];
+}
+const recentStartPages = ref(loadRecentPages(form.value.mode, 'start'));
+const recentEndPages = ref(loadRecentPages(form.value.mode, 'end'));
+
+function pushRecentPage(mode, field, value) {
+  if (!Number.isFinite(value) || value <= 0) return;
+  const rp = { ...(habits.recentPages || {}) };
+  const prev = rp[mode] && Array.isArray(rp[mode][field]) ? rp[mode][field] : [];
+  const cur = prev.filter(v => v !== value);
+  cur.unshift(value);
+  while (cur.length > 2) cur.pop();
+  rp[mode] = { ...(rp[mode] || {}), [field]: cur };
+  habits.recentPages = rp;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+  if (mode === form.value.mode) {
+    if (field === 'start') recentStartPages.value = cur;
+    else recentEndPages.value = cur;
+  }
+}
+
+function applyRecentPage(field, value) {
+  if (field === 'start') form.value.startPage = value;
+  else form.value.endPage = value;
+}
+
+function deleteRecentPage(mode, field, value) {
+  const rp = { ...(habits.recentPages || {}) };
+  const prev = rp[mode] && Array.isArray(rp[mode][field]) ? rp[mode][field] : [];
+  const cur = prev.filter(v => v !== value);
+  rp[mode] = { ...(rp[mode] || {}), [field]: cur };
+  habits.recentPages = rp;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+  if (mode === form.value.mode) {
+    if (field === 'start') recentStartPages.value = cur;
+    else recentEndPages.value = cur;
+  }
+}
 
 // 过滤标签单独写一个 watcher，确保即使用户清空成 "" 也立刻写盘
 watch(() => form.value.tags, (v) => {
@@ -1082,6 +1129,10 @@ async function startTask() {
     if (payload.mode === 'download_ids') {
       const ids = parsePastedIds(form.value.idsText);
       if (ids.length) payload.ids = ids;
+    } else {
+      // 记录这次实际使用的起始页/结束页，方便下次一键填回
+      pushRecentPage(payload.mode, 'start', payload.start_page);
+      pushRecentPage(payload.mode, 'end', payload.end_page);
     }
     const result = await window.desktopAPI.crawler.start(payload);
     appendLog(result.msg || '已发送启动抓图请求。');
@@ -2332,14 +2383,54 @@ const modeDescription = computed(() => {
           title="从已收集的 ID 列表批量下载">按ID下载</button>
       </div>
 
-      <div class="field-grid" v-if="form.mode !== 'download_ids'">
-        <label>
+      <div class="field-grid pages-grid" v-if="form.mode !== 'download_ids'">
+        <label class="page-field">
           <span>起始页</span>
-          <input v-model.number="form.startPage" type="number" min="1" />
+          <div class="page-field-row">
+            <input v-model.number="form.startPage" type="number" min="1" class="page-input" />
+            <div class="recent-pages" v-if="recentStartPages.length" title="最近使用的起始页">
+              <span
+                v-for="p in recentStartPages"
+                :key="`rs-${form.mode}-${p}`"
+                class="recent-page-chip"
+                :class="{ active: p === form.startPage }"
+                @click="applyRecentPage('start', p)"
+                :title="`点击设为 ${p}`"
+              >
+                {{ p }}
+                <button
+                  type="button"
+                  class="recent-page-x"
+                  @click.stop="deleteRecentPage(form.mode, 'start', p)"
+                  title="删除这条记录"
+                >×</button>
+              </span>
+            </div>
+          </div>
         </label>
-        <label>
+        <label class="page-field">
           <span>结束页</span>
-          <input v-model.number="form.endPage" type="number" min="1" />
+          <div class="page-field-row">
+            <input v-model.number="form.endPage" type="number" min="1" class="page-input" />
+            <div class="recent-pages" v-if="recentEndPages.length" title="最近使用的结束页">
+              <span
+                v-for="p in recentEndPages"
+                :key="`re-${form.mode}-${p}`"
+                class="recent-page-chip"
+                :class="{ active: p === form.endPage }"
+                @click="applyRecentPage('end', p)"
+                :title="`点击设为 ${p}`"
+              >
+                {{ p }}
+                <button
+                  type="button"
+                  class="recent-page-x"
+                  @click.stop="deleteRecentPage(form.mode, 'end', p)"
+                  title="删除这条记录"
+                >×</button>
+              </span>
+            </div>
+          </div>
         </label>
       </div>
       <label class="field-full" v-if="['popular', 'download_ids'].includes(form.mode)">
@@ -2349,9 +2440,6 @@ const modeDescription = computed(() => {
       <label class="field-full" v-if="form.mode === 'download_ids'">
         <span>
           粘贴 ID 列表
-          <span class="muted compact-text">
-            (支持压缩格式 dbids:… / 逗号 / 空格 / 换行 / URL 混合粘贴；留空则使用已收集的 ids_data.json)
-          </span>
         </span>
         <textarea
           v-model="form.idsText"
@@ -2803,38 +2891,10 @@ const modeDescription = computed(() => {
               >★</button>
             </template>
           </div>
-          <div class="viewer-meta-block viewer-counter-block">
-            <span class="muted compact-text" style="color: #ccc;">
-              第
-              <input
-                class="viewer-jump-input"
-                type="number"
-                min="1"
-                :max="viewerItems.length"
-                :value="viewer.index + 1"
-                @keyup.enter="onViewerJump($event)"
-                @change="onViewerJump($event)"
-              />
-              / {{ viewerItems.length }} 张
-            </span>
-            <span v-if="(viewerItem?.score || 0) > 0" class="viewer-score">★ {{ viewerItem.score }}</span>
-            <span v-if="(viewerItem?.favCount || 0) > 0" class="viewer-fav">♥ {{ viewerItem.favCount }}</span>
-          </div>
         </div>
         <div class="button-row compact viewer-actions">
           <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
           <button class="secondary" @click="stepViewer(1)" :disabled="viewer.index >= viewerItems.length - 1">下一张</button>
-          <button
-            class="secondary"
-            @click="toggleViewerFitMode"
-            :title="viewer.fitMode === 'fit' ? '当前：适应窗口，点击切换为原始大小' : '当前：原始大小，点击切换为适应窗口'"
-          >{{ viewer.fitMode === 'fit' ? '⛶ 原始大小' : '▣ 适应窗口' }}</button>
-          <button
-            class="secondary"
-            :class="{ 'pin-active': viewer.toolbarPinned }"
-            @click="toggleViewerToolbarPin"
-            :title="viewer.toolbarPinned ? '已固定信息栏，点击取消固定（恢复鼠标悬浮显示）' : '固定信息栏（默认悬浮显示）'"
-          >{{ viewer.toolbarPinned ? '📌 已固定' : '📌 固定' }}</button>
           <button
             class="viewer-fav-btn"
             :class="{ active: viewerItem && isImageFavorited(viewerItem) }"
@@ -2853,6 +2913,38 @@ const modeDescription = computed(() => {
           <button @click="editItem(viewerItem)" style="background: linear-gradient(135deg, var(--accent), var(--accent-deep)); border: none; color: white;">编辑图片</button>
           <button class="ghost" @click="closeViewer" style="color: #fff; border: 1px solid rgba(255,255,255,0.2);">关闭</button>
         </div>
+      </div>
+
+      <!-- 始终显示的右上角信息小栏：计数 / 适应窗口 / 固定信息栏。
+           独立于顶部置顶 toolbar，不随 viewerToolbarVisible 收起 -->
+      <div class="viewer-corner-info">
+        <div class="viewer-corner-row viewer-corner-counter">
+          <span class="viewer-corner-counter-label">第</span>
+          <input
+            class="viewer-jump-input viewer-corner-jump"
+            type="number"
+            min="1"
+            :max="viewerItems.length"
+            :value="viewer.index + 1"
+            @keyup.enter="onViewerJump($event)"
+            @change="onViewerJump($event)"
+            title="输入并回车跳转到指定张数"
+          />
+          <span class="viewer-corner-counter-label">/ {{ viewerItems.length }} 张</span>
+          <span v-if="(viewerItem?.score || 0) > 0" class="viewer-score">★ {{ viewerItem.score }}</span>
+          <span v-if="(viewerItem?.favCount || 0) > 0" class="viewer-fav">♥ {{ viewerItem.favCount }}</span>
+        </div>
+        <button
+          class="viewer-corner-row viewer-corner-btn"
+          @click="toggleViewerFitMode"
+          :title="viewer.fitMode === 'fit' ? '当前：适应窗口，点击切换为原始大小' : '当前：原始大小，点击切换为适应窗口'"
+        >{{ viewer.fitMode === 'fit' ? '⛶ 原始大小' : '▣ 适应窗口' }}</button>
+        <button
+          class="viewer-corner-row viewer-corner-btn"
+          :class="{ 'is-active': viewer.toolbarPinned }"
+          @click="toggleViewerToolbarPin"
+          :title="viewer.toolbarPinned ? '已固定信息栏，点击取消固定（恢复鼠标悬浮显示）' : '固定信息栏（默认悬浮显示）'"
+        >{{ viewer.toolbarPinned ? '📌 已固定' : '📌 固定' }}</button>
       </div>
       <div class="viewer-stage" :class="{ 'is-fit': viewer.fitMode === 'fit' }" @wheel="onViewerWheel" @click.self="closeViewer">
         <div class="viewer-image-wrap" :class="{ 'is-fit': viewer.fitMode === 'fit' }" :style="{ zoom: viewer.zoom }">
@@ -2892,7 +2984,7 @@ const modeDescription = computed(() => {
         <div class="caption-panel-controls">
           <label class="caption-toggle">
             <input type="checkbox" v-model="caption.withArtist" />
-            包含画师信息（重新生成时生效）
+            包含画师信息
           </label>
           <div class="caption-mode-switch" role="tablist">
             <button :class="{ active: caption.mode === 'mark' }" @click="caption.mode = 'mark'; caption.editDraft.open = false;" title="拖选标红错误段">🖍 标记模式</button>
@@ -5144,5 +5236,165 @@ const modeDescription = computed(() => {
 }
 .safe-mode-btn.is-unsafe:hover {
   background: rgba(209, 86, 40, 0.3);
+}
+
+/* ---------------- 起始页 / 结束页：缩小输入框 + 右侧最近使用记录 ---------------- */
+/* 注意：类名不能用 .page-grid —— 全局 style.css 里 .page-grid 是应用整体布局
+   （340px + 1fr + height:100%），命中后会把这一行撑到面板满高，下方出现大块空白 */
+.pages-grid {
+  /* 两栏等分，input + 芯片紧挨着，剩下的空间让给芯片 */
+  grid-template-columns: 1fr 1fr;
+}
+.page-field {
+  min-width: 0;
+}
+.page-field-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.page-input {
+  /* 进一步缩小：3 位数字也能完整显示。多余空间让给芯片，不再把整行撑高 */
+  width: 44px;
+  flex: 0 0 auto;
+  padding: 4px 4px;
+  font-size: 12px;
+  text-align: center;
+}
+/* number 输入自带的上下箭头按钮在窄输入框里很占位置，隐藏掉以免数字被挤出 */
+.page-input::-webkit-outer-spin-button,
+.page-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.page-input[type="number"] {
+  -moz-appearance: textfield;
+}
+.recent-pages {
+  display: flex;
+  /* 不允许换行：换行会把整行撑高，让下面的"过滤标签"和上面差距过大 */
+  flex-wrap: nowrap;
+  gap: 3px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.recent-page-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  padding: 1px 3px 1px 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--accent-deep);
+  background: var(--soft);
+  border: 1px solid rgba(74, 53, 25, 0.12);
+  border-radius: 999px;
+  cursor: pointer;
+  user-select: none;
+  line-height: 1.3;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.recent-page-chip:hover {
+  background: rgba(243, 223, 212, 0.85);
+  border-color: rgba(182, 84, 52, 0.35);
+}
+.recent-page-chip.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+  border-color: transparent;
+}
+.recent-page-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  margin-left: 1px;
+  border: none;
+  border-radius: 50%;
+  background: rgba(74, 53, 25, 0.18);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+.recent-page-chip.active .recent-page-x {
+  background: rgba(255, 255, 255, 0.35);
+}
+.recent-page-x:hover {
+  background: rgba(157, 44, 44, 0.7);
+}
+
+/* 缩窄 page-field label：base style 给的是 margin-bottom: 10px + gap: 5px，
+   配合上面的紧凑布局可以再小一点，让"起始页/结束页"和下面"过滤标签"挨得更近 */
+.pages-grid .page-field {
+  margin-bottom: 4px;
+  gap: 3px;
+}
+
+/* ---------------- 大图查看器右上角始终显示的信息小栏 ----------------
+   独立于顶部 .viewer-toolbar，不会随 viewerToolbarVisible 收起；
+   包含 3 行：第 x/y 张（含 ★/♥）/ 适应窗口 / 固定信息栏 */
+.viewer-corner-info {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  pointer-events: none;  /* 让外层不挡鼠标，子元素再各自接 pointer-events: auto */
+}
+.viewer-corner-row {
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  color: #fff;
+  font-size: 12.5px;
+  font-weight: 600;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  white-space: nowrap;
+}
+.viewer-corner-counter {
+  /* 计数行更紧凑些，让数字 + ★ + ♥ 都能一目了然 */
+  padding: 5px 12px;
+}
+.viewer-corner-counter-label {
+  color: rgba(255, 255, 255, 0.75);
+  font-weight: 500;
+  font-size: 12px;
+}
+.viewer-corner-jump {
+  /* 复用全局 .viewer-jump-input 的暗色样式，但宽度调小一点适配右上小栏 */
+  width: 48px;
+  padding: 2px 6px;
+  font-size: 12px;
+  text-align: center;
+}
+.viewer-corner-btn {
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s, color 0.18s;
+  font-family: inherit;
+}
+.viewer-corner-btn:hover {
+  background: rgba(0, 0, 0, 0.75);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.viewer-corner-btn.is-active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  border-color: transparent;
+  color: #fff;
+  box-shadow: 0 4px 16px rgba(182, 84, 52, 0.45);
 }
 </style>
