@@ -138,6 +138,7 @@ async function buildGalleryByDate(requestedDate) {
       return {
         selectedDate: data.selected_date,
         availableDates: data.available_dates || [],
+        availableTags: Array.isArray(data.available_tags) ? data.available_tags : [],
         today: data.today || getTodayString(),
         images
       };

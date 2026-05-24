@@ -106,6 +106,102 @@ def get_popular_posts(date_str, page, scale="day", timeout=20):
     return r.json()
 
 
+def get_posts_by_tags(tags, page, limit=20, timeout=20):
+    """按 tag 查询串拉 posts.json。tags 支持 Danbooru 的多 tag 语法
+    （空格分隔的 AND 查询，如 'hatsune_miku rating:safe -comic'）。
+    走 _HOST 抽象，SFW/full 开关自动生效。"""
+    params = {
+        "page": page,
+        "tags": tags,
+        "limit": limit,
+    }
+    r = requests.get(
+        f"https://{_HOST}/posts.json",
+        params=params,
+        headers=HEADERS,
+        proxies=PROXIES,
+        impersonate="chrome120",
+        timeout=timeout,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def fetch_drawers_by_character(character_tag: str,
+                               total_pages: int,
+                               start_offset: int = 1,
+                               known_drawers: set = None,
+                               request_delay: float = 1.0):
+    """从 Danbooru 倒序抓取指定角色标签的帖子，提取画师标签并返回新发现的画师集合。
+
+    参数：
+        character_tag: 角色标签（如 'hatsune_miku'）
+        total_pages: 该角色在 Danbooru 上的总页数
+        start_offset: 从倒数第几页开始（1=最后一页，total_pages=第一页）
+        known_drawers: 已知画师集合，命中则不返回
+        request_delay: 每页之间的等待秒数，避免触发限流
+
+    返回：新发现的画师集合（已剔除 (voice_actor) 标签和 known_drawers）
+
+    实现说明：原来 d1.py 用 BeautifulSoup 抓 HTML，列表页有时会被反爬挡掉；
+    这里改用 posts.json 拿到 ID 列表，跟项目其他抓取保持同一套 host/cookie/proxy。
+    """
+    if known_drawers is None:
+        known_drawers = set()
+    if total_pages < 1:
+        return set()
+
+    start_page = total_pages - start_offset + 1
+    if start_page < 1:
+        start_page = 1
+
+    new_drawers = set()
+    failed_ids = set()
+
+    for page in range(start_page, 0, -1):
+        print(f"[fetch_drawers] 第 {page}/{total_pages} 页 tag={character_tag} (host={_HOST})")
+        try:
+            posts = get_posts_by_tags(character_tag, page)
+        except Exception as e:
+            print(f"  请求页面失败: {e}")
+            sleep(request_delay)
+            continue
+
+        if not posts:
+            print(f"  第 {page} 页无帖子。")
+            sleep(request_delay)
+            continue
+
+        for post in posts:
+            post_id = str(post.get("id") or "")
+            if not post_id or post_id in failed_ids:
+                continue
+
+            # 列表接口已经带 tag_string_artist；只有缺字段时才再请求单帖详情
+            artist_str = post.get("tag_string_artist") or ""
+            if not artist_str:
+                detail = fetch_data_with_retry(post_id, retries=2, delay=3)
+                if detail is None:
+                    failed_ids.add(post_id)
+                    continue
+                artist_str = detail.get("tag_string_artist") or ""
+
+            if not artist_str:
+                continue
+
+            drawers = [t for t in artist_str.split(" ") if t and not t.lower().endswith("(voice_actor)")]
+            if not drawers:
+                continue
+            primary = drawers[0]
+            if primary not in known_drawers:
+                new_drawers.add(primary)
+                known_drawers.add(primary)
+
+        sleep(request_delay)
+
+    return new_drawers
+
+
 def get_wiki(name, timeout=10):
     """从 Danbooru wiki 在线拉一个 tag 的描述 + other_names。
     复刻 tags_translate/tags_wiki.py 的 get_wiki，改用项目内的 curl_cffi + 代理 + cookie。

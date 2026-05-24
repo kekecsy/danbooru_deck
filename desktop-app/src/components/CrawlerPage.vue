@@ -34,7 +34,8 @@ const form = ref({
   targetDate: '',
   startDate: '',
   endDate: '',
-  idsText: ''
+  idsText: '',
+  tagQuery: typeof habits.tagQuery === 'string' ? habits.tagQuery : ''
 });
 
 watch(() => form.value.mode, (newMode) => {
@@ -44,6 +45,9 @@ watch(() => form.value.mode, (newMode) => {
   } else if (['popular', 'popular_range'].includes(newMode)) {
     form.value.startPage = habits[`${newMode}_start`] || 1;
     form.value.endPage = habits[`${newMode}_end`] || 35;
+  } else if (newMode === 'tags') {
+    form.value.startPage = habits.tags_start || 1;
+    form.value.endPage = habits.tags_end || 5;
   }
   recentStartPages.value = loadRecentPages(newMode, 'start');
   recentEndPages.value = loadRecentPages(newMode, 'end');
@@ -100,6 +104,12 @@ watch(() => form.value.tags, (v) => {
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 });
 
+// tag 查询串也单独存：用户切到 popular_range / rank 后再切回 tags 应能恢复
+watch(() => form.value.tagQuery, (v) => {
+  habits.tagQuery = typeof v === 'string' ? v : '';
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+});
+
 watch(form, (newForm) => {
   habits.mode = newForm.mode;
   habits.tags = newForm.tags;
@@ -111,6 +121,8 @@ watch(form, (newForm) => {
 const gallery = ref({
   selectedDate: '',
   availableDates: [],
+  // 标签文件夹：[{folder: "tag_xxx", display: "xxx"}] —— 与日期文件夹并行，由后端扫描 hot_pic 提供
+  availableTags: [],
   today: '',
   images: [],
   search: '',
@@ -1025,6 +1037,8 @@ async function loadGallery(date, silent = false) {
     }));
     gallery.value.selectedDate = data.selectedDate;
     gallery.value.availableDates = data.availableDates;
+    // tag 文件夹由 IPC/后端透传，IPC fallback 没有此字段时给空数组兜底
+    gallery.value.availableTags = Array.isArray(data.availableTags) ? data.availableTags : [];
     gallery.value.today = data.today;
     gallery.value.images = normalizedImages;
     gallery.value.page = 1;
@@ -1124,11 +1138,19 @@ async function startTask() {
       mode: form.value.mode || 'rank',
       target_date: form.value.targetDate || '',
       start_date: form.value.startDate || '',
-      end_date: form.value.endDate || ''
+      end_date: form.value.endDate || '',
+      tag_query: form.value.tagQuery || ''
     };
     if (payload.mode === 'download_ids') {
       const ids = parsePastedIds(form.value.idsText);
       if (ids.length) payload.ids = ids;
+    } else if (payload.mode === 'tags') {
+      if (!payload.tag_query.trim()) {
+        showToast('请填写 tag 查询串（例如：hatsune_miku rating:safe）', 'error');
+        return;
+      }
+      pushRecentPage(payload.mode, 'start', payload.start_page);
+      pushRecentPage(payload.mode, 'end', payload.end_page);
     } else {
       // 记录这次实际使用的起始页/结束页，方便下次一键填回
       pushRecentPage(payload.mode, 'start', payload.start_page);
@@ -2348,9 +2370,37 @@ const modeDescription = computed(() => {
     case 'popular_range': return '设定起始与结束日期，批量抓取这段时间内所有的热门图片。';
     case 'collect_ids': return '网络状况不佳时的极速模式：仅拉取列表和元数据，不下载图片本体。';
     case 'download_ids': return '从已收集的 ID 列表中进行批量下载，常用于断点续传或集中补全。';
+    case 'tags': return '按 tag 查询下载到独立的 tag 文件夹（与日期文件夹并行，共用全局 log.json 防止重复下载）。';
     default: return '选择模式后配置参数，点击启动开始执行。';
   }
 });
+
+// 前端按和后端 sanitize_tag_folder 同样的规则预览将要生成的文件夹名
+// （后端会再 sanitize 一次，这里只是 UI 提示）
+const tagFolderPreview = computed(() => {
+  const q = (form.value.tagQuery || '').trim();
+  if (!q) return '';
+  const SPACE_MARK = '__';
+  const COLON_MARK = '__c__';
+  let s = q.replace(/:/g, COLON_MARK);
+  s = s.replace(/[<>"/\\|?* -]/g, '');
+  s = s.replace(/\s+/g, SPACE_MARK);
+  s = s.replace(/^[. ]+|[. ]+$/g, '');
+  if (!s) return '';
+  return ('tag_' + s).slice(0, 80);
+});
+
+// 已选中的目录是不是 tag 文件夹（前端用于显示徽标 / 切换 UI）
+const isTagFolderSelected = computed(() => {
+  const d = gallery.value.selectedDate || '';
+  return d.startsWith('tag_');
+});
+
+function tagFolderLabel(folder) {
+  if (!folder) return '';
+  const body = folder.startsWith('tag_') ? folder.slice(4) : folder;
+  return body.replace(/__c__/g, ':').replace(/__/g, ' ');
+}
 </script>
 
 <template>
@@ -2377,6 +2427,8 @@ const modeDescription = computed(() => {
           title="按指定日期获取热门帖子并下载">日期热门</button>
         <button class="mode-chip" :class="{ active: form.mode === 'popular_range' }" @click="form.mode = 'popular_range'"
           title="按指定日期范围获取热门帖子并下载">日期范围热门</button>
+        <button class="mode-chip" :class="{ active: form.mode === 'tags' }" @click="form.mode = 'tags'"
+          title="按 tag 查询下载到独立的 tag_xxx 文件夹，与日期文件夹并行">标签下载</button>
         <button class="mode-chip" :class="{ active: form.mode === 'collect_ids' }" @click="form.mode = 'collect_ids'"
           title="网不好时只收集 ID，不下载图片">仅收集ID</button>
         <button class="mode-chip" :class="{ active: form.mode === 'download_ids' }" @click="form.mode = 'download_ids'"
@@ -2463,6 +2515,22 @@ const modeDescription = computed(() => {
           <input v-model="form.endDate" type="date" />
         </label>
       </div>
+      <label class="field-full" v-if="form.mode === 'tags'">
+        <span>
+          Tag 查询串
+          <span class="muted compact-text">(空格 = AND；冒号支持，如 rating:safe；前缀 - 反向)</span>
+        </span>
+        <input
+          v-model="form.tagQuery"
+          type="text"
+          placeholder="例如：hatsune_miku rating:safe -comic"
+          style="font-family: Consolas, monospace; font-size: 12.5px;"
+        />
+        <div class="muted compact-text" style="margin-top: 4px; line-height: 1.5;">
+          下载到独立文件夹 <strong style="color: var(--accent-deep); font-family: Consolas, monospace;">{{ tagFolderPreview || 'tag_...' }}</strong>
+          <span> · 共用全局 log.json，避免和其它文件夹重复下载相同 ID</span>
+        </div>
+      </label>
       <label class="field-full">
         <span>过滤标签</span>
         <input v-model="form.tags" type="text" />
@@ -2580,9 +2648,9 @@ const modeDescription = computed(() => {
             <option value="image">图片</option>
             <option value="video">视频</option>
             <option value="zip">动图ZIP</option>
-            <option value="favorited">⭐ 仅收藏画师/角色</option>
-            <option value="captioned">📝 仅已生成 Caption</option>
-            <option value="not_captioned">📝 仅未生成 Caption</option>
+            <option value="favorited">仅收藏画师/角色</option>
+            <option value="captioned">仅已生成 Caption</option>
+            <option value="not_captioned">仅未生成 Caption</option>
           </select>
           <select v-model.number="gallery.cardSize" class="search-input" style="width: auto;" title="卡片大小">
             <option :value="120">紧凑</option>
@@ -2659,9 +2727,30 @@ const modeDescription = computed(() => {
         </div>
       </div>
 
+      <!-- Tag 文件夹切换：和日期日历并行；选中后 selectedDate 会变成 tag_xxx，calendar 不再高亮任何日期 -->
+      <div v-if="gallery.availableTags.length || isTagFolderSelected" class="tag-folder-bar">
+        <span class="tag-folder-label">🏷 标签文件夹</span>
+        <select
+          class="search-input tag-folder-select"
+          :value="isTagFolderSelected ? gallery.selectedDate : ''"
+          @change="loadGallery($event.target.value || (gallery.availableDates[0] || gallery.today))"
+          :title="isTagFolderSelected ? `当前正在查看 tag 文件夹：${tagFolderLabel(gallery.selectedDate)}` : '选择一个 tag 文件夹切换'"
+        >
+          <option value="">— 切回日期文件夹 —</option>
+          <option
+            v-for="t in gallery.availableTags"
+            :key="t.folder"
+            :value="t.folder"
+          >{{ t.display || t.folder }}</option>
+        </select>
+        <span v-if="isTagFolderSelected" class="muted compact-text tag-folder-hint">
+          当前：<strong style="font-family: Consolas, monospace; color: var(--accent-deep);">{{ gallery.selectedDate }}</strong>
+        </span>
+      </div>
+
       <GalleryCalendar
         :available-dates="gallery.availableDates"
-        :selected-date="gallery.selectedDate"
+        :selected-date="isTagFolderSelected ? '' : gallery.selectedDate"
         :today="gallery.today"
         @select="loadGallery"
       />
@@ -5333,6 +5422,36 @@ const modeDescription = computed(() => {
 .pages-grid .page-field {
   margin-bottom: 4px;
   gap: 3px;
+}
+
+/* ---------------- Tag 文件夹切换栏 ----------------
+   选中后 selectedDate = "tag_xxx"，会同时关掉 GalleryCalendar 的日期高亮 */
+.tag-folder-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 6px;
+  flex-wrap: wrap;
+}
+.tag-folder-label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent-deep);
+  letter-spacing: 0.3px;
+  white-space: nowrap;
+}
+.tag-folder-select {
+  font-size: 12px;
+  padding: 4px 8px;
+  height: 28px;
+  width: auto;
+  min-width: 180px;
+  max-width: 320px;
+  background: linear-gradient(135deg, #fff, #fbf4eb);
+  border-color: rgba(74, 53, 25, 0.18);
+}
+.tag-folder-hint {
+  margin-left: auto;
 }
 
 /* ---------------- 大图查看器右上角始终显示的信息小栏 ----------------

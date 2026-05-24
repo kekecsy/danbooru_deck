@@ -1,11 +1,13 @@
 hot_pic
 __pycache__
+.env
+.claude
 drawer
 exiftool
 desktop-app/node_modules
 desktop-app/dist/assets
-.env
 artist_favorites.json
 character_favorites.json
 image_favorites.json
-.claude
+copyright.json
+magazine.json

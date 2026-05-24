@@ -34,7 +34,10 @@ from my_utils import (
     load_json,
     merge_daily_viewer_data,
     save_runtime_snapshot,
-    get_proxies_for_url
+    get_proxies_for_url,
+    sanitize_tag_folder,
+    is_tag_folder,
+    tag_folder_display,
 )
 import danbooru_api
 from danbooru_data import DanbooruData
@@ -92,9 +95,36 @@ def get_available_date_folders():
         folders.append(item.name)
     return sorted(folders, reverse=True)
 
+def get_available_tag_folders():
+    """扫描 hot_pic/ 下所有以 tag_ 开头的文件夹，返回 [{"folder": ..., "display": ...}]。
+    用于和日期文件夹并行：日期=按时间归档，tag=按主题归档，二者共用同一份 log.json。"""
+    folders = []
+    base = Path(base_download_dir)
+    if not base.exists():
+        return folders
+    for item in base.iterdir():
+        if not item.is_dir() or not is_tag_folder(item.name):
+            continue
+        folders.append({
+            "folder": item.name,
+            "display": tag_folder_display(item.name),
+        })
+    folders.sort(key=lambda x: x["folder"].lower())
+    return folders
+
 def resolve_selected_date(requested_date=None):
+    """兼容日期 (YYYY-MM-DD) 和 tag 文件夹 (tag_xxx)：
+    - 日期：按已有列表过滤
+    - tag 文件夹：只要 hot_pic/<name> 存在就接受
+    - 其它情况：fallback 到 today / 列表首项"""
     available_dates = get_available_date_folders()
     if requested_date:
+        # 1) tag 文件夹直接放行（只要磁盘上有）
+        if is_tag_folder(requested_date):
+            tag_dir = Path(base_download_dir) / requested_date
+            if tag_dir.exists() and tag_dir.is_dir():
+                return requested_date, available_dates
+        # 2) 日期：照旧校验 + 命中已有
         try:
             datetime.datetime.strptime(requested_date, "%Y-%m-%d")
             if requested_date in available_dates:
@@ -324,11 +354,12 @@ class StartRequest(BaseModel):
     start_page: int
     end_page: int
     tags: str
-    mode: str = "rank"  # rank | collect_ids | download_ids | popular | popular_range
+    mode: str = "rank"  # rank | collect_ids | download_ids | popular | popular_range | tags
     target_date: str = ""  # popular 模式用，可指定日期
     start_date: str = ""   # popular_range
     end_date: str = ""     # popular_range
     ids: list = []         # download_ids 模式可选：内联 IDs；非空则覆盖目标日期的 ids_data.json
+    tag_query: str = ""    # tags 模式：Danbooru 多 tag 查询串，如 "hatsune_miku rating:safe"
 
 class OpenLocalRequest(BaseModel):
     local_path: str
@@ -580,6 +611,54 @@ def grabber_popular(db_data_inst, page_num, filter_tags, target_date):
     db_data_inst.save_viewer_data(daily_viewer_data)
     return new_hot_artists, page_need_update
 
+# --- mode: tags (按 tag 查询下载到 hot_pic/tag_xxx/ 文件夹) ---
+def grabber_tags(db_data_inst, page_num, filter_tags, tag_query):
+    """按 Danbooru tag 查询下载图片到 tag 文件夹。共享全局 log.json（在
+    base_dir 根目录），避免和日期文件夹之间重复下载相同 ID 的图片。"""
+    global daily_viewer_data
+    # 这里传给 _ensure_today 的 "target_date" 实际是 tag 文件夹名（tag_xxxxxx），
+    # DanbooruData 只把它当作 save_dir 的最后一段路径，不关心格式
+    _ensure_today(db_data_inst, db_data_inst.today_str)
+    page_need_update = {"1": [], "2": []}
+    new_hot_artists = []
+
+    state.play_event.wait()
+    if not state.is_running:
+        return [], page_need_update
+
+    try:
+        append_log(f"[Tags] 正在获取 [{tag_query}] 第 {page_num} 页... (host={danbooru_api.get_host()})")
+        posts = danbooru_api.get_posts_by_tags(tag_query, page_num)
+    except Exception as e:
+        append_log(f"获取页面失败: {e}")
+        return [], {"1": [], "2": []}
+
+    page_success = 0
+    page_skipped = 0
+    page_failed = 0
+    for post in posts:
+        if not state.is_running:
+            break
+        state.play_event.wait()
+        result = _process_post(post, db_data_inst, filter_tags, do_download=True)
+        if result is None:
+            page_skipped += 1
+            continue
+        ids, artist, saved_filename = result
+        if saved_filename:
+            page_success += 1
+        else:
+            page_failed += 1
+        _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists)
+        _append_viewer(ids, artist, saved_filename, post)
+
+    append_log(
+        f"[Tags] [{tag_query}] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
+    )
+    db_data_inst.save_global_data()
+    db_data_inst.save_viewer_data(daily_viewer_data)
+    return new_hot_artists, page_need_update
+
 # --- mode: collect_ids (只收集 ID 不下载) ---
 def grabber_collect_ids(db_data_inst, page_num, filter_tags):
     _ensure_today(db_data_inst)
@@ -702,11 +781,41 @@ def task_download_ids(db_data_inst, filter_tags, inline_ids=None):
     append_log(f"[DownloadIDs] 完成，成功下载 {success_count} 张图片。")
 
 
-def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="", end_date="", inline_ids=None):
+def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="", end_date="", inline_ids=None, tag_query=""):
     global scraper_thread
     try:
         if mode == "download_ids":
             task_download_ids(db_data, state.filter_tags, inline_ids)
+        elif mode == "tags":
+            if not tag_query.strip():
+                append_log("tags 模式需要填写 tag 查询串。")
+                return
+            folder_name = sanitize_tag_folder(tag_query)
+            if not folder_name:
+                append_log(f"tag 查询串 [{tag_query}] 转文件夹名失败。")
+                return
+            append_log(f"[Tags] 目标文件夹: {folder_name} (基于 tag: {tag_query})")
+            tag_db = DanbooruData(folder_name)
+            tag_snapshot_path = os.path.join(tag_db.save_dir, "_runtime_snapshot.json")
+
+            output = tag_db.load_hot_drawer()
+            nu_sets = tag_db.load_need_update()
+            n = start_page
+            while n <= end_page:
+                if not state.is_running:
+                    append_log("任务已被强制终止。")
+                    break
+                state.play_event.wait()
+                append_log(f"--- 正在处理 tag [{tag_query}] 第 {n} 页 ---")
+                o, n_u_dict = grabber_tags(tag_db, n, state.filter_tags, tag_query)
+                output = list(set(output + o) - tag_db.all_drawer)
+                for k in ["1", "2"]:
+                    nu_sets[k].update(n_u_dict[k])
+                tag_db.save_hot_drawer(list(set(output)))
+                tag_db.save_need_update(nu_sets)
+                n += 1
+            if state.is_running:
+                clear_runtime_snapshot(tag_snapshot_path)
         elif mode == "popular_range":
             if not start_date or not end_date:
                 append_log("日期范围缺失。")
@@ -873,11 +982,11 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
 
     scraper_thread = threading.Thread(
         target=scraper_task,
-        args=(req.start_page, req.end_page, req.mode, req.target_date, req.start_date, req.end_date, req.ids),
+        args=(req.start_page, req.end_page, req.mode, req.target_date, req.start_date, req.end_date, req.ids, req.tag_query),
         daemon=True
     )
     scraper_thread.start()
-    mode_labels = {"rank": "排行抓取", "popular": "Popular热门", "collect_ids": "仅收集ID", "download_ids": "按ID下载", "popular_range": "日期范围热门"}
+    mode_labels = {"rank": "排行抓取", "popular": "Popular热门", "collect_ids": "仅收集ID", "download_ids": "按ID下载", "popular_range": "日期范围热门", "tags": "Tag下载"}
     return {"msg": f"{mode_labels.get(req.mode, '任务')}已启动"}
 
 @app.post("/api/pause")
@@ -929,6 +1038,7 @@ def get_gallery_data():
         "local_images": build_local_image_library(selected_date),
         "selected_date": selected_date,
         "available_dates": available_dates,
+        "available_tags": get_available_tag_folders(),
         "today": today_str
     }
 
@@ -940,6 +1050,7 @@ def get_gallery_data_by_date(date_str: str):
         "local_images": build_local_image_library(selected_date),
         "selected_date": selected_date,
         "available_dates": available_dates,
+        "available_tags": get_available_tag_folders(),
         "today": today_str,
         "requested_date": date_str
     }

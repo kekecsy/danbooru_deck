@@ -1,6 +1,7 @@
 # my_utils.py
 import json
 import os
+import re
 import time
 from requests.utils import get_environ_proxies
 import exiftool
@@ -62,6 +63,48 @@ def merge_daily_viewer_data(current_items, snapshot_items):
             merged.append(item)
             known.add(key)
     return merged
+
+
+# ---------------- Tag 文件夹命名 ----------------
+# 把 Danbooru tag 查询串转成文件系统安全的文件夹名。
+# - 统一加 "tag_" 前缀，避免和 YYYY-MM-DD 日期文件夹冲突，前端也能据此区分
+# - 空格转 "__"，冒号（rating:safe）转 "__c__"（unambiguous marker，避免和合法的 "-" 混淆）
+# - Windows 非法字符直接去掉
+# - 限制 80 字符长度，避免 NTFS 路径过长被截断
+_TAG_FOLDER_PREFIX = "tag_"
+_TAG_SPACE_MARK = "__"
+_TAG_COLON_MARK = "__c__"
+_INVALID_FS_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+def sanitize_tag_folder(tag_query: str) -> str:
+    """tag 查询串 -> 'tag_xxx' 文件夹名；空串返回空串。"""
+    s = (tag_query or "").strip()
+    if not s:
+        return ""
+    # 顺序很重要：先把冒号换成专用标记，再去除非法字符（_INVALID_FS_CHARS_RE 也会匹配 ":"，
+    # 但此时已经被替换掉了），最后把空白合并成空格标记
+    s = s.replace(":", _TAG_COLON_MARK)
+    s = _INVALID_FS_CHARS_RE.sub("", s)
+    s = re.sub(r"\s+", _TAG_SPACE_MARK, s)
+    s = s.strip(". ")
+    if not s:
+        return ""
+    folder = f"{_TAG_FOLDER_PREFIX}{s}"
+    return folder[:80]
+
+
+def is_tag_folder(folder_name: str) -> bool:
+    return isinstance(folder_name, str) and folder_name.startswith(_TAG_FOLDER_PREFIX)
+
+
+def tag_folder_display(folder_name: str) -> str:
+    """把 'tag_hatsune_miku__rating__c__safe' 还原成可读的 'hatsune_miku rating:safe'。"""
+    if not is_tag_folder(folder_name):
+        return folder_name
+    body = folder_name[len(_TAG_FOLDER_PREFIX):]
+    body = body.replace(_TAG_COLON_MARK, ":")
+    body = body.replace(_TAG_SPACE_MARK, " ")
+    return body
 
 
 def save_global_data(log_data, artist_stats, log_path, stats_path):
