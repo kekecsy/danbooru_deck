@@ -1070,7 +1070,10 @@ def get_gallery_data():
         "selected_date": selected_date,
         "available_dates": available_dates,
         "available_tags": get_available_tag_folders(),
-        "today": today_str
+        # 这里返回真正的系统日历今天 —— 不能用模块全局 today_str。
+        # today_str 会被 _ensure_today 在下载非今日日期 / tag 文件夹时改写成
+        # 那个目标，导致前端"今天"按钮跳到正在下载的目录而不是真正的今天。
+        "today": datetime.datetime.now().strftime("%Y-%m-%d")
     }
 
 @app.get("/api/gallery_data/{date_str}")
@@ -1082,7 +1085,8 @@ def get_gallery_data_by_date(date_str: str):
         "selected_date": selected_date,
         "available_dates": available_dates,
         "available_tags": get_available_tag_folders(),
-        "today": today_str,
+        # 同上，使用系统日历今天而不是会被下载任务 hijack 的 today_str。
+        "today": datetime.datetime.now().strftime("%Y-%m-%d"),
         "requested_date": date_str
     }
 

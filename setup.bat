@@ -6,11 +6,10 @@ REM ============================================================
 REM  一键安装脚本 —— 双击运行即可
 REM  做的事：
 REM    1. 检查 Python / Node.js 是否就绪
-REM    2. 在项目根目录创建 .venv 虚拟环境
-REM    3. pip install -r requirements.txt
-REM    4. cd desktop-app && npm install && npm run build
-REM    5. 生成 .env 模板（用户填 API key）
-REM    6. 生成 env_config.json，指向上面创建的 .venv
+REM    2. 优先用 uv 创建 .venv 并装 Python 依赖（更快），没装 uv 则回退到 venv + pip
+REM    3. cd desktop-app && npm install && npm run build
+REM    4. 生成 .env 模板（用户填 API key）
+REM    5. 生成 env_config.json，指向上面创建的 .venv
 REM  完成后双击 start.bat 即可启动桌面端。
 REM ============================================================
 
@@ -61,27 +60,58 @@ if errorlevel 1 (
 )
 echo     OK
 
-REM ---------- [3/6] 创建 .venv + 装 Python 依赖 ----------
-echo [3/6] 创建虚拟环境 .venv 并安装 Python 依赖 ...
-if not exist ".venv\Scripts\python.exe" (
-    !PYTHON_CMD! -m venv .venv
+REM ---------- [3/6] 检查 uv（推荐用，更快；没有就回退 pip） ----------
+echo [3/6] 检查 uv ...
+set "USE_UV=0"
+where uv >nul 2>nul
+if not errorlevel 1 (
+    set "USE_UV=1"
+    echo     OK: 找到 uv，将用它装依赖（比 pip 快一个数量级）
+) else (
+    echo     未找到 uv，将回退到标准 venv + pip。
+    echo     建议安装 uv 后重跑：
+    echo         winget install --id=astral-sh.uv -e
+    echo     或参考 https://docs.astral.sh/uv/getting-started/installation/
+)
+
+REM ---------- [4/6] 创建 .venv + 装 Python 依赖 ----------
+echo [4/6] 创建虚拟环境 .venv 并安装 Python 依赖 ...
+if "!USE_UV!"=="1" (
+    if not exist ".venv\Scripts\python.exe" (
+        uv venv .venv
+        if errorlevel 1 (
+            echo [X] uv venv 失败。
+            pause
+            exit /b 1
+        )
+    )
+    uv pip install --python ".venv\Scripts\python.exe" -r requirements.txt
     if errorlevel 1 (
-        echo [X] 创建 .venv 失败。
+        echo [X] uv pip install 失败，请检查上方报错。
+        pause
+        exit /b 1
+    )
+) else (
+    if not exist ".venv\Scripts\python.exe" (
+        !PYTHON_CMD! -m venv .venv
+        if errorlevel 1 (
+            echo [X] 创建 .venv 失败。
+            pause
+            exit /b 1
+        )
+    )
+    ".venv\Scripts\python.exe" -m pip install --upgrade pip
+    ".venv\Scripts\python.exe" -m pip install -r requirements.txt
+    if errorlevel 1 (
+        echo [X] pip install 失败，请检查上方报错。
         pause
         exit /b 1
     )
 )
-".venv\Scripts\python.exe" -m pip install --upgrade pip
-".venv\Scripts\python.exe" -m pip install -r requirements.txt
-if errorlevel 1 (
-    echo [X] pip install 失败，请检查上方报错。
-    pause
-    exit /b 1
-)
 echo     OK
 
-REM ---------- [4/6] 装前端依赖 + 编译 ----------
-echo [4/6] 安装前端依赖并编译 ...
+REM ---------- [5/6] 装前端依赖 + 编译 ----------
+echo [5/6] 安装前端依赖并编译 ...
 pushd desktop-app
 if not exist "node_modules" (
     call npm install
@@ -102,8 +132,8 @@ if errorlevel 1 (
 popd
 echo     OK
 
-REM ---------- [5/6] 生成 .env 模板 ----------
-echo [5/6] 生成 .env 模板 ...
+REM ---------- [6/6] 生成 .env 模板 + env_config.json ----------
+echo [6/6] 生成配置文件 ...
 if not exist ".env" (
     > .env (
         echo google_api_key=
@@ -114,8 +144,6 @@ if not exist ".env" (
     echo     OK -^> 已存在 .env，跳过（不覆盖你已填的 key）
 )
 
-REM ---------- [6/6] 写 env_config.json ----------
-echo [6/6] 写入 env_config.json ...
 set "VENV_PY=%~dp0.venv\Scripts\python.exe"
 REM JSON 里的反斜杠要转义成 \\
 set "VENV_PY_JSON=!VENV_PY:\=\\!"
@@ -124,7 +152,7 @@ set "VENV_PY_JSON=!VENV_PY:\=\\!"
     echo     "python_path": "!VENV_PY_JSON!"
     echo }
 )
-echo     OK -^> !VENV_PY!
+echo     OK -^> env_config.json: !VENV_PY!
 
 echo.
 echo ============================================================
@@ -137,5 +165,9 @@ echo     （留空也能用，但角色翻译等在线功能会失效）
 echo   * ZIP -^> GIF 转换需要 FFMPEG（可选）。需要时执行：
 echo       winget install Gyan.FFmpeg
 echo     或从 https://ffmpeg.org/download.html 下载并加入 PATH。
+if "!USE_UV!"=="0" (
+    echo   * 这次用的是 pip。装 uv 后重跑会快很多：
+    echo       winget install --id=astral-sh.uv -e
+)
 echo.
 pause

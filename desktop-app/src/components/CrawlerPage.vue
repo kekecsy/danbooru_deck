@@ -2394,18 +2394,6 @@ const tagFolderPreview = computed(() => {
   if (!s) return '';
   return ('tag_' + s).slice(0, 80);
 });
-
-// 已选中的目录是不是 tag 文件夹（前端用于显示徽标 / 切换 UI）
-const isTagFolderSelected = computed(() => {
-  const d = gallery.value.selectedDate || '';
-  return d.startsWith('tag_');
-});
-
-function tagFolderLabel(folder) {
-  if (!folder) return '';
-  const body = folder.startsWith('tag_') ? folder.slice(4) : folder;
-  return body.replace(/__c__/g, ':').replace(/__/g, ' ');
-}
 </script>
 
 <template>
@@ -2732,30 +2720,12 @@ function tagFolderLabel(folder) {
         </div>
       </div>
 
-      <!-- Tag 文件夹切换：和日期日历并行；选中后 selectedDate 会变成 tag_xxx，calendar 不再高亮任何日期 -->
-      <div v-if="gallery.availableTags.length || isTagFolderSelected" class="tag-folder-bar">
-        <span class="tag-folder-label">🏷 标签文件夹</span>
-        <select
-          class="search-input tag-folder-select"
-          :value="isTagFolderSelected ? gallery.selectedDate : ''"
-          @change="loadGallery($event.target.value || (gallery.availableDates[0] || gallery.today))"
-          :title="isTagFolderSelected ? `当前正在查看 tag 文件夹：${tagFolderLabel(gallery.selectedDate)}` : '选择一个 tag 文件夹切换'"
-        >
-          <option value="">— 切回日期文件夹 —</option>
-          <option
-            v-for="t in gallery.availableTags"
-            :key="t.folder"
-            :value="t.folder"
-          >{{ t.display || t.folder }}</option>
-        </select>
-        <span v-if="isTagFolderSelected" class="muted compact-text tag-folder-hint">
-          当前：<strong style="font-family: Consolas, monospace; color: var(--accent-deep);">{{ gallery.selectedDate }}</strong>
-        </span>
-      </div>
-
+      <!-- 统一选择器：日期日历 + tag 文件夹列表（搜索 + 最近使用置顶），
+           内部根据 selectedDate 是否以 'tag_' 开头决定默认 tab -->
       <GalleryCalendar
         :available-dates="gallery.availableDates"
-        :selected-date="isTagFolderSelected ? '' : gallery.selectedDate"
+        :available-tags="gallery.availableTags"
+        :selected-date="gallery.selectedDate"
         :today="gallery.today"
         @select="loadGallery"
       />
@@ -5452,36 +5422,6 @@ function tagFolderLabel(folder) {
 .pages-grid .page-field {
   margin-bottom: 4px;
   gap: 3px;
-}
-
-/* ---------------- Tag 文件夹切换栏 ----------------
-   选中后 selectedDate = "tag_xxx"，会同时关掉 GalleryCalendar 的日期高亮 */
-.tag-folder-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 4px 0 6px;
-  flex-wrap: wrap;
-}
-.tag-folder-label {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--accent-deep);
-  letter-spacing: 0.3px;
-  white-space: nowrap;
-}
-.tag-folder-select {
-  font-size: 12px;
-  padding: 4px 8px;
-  height: 28px;
-  width: auto;
-  min-width: 180px;
-  max-width: 320px;
-  background: linear-gradient(135deg, #fff, #fbf4eb);
-  border-color: rgba(74, 53, 25, 0.18);
-}
-.tag-folder-hint {
-  margin-left: auto;
 }
 
 /* ---------------- 大图查看器右上角始终显示的信息小栏 ----------------

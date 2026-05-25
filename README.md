@@ -18,18 +18,25 @@
 
 ## 🚀 快速开始（Windows）
 
-> 需要 [Python 3.9+](https://www.python.org/downloads/)和 [Node.js 18+](https://nodejs.org/)。
+> 需要 [Python 3.9+](https://www.python.org/downloads/) 和 [Node.js 18+](https://nodejs.org/)。
+> 推荐使用 [uv](https://docs.astral.sh/uv/)进行包管理：
+>
+> ```text
+> winget install --id=astral-sh.uv -e
+> ```
+>
+> `setup.bat` 会自动识别 uv 并使用；没装也行，会回退到标准 `venv + pip`。
 
 ```text
 1. 下载/克隆本仓库
-2. 双击 setup.bat   ← 一键创建 .venv、装依赖、编译前端
+2. 双击 setup.bat   ← 一键创建 .venv、装依赖、编译前端（优先 uv，回退 pip）
 3. 双击 start.bat   ← 启动桌面端
 ```
 
 `setup.bat` 的作用：
 
-- 检查 Python / Node.js
-- 在项目根目录创建独立 `.venv`，跑 `pip install -r requirements.txt`
+- 检查 Python / Node.js / uv
+- 在项目根目录创建独立 `.venv`，跑 `uv pip install -r requirements.txt`（或 `pip install`）
 - `desktop-app/` 里跑 `npm install` + `npm run build`
 - 写入 `env_config.json`，把 Python 路径指向上面的 `.venv`
 
@@ -39,7 +46,7 @@
 
 ## 主要功能
 
-- **多模式抓取**：排行榜 / 日期热门 / 日期范围热门 / 仅收集 ID / 按 ID 下载。
+- **多模式抓取**：排行榜 / 日期热门 / 日期范围热门 / 仅收集 ID / 按 ID 下载 / 按 Tag 下载。
 - **本地库管理**：按下载日期归类（`hot_pic/YYYY-MM-DD/`），支持画师 / 角色搜索、score 排序、筛选格式（图片/视频/动图）。
 - **热度刷新**：当前页 / 指定范围 / 全部 三种方式刷新 score、收藏数、画师；范围 >5 页时自动每 4 页休 40s 防风控。
 - **画师 / 角色收藏**：点 chip 旁的 ★ 可分组收藏，角色按 `source_hint` 自动合并归类；被收藏的卡片在画廊中异色高亮。
@@ -49,25 +56,35 @@
 
 ---
 
-## 进阶安装（不想用一键脚本时）
+## 自定义配置环境方案（不想用一键脚本时）
 
 ### 1. Python 环境
 
-任选其一。
+**推荐：uv**
+
+```bash
+uv venv .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+```
+
+> uv 自动处理 Python 发现、venv 创建、并行下载和 wheel 缓存，第一次完整安装通常在 10 秒级。
+
+其它方式也行：
+
+
+Anaconda：
+
+```bash
+conda create -n danbooru python=3.10
+conda activate danbooru
+pip install -r requirements.txt
+```
 
 venv：
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-Anaconda（推荐）：
-
-```bash
-conda create -n danbooru python=3.10
-conda activate danbooru
 pip install -r requirements.txt
 ```
 
