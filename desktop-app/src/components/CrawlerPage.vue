@@ -1082,7 +1082,12 @@ async function syncStatus() {
     (status.new_logs || []).forEach(appendLog);
 
     if (status.new_images?.length) {
-      if (gallery.value.selectedDate === gallery.value.today) {
+      // 后端返回的 new_images 是模块全局 daily_viewer_data 的增量切片 —— tag 下载期间
+      // 这份全局会被切换到 tag 文件夹，new_images 里也都是 tag 文件夹下的图。
+      // 用 status.target_folder（后端当前实际写入的子目录）匹配当前画廊日期，
+      // 不匹配就不合并，避免 tag 新图被 unshift 进日期画廊（一旦用户点开就会通过
+      // refresh_visible 在日期 viewer_data.json 里追加错位的孤立条目）。
+      if (status.target_folder && gallery.value.selectedDate === status.target_folder) {
         const appended = status.new_images.map(item => ({
           ...item,
           thumbUrl: '',
@@ -1091,7 +1096,7 @@ async function syncStatus() {
         }));
         // Add new images to the top to prevent wiping DOM and scroll state
         gallery.value.images.unshift(...appended);
-        
+
         // Remove duplicates just in case
         const seen = new Set();
         gallery.value.images = gallery.value.images.filter(img => {

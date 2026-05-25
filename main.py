@@ -1053,6 +1053,10 @@ def get_status():
     return {
         "is_running": state.is_running,
         "is_paused": not state.play_event.is_set() if state.is_running else False,
+        # 当前下载实际写入的子目录名（日期 "YYYY-MM-DD" 或 tag 文件夹 "tag_xxx"）。
+        # 前端拿这个字段判断 new_images 该追加进哪个画廊，避免 tag 下载的新图
+        # 被错误地 unshift 到日期画廊里（之后用户一刷新就会污染日期 viewer_data.json）。
+        "target_folder": today_str,
         "new_logs": logs,
         "new_images": new_images  # 发送给前端渲染
     }
@@ -1503,10 +1507,24 @@ def refresh_visible(req: RefreshVisibleRequest):
                 item["tags"] = merged_tags
                 changed = True
             else:
+                # 跨目录污染防护：tag 下载期间，前端的 syncStatus 会把 tag 文件夹里
+                # 新下的图 unshift 到日期画廊。用户在日期画廊一交互（看图/翻页触发
+                # refreshSinglePost）就会把这些"日期目录里其实没这张图"的 filename
+                # 传过来。原本会通过 log.json 反查到 post_id，按 orphan 路径强行追加
+                # 一条 local_path 指向日期目录但磁盘上根本不存在的脏条目。
+                # 此处先校验文件确实在该日期目录下，不在就直接拒掉，保住数据完整性。
+                expected_local = os.path.join(base_download_dir, date_str, filename)
+                if not os.path.exists(expected_local):
+                    updates.append({
+                        "filename": filename,
+                        "ok": False,
+                        "msg": "文件不在该日期目录，已拒绝写入孤立条目"
+                    })
+                    continue
                 new_item = {
                     "artist": artist,
                     "filename": filename,
-                    "local_path": os.path.join(base_download_dir, date_str, filename),
+                    "local_path": expected_local,
                     "post_url": post_url,
                     "web_url": f"/images/{date_str}/{filename}",
                     "score": new_score,
