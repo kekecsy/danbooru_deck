@@ -588,6 +588,41 @@ input, select {
   max-width: 100%;
   max-height: 100%;
 }
+.viewer-nav-arrow {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 96px;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.75);
+  border-radius: 12px;
+  cursor: pointer;
+  opacity: 0.25;
+  transition: opacity 0.18s ease, background 0.18s ease, border-color 0.18s ease, transform 0.12s ease;
+  backdrop-filter: blur(4px);
+}
+.viewer-nav-arrow:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.5);
+  border-color: rgba(255, 255, 255, 0.3);
+  color: #fff;
+}
+.viewer-nav-arrow:active {
+  transform: translateY(-50%) scale(0.94);
+}
+.viewer-nav-prev {
+  left: 24px;
+}
+.viewer-nav-next {
+  right: 24px;
+}
 .viewer-actions {
   flex-wrap: nowrap;
 }

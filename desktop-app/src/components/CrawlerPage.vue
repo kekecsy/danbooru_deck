@@ -3035,6 +3035,31 @@ function tagFolderLabel(folder) {
           :title="viewer.toolbarPinned ? '已固定信息栏，点击取消固定（恢复鼠标悬浮显示）' : '固定信息栏（默认悬浮显示）'"
         >{{ viewer.toolbarPinned ? '📌 已固定' : '📌 固定' }}</button>
       </div>
+
+      <!-- 左右切换箭头：默认半透明，悬浮变明显；在边界自动隐藏 -->
+      <button
+        v-show="viewer.index > 0"
+        class="viewer-nav-arrow viewer-nav-prev"
+        @click.stop="stepViewer(-1)"
+        title="上一张 (←)"
+        aria-label="上一张"
+      >
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6"></polyline>
+        </svg>
+      </button>
+      <button
+        v-show="viewer.index < viewerItems.length - 1"
+        class="viewer-nav-arrow viewer-nav-next"
+        @click.stop="stepViewer(1)"
+        title="下一张 (→)"
+        aria-label="下一张"
+      >
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 18 15 12 9 6"></polyline>
+        </svg>
+      </button>
+
       <div class="viewer-stage" :class="{ 'is-fit': viewer.fitMode === 'fit' }" @wheel="onViewerWheel" @click.self="closeViewer">
         <div class="viewer-image-wrap" :class="{ 'is-fit': viewer.fitMode === 'fit' }" :style="{ zoom: viewer.zoom }">
           <video
@@ -5488,6 +5513,12 @@ function tagFolderLabel(folder) {
 .viewer-corner-counter {
   /* 计数行更紧凑些，让数字 + ★ + ♥ 都能一目了然 */
   padding: 5px 12px;
+  /* 默认半透明降低存在感，鼠标悬浮上去后恢复完全不透明便于阅读 */
+  opacity: 0.35;
+  transition: opacity 0.18s ease;
+}
+.viewer-corner-counter:hover {
+  opacity: 1;
 }
 .viewer-corner-counter-label {
   color: rgba(255, 255, 255, 0.75);
@@ -5503,17 +5534,22 @@ function tagFolderLabel(folder) {
 }
 .viewer-corner-btn {
   cursor: pointer;
-  transition: background 0.18s, border-color 0.18s, color 0.18s;
+  transition: background 0.18s, border-color 0.18s, color 0.18s, opacity 0.18s ease;
   font-family: inherit;
+  /* 与计数行保持一致：默认半透明，悬浮恢复 */
+  opacity: 0.35;
 }
 .viewer-corner-btn:hover {
   background: rgba(0, 0, 0, 0.75);
   border-color: rgba(255, 255, 255, 0.35);
+  opacity: 1;
 }
 .viewer-corner-btn.is-active {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   border-color: transparent;
   color: #fff;
   box-shadow: 0 4px 16px rgba(182, 84, 52, 0.45);
+  /* 固定状态是用户明确选择的「常驻可见」语义，保持不透明 */
+  opacity: 1;
 }
 </style>

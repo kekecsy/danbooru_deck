@@ -64,6 +64,34 @@ function createWindow() {
   });
   win.setMenuBarVisibility(false);
 
+  // 关闭拦截：右上角 × / Alt+F4 / 系统菜单 关闭时弹出异步确认对话框，
+  // 避免后台抓图任务被误关打断。用户确认后再真正关闭。
+  let confirmingClose = false;
+  win.on('close', (event) => {
+    if (win.__forceClose) return;
+    event.preventDefault();
+    if (confirmingClose) return;
+    confirmingClose = true;
+    dialog.showMessageBox(win, {
+      type: 'question',
+      buttons: ['确认', '取消'],
+      defaultId: 1,
+      cancelId: 1,
+      noLink: true,
+      title: '确认关闭',
+      message: '确认要关闭抓图工具吗？',
+      detail: '后台正在运行的抓取任务会被中断。'
+    }).then(({ response }) => {
+      confirmingClose = false;
+      if (response === 0) {
+        win.__forceClose = true;
+        win.close();
+      }
+    }).catch(() => {
+      confirmingClose = false;
+    });
+  });
+
   if (isDev) {
     win.loadURL('http://localhost:5173');
   } else {
