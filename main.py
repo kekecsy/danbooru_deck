@@ -70,6 +70,13 @@ runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
 runtime_snapshot = load_json(runtime_snapshot_path, {})
 daily_viewer_data = db_data.load_viewer_data()
 
+# 守护 daily_viewer_data 的并发访问：下载线程会在每页结束时把整份列表写回磁盘，
+# /api/refresh_visible 等用户触发的刷新也会改写同一份磁盘文件。
+# 若两边各自持独立内存副本互相覆盖，用户在下载期间触发的 score / fav_count 更新
+# 会被下载线程的旧快照写回时擦掉。用 RLock 是因为部分调用点（如 _append_viewer
+# 内部紧接着 save_runtime_snapshot）可能被嵌套进更外层的加锁段。
+viewer_data_lock = threading.RLock()
+
 if runtime_snapshot:
     db_data.log_data.update(runtime_snapshot.get("log_data", {}))
     db_data.artist_stats.update(runtime_snapshot.get("artist_stats", {}))
@@ -425,15 +432,16 @@ def _ensure_today(db_data_inst, target_date=None):
     """如果跨天或指定了目标日期，更新全局变量"""
     global daily_viewer_data, today_str, save_dir, runtime_snapshot_path
     current_day = target_date if target_date else datetime.datetime.now().strftime('%Y-%m-%d')
-    
+
     if db_data_inst.today_str != current_day:
         db_data_inst.__init__(current_day)
-        
+
     if today_str != current_day:
         today_str = db_data_inst.today_str
         save_dir = db_data_inst.save_dir
         runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
-        daily_viewer_data = db_data_inst.load_viewer_data()
+        with viewer_data_lock:
+            daily_viewer_data = db_data_inst.load_viewer_data()
 
 def _process_post(post, db_data_inst, filter_tags, do_download=True):
     """处理单个 post：过滤、提取画师、可选下载。返回 (ids, artist, saved_filename) 或 None"""
@@ -459,6 +467,19 @@ def _process_post(post, db_data_inst, filter_tags, do_download=True):
         image_url = post.get('file_url') or post.get('large_file_url')
         if not image_url:
             return None
+
+        # 文件已在 save_dir 时的早跳过：tag 模式的 _runtime_snapshot.json 在
+        # 进程启动时不会被合并回 log.json（恢复逻辑只看模块级 save_dir 即日期目录），
+        # 所以被打断的 tag 下载会留下"文件在盘上但 ID 不在 log.json"的状态。
+        # 不做这一步的话，每张这类图都会落到 download_image 的"文件已存在"分支：
+        # 既刷出噪音日志，又被 sleep(1) 卡住，重跑整页等几分钟。
+        # 这里识别后只补 log.json，不打日志、不 sleep，下次同 ID 直接走上面的静默跳过。
+        peek_name = image_url.split('/')[-1].split('?')[0]
+        if peek_name and os.path.exists(os.path.join(save_dir, peek_name)):
+            saved_filename = peek_name
+            db_data_inst.log_data[ids] = image_url
+            save_runtime_snapshot(db_data_inst.log_data, db_data_inst.artist_stats, daily_viewer_data, runtime_snapshot_path)
+            return ids, artist, saved_filename
 
         state.play_event.wait()
         if not state.is_running:
@@ -497,29 +518,30 @@ def _append_viewer(ids, artist, saved_filename, post):
     artist_for_record = artist or "未知"
     post_url = danbooru_api.post_url(ids)
     web_url = f"/images/{today_str}/{saved_filename}"
-    # 同进程内防止同一个 id / filename 被追加两次（修复 popular_range 中
-    # 历史出现的 17 条数据被重复写入的现象）
-    for existing in daily_viewer_data:
-        if existing.get("post_url") == post_url:
-            return
-        if existing.get("filename") == saved_filename and existing.get("web_url") == web_url:
-            return
-    daily_viewer_data.append({
-        "artist": artist_for_record,
-        "filename": saved_filename,
-        "local_path": os.path.join(save_dir, saved_filename),
-        "post_url": post_url,
-        "web_url": web_url,
-        "score": post.get('score', 0) or 0,
-        "fav_count": post.get('fav_count', 0) or 0,
-        "tags": {
-            "tag_string_general": post.get('tag_string_general', ''),
-            "tag_string_character": post.get('tag_string_character', ''),
-            "tag_string_copyright": post.get('tag_string_copyright', ''),
-            "tag_string_artist": post.get('tag_string_artist', '')
-        }
-    })
-    save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
+    with viewer_data_lock:
+        # 同进程内防止同一个 id / filename 被追加两次（修复 popular_range 中
+        # 历史出现的 17 条数据被重复写入的现象）
+        for existing in daily_viewer_data:
+            if existing.get("post_url") == post_url:
+                return
+            if existing.get("filename") == saved_filename and existing.get("web_url") == web_url:
+                return
+        daily_viewer_data.append({
+            "artist": artist_for_record,
+            "filename": saved_filename,
+            "local_path": os.path.join(save_dir, saved_filename),
+            "post_url": post_url,
+            "web_url": web_url,
+            "score": post.get('score', 0) or 0,
+            "fav_count": post.get('fav_count', 0) or 0,
+            "tags": {
+                "tag_string_general": post.get('tag_string_general', ''),
+                "tag_string_character": post.get('tag_string_character', ''),
+                "tag_string_copyright": post.get('tag_string_copyright', ''),
+                "tag_string_artist": post.get('tag_string_artist', '')
+            }
+        })
+        save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
 
 # --- mode: rank (原有默认模式) ---
 def grabber_rank(db_data_inst, page_num, filter_tags):
@@ -563,7 +585,8 @@ def grabber_rank(db_data_inst, page_num, filter_tags):
         f"[Rank] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
     db_data_inst.save_global_data()
-    db_data_inst.save_viewer_data(daily_viewer_data)
+    with viewer_data_lock:
+        db_data_inst.save_viewer_data(daily_viewer_data)
     clear_runtime_snapshot(runtime_snapshot_path)
     return new_hot_artists, page_need_update
 
@@ -608,7 +631,8 @@ def grabber_popular(db_data_inst, page_num, filter_tags, target_date):
         f"[Popular] {target_date} 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
     db_data_inst.save_global_data()
-    db_data_inst.save_viewer_data(daily_viewer_data)
+    with viewer_data_lock:
+        db_data_inst.save_viewer_data(daily_viewer_data)
     return new_hot_artists, page_need_update
 
 # --- mode: tags (按 tag 查询下载到 hot_pic/tag_xxx/ 文件夹) ---
@@ -656,7 +680,8 @@ def grabber_tags(db_data_inst, page_num, filter_tags, tag_query):
         f"[Tags] [{tag_query}] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
     db_data_inst.save_global_data()
-    db_data_inst.save_viewer_data(daily_viewer_data)
+    with viewer_data_lock:
+        db_data_inst.save_viewer_data(daily_viewer_data)
     return new_hot_artists, page_need_update
 
 # --- mode: collect_ids (只收集 ID 不下载) ---
@@ -699,7 +724,8 @@ def grabber_collect_ids(db_data_inst, page_num, filter_tags):
 def task_download_ids(db_data_inst, filter_tags, inline_ids=None):
     global daily_viewer_data
     _ensure_today(db_data_inst)
-    daily_viewer_data = db_data_inst.load_viewer_data()
+    with viewer_data_lock:
+        daily_viewer_data = db_data_inst.load_viewer_data()
 
     if inline_ids:
         # 用户从别的客户端复制 IDs 粘贴过来：去重 + 仅保留纯数字串，写入当天 ids_data.json
@@ -776,7 +802,8 @@ def task_download_ids(db_data_inst, filter_tags, inline_ids=None):
         save_runtime_snapshot(db_data_inst.log_data, db_data_inst.artist_stats, daily_viewer_data, runtime_snapshot_path)
 
     db_data_inst.save_global_data()
-    db_data_inst.save_viewer_data(daily_viewer_data)
+    with viewer_data_lock:
+        db_data_inst.save_viewer_data(daily_viewer_data)
     clear_runtime_snapshot(runtime_snapshot_path)
     append_log(f"[DownloadIDs] 完成，成功下载 {success_count} 张图片。")
 
@@ -1367,18 +1394,25 @@ def refresh_visible(req: RefreshVisibleRequest):
     返回 {ok, updates: [{filename, ok, score, fav_count, post_url, artist, characters, tags}]}。
 
     被设计成 stateless / 同步，前端的「刷新热度」按钮拿当前页 15 张图调用即可，
-    避免一次刷全日 600+ 张被 Danbooru 风控。"""
+    避免一次刷全日 600+ 张被 Danbooru 风控。
+
+    并发模型：
+    - 网络 I/O（Danbooru post 拉取）一律放在 viewer_data_lock 之外，
+      避免阻塞下载线程的每页落盘。
+    - 当目标日期 == 当前下载日期（today_str）时，直接操作模块全局
+      daily_viewer_data，这样后续下载线程把它写回磁盘时不会把这里的更新覆盖掉。
+    - 其它日期没有并发写者，但仍在锁内重新读盘 + 落盘，序列化掉 refresh_visible
+      自身的多并发调用。"""
     date_str = req.date or db_data.today_str
     filenames = [fn for fn in (req.filenames or []) if fn]
     if not filenames:
         return {"ok": False, "msg": "filenames 为空", "updates": []}
 
-    dd = DanbooruData(target_date=date_str)
-    data = dd.load_viewer_data()
-    fn_to_item = {it.get("filename"): it for it in data if it.get("filename")}
+    is_today = (date_str == today_str)
+    dd = DanbooruData(target_date=date_str) if not is_today else None
 
-    # 全局 log.json 的反查表 —— 给孤立文件用
-    # 用 list() 快照一份，避免后台下载线程同时写入 log_data 导致 RuntimeError
+    # Step 1: 在锁内快照 filename -> post_id 的反查表（不持锁做网络 I/O）。
+    # 全局 log.json 用 list() 浅拷一份，避免下载线程并发写入时 RuntimeError。
     global_log = db_data.log_data or {}
     fn_to_pid_log = {}
     for pid, url in list(global_log.items()):
@@ -1388,33 +1422,51 @@ def refresh_visible(req: RefreshVisibleRequest):
         if fn:
             fn_to_pid_log[fn] = pid
 
+    with viewer_data_lock:
+        source_data = daily_viewer_data if is_today else dd.load_viewer_data()
+        fn_to_pid_initial = {}
+        for it in source_data:
+            fn = it.get("filename")
+            if not fn:
+                continue
+            pid = _extract_post_id(it.get("post_url", ""))
+            if pid:
+                fn_to_pid_initial[fn] = pid
+
     def _resolve_one(filename):
-        item = fn_to_item.get(filename)
-        post_id = None
-        if item:
-            post_id = _extract_post_id(item.get("post_url", ""))
+        post_id = fn_to_pid_initial.get(filename) or fn_to_pid_log.get(filename)
         if not post_id:
-            post_id = fn_to_pid_log.get(filename)
-        if not post_id:
-            return filename, item, None, None
+            return filename, None, None
         try:
             post = danbooru_api.fetch_data_with_retry(int(post_id))
         except Exception:
             post = None
-        return filename, item, post_id, post
+        return filename, post_id, post
 
+    # Step 2: 锁外并发拉取所有 post 数据 —— 这里是慢操作（每个 post 都要打 Danbooru）。
     MAX_WORKERS = 5
-    updates = []
-    changed = False
-
+    fetched = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = [executor.submit(_resolve_one, fn) for fn in filenames]
         for fut in concurrent.futures.as_completed(futures):
             try:
-                filename, item, post_id, post = fut.result()
+                fetched.append(fut.result())
             except Exception as e:
-                updates.append({"filename": "?", "ok": False, "msg": str(e)})
+                fetched.append(("?", None, None, e))
+
+    # Step 3: 锁内 merge + 落盘。这一段不做网络 I/O，只触磁盘和内存。
+    updates = []
+    with viewer_data_lock:
+        target_data = daily_viewer_data if is_today else dd.load_viewer_data()
+        fn_to_item = {it.get("filename"): it for it in target_data if it.get("filename")}
+        changed = False
+
+        for entry in fetched:
+            # 异常分支：tuple 长度为 4 且最后一个是 Exception
+            if len(entry) == 4:
+                updates.append({"filename": "?", "ok": False, "msg": str(entry[3])})
                 continue
+            filename, post_id, post = entry
 
             if not post_id:
                 updates.append({"filename": filename, "ok": False, "msg": "无法反查 post_id"})
@@ -1439,6 +1491,7 @@ def refresh_visible(req: RefreshVisibleRequest):
                 "tag_string_meta": post.get('tag_string_meta', '')
             }
 
+            item = fn_to_item.get(filename)
             if item:
                 item["score"] = new_score
                 item["fav_count"] = new_fav
@@ -1450,7 +1503,7 @@ def refresh_visible(req: RefreshVisibleRequest):
                 item["tags"] = merged_tags
                 changed = True
             else:
-                data.append({
+                new_item = {
                     "artist": artist,
                     "filename": filename,
                     "local_path": os.path.join(base_download_dir, date_str, filename),
@@ -1459,7 +1512,9 @@ def refresh_visible(req: RefreshVisibleRequest):
                     "score": new_score,
                     "fav_count": new_fav,
                     "tags": tags_full
-                })
+                }
+                target_data.append(new_item)
+                fn_to_item[filename] = new_item
                 changed = True
 
             updates.append({
@@ -1474,8 +1529,11 @@ def refresh_visible(req: RefreshVisibleRequest):
                 "tags": tags_full
             })
 
-    if changed:
-        dd.save_viewer_data(data)
+        if changed:
+            if is_today:
+                db_data.save_viewer_data(target_data)
+            else:
+                dd.save_viewer_data(target_data)
 
     return {"ok": True, "updates": updates}
 
