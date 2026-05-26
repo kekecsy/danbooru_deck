@@ -1,6 +1,8 @@
 import os
 import re
 import sys
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import sleep
 import datetime
@@ -59,34 +61,350 @@ CHARACTER_FAVORITES_JSON = BASE_DIR / "character_favorites.json"
 IMAGE_FAVORITES_JSON = BASE_DIR / "image_favorites.json"
 
 # ==========================================
-# 1. 爬虫全局配置与初始化
+# 1. 共享资源服务（log.json / artist_stats.json 跨任务共享）
 # ==========================================
-db_data = DanbooruData()
-base_download_dir = db_data.base_dir
-today_str = db_data.today_str
-save_dir = db_data.save_dir
+# 临时实例只用来拿 base_dir / log_path / stats_path 这些固定路径，
+# 之后所有下载任务都会用 _make_job() 各自 new 一个 DanbooruData
+_bootstrap = DanbooruData()
+base_download_dir = _bootstrap.base_dir
+_LOG_PATH = _bootstrap.log_path
+_STATS_PATH = _bootstrap.stats_path
+del _bootstrap
 
-runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
-runtime_snapshot = load_json(runtime_snapshot_path, {})
-daily_viewer_data = db_data.load_viewer_data()
 
-# 守护 daily_viewer_data 的并发访问：下载线程会在每页结束时把整份列表写回磁盘，
-# /api/refresh_visible 等用户触发的刷新也会改写同一份磁盘文件。
-# 若两边各自持独立内存副本互相覆盖，用户在下载期间触发的 score / fav_count 更新
-# 会被下载线程的旧快照写回时擦掉。用 RLock 是因为部分调用点（如 _append_viewer
-# 内部紧接着 save_runtime_snapshot）可能被嵌套进更外层的加锁段。
-viewer_data_lock = threading.RLock()
+def _resolve_today() -> str:
+    """系统日历今天，永远是真今天，不会被任何下载任务的目标日期污染。"""
+    return datetime.datetime.now().strftime('%Y-%m-%d')
 
-if runtime_snapshot:
-    db_data.log_data.update(runtime_snapshot.get("log_data", {}))
-    db_data.artist_stats.update(runtime_snapshot.get("artist_stats", {}))
-    daily_viewer_data = merge_daily_viewer_data(
-        daily_viewer_data,
-        runtime_snapshot.get("daily_viewer_data", [])
+
+class LogStore:
+    """log.json 的内存视图：所有下载任务共用一份，写入串行化。"""
+    def __init__(self, path):
+        self._path = path
+        self._lock = threading.RLock()
+        self._data = load_json(path, {}) or {}
+
+    def __contains__(self, post_id):
+        with self._lock:
+            return str(post_id) in self._data
+
+    def get(self, post_id, default=None):
+        with self._lock:
+            return self._data.get(str(post_id), default)
+
+    def record(self, post_id, url):
+        with self._lock:
+            self._data[str(post_id)] = url
+
+    def bulk_merge(self, mapping):
+        if not mapping:
+            return
+        with self._lock:
+            self._data.update({str(k): v for k, v in mapping.items()})
+
+    def save_atomic(self):
+        with self._lock:
+            snap = dict(self._data)
+        tmp = self._path + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(snap, f, ensure_ascii=False, indent=4)
+        os.replace(tmp, self._path)
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._data)
+
+    def filename_to_id_map(self):
+        result = {}
+        for pid, url in self.snapshot().items():
+            if not url:
+                continue
+            fn = url.split('/')[-1].split('?')[0]
+            if fn:
+                result[fn] = pid
+        return result
+
+
+class StatsStore:
+    """artist_stats.json 的内存视图，同样跨任务共享。"""
+    def __init__(self, path):
+        self._path = path
+        self._lock = threading.RLock()
+        self._data = load_json(path, {}) or {}
+
+    def increment(self, artist):
+        with self._lock:
+            self._data[artist] = self._data.get(artist, 0) + 1
+
+    def bulk_merge(self, mapping):
+        if not mapping:
+            return
+        with self._lock:
+            for k, v in mapping.items():
+                try:
+                    inc = int(v or 0)
+                except (TypeError, ValueError):
+                    continue
+                self._data[k] = self._data.get(k, 0) + inc
+
+    def save_atomic(self):
+        with self._lock:
+            snap = dict(self._data)
+        tmp = self._path + ".tmp"
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(snap, f, ensure_ascii=False, indent=4)
+        os.replace(tmp, self._path)
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self._data)
+
+
+log_store = LogStore(_LOG_PATH)
+stats_store = StatsStore(_STATS_PATH)
+
+
+def _recover_orphan_snapshots():
+    """启动时扫所有 hot_pic/<folder>/_runtime_snapshot.json：
+    把里面的 log/stats 合并进全局 store，把 viewer_data 增量合并进该目录的
+    viewer_data.json，然后删除 snapshot。这样 tag 模式或跨日期模式被打断的
+    任务都能被正确恢复（原逻辑只看模块全局 runtime_snapshot_path，跨日期 snapshot 永远漏）。"""
+    base = Path(base_download_dir)
+    if not base.exists():
+        return
+    log_dirty = False
+    stats_dirty = False
+    for folder in base.iterdir():
+        if not folder.is_dir():
+            continue
+        snap_path = folder / "_runtime_snapshot.json"
+        if not snap_path.exists():
+            continue
+        try:
+            snap = load_json(str(snap_path), {}) or {}
+        except Exception:
+            snap = {}
+        if not snap:
+            clear_runtime_snapshot(str(snap_path))
+            continue
+        if snap.get("log_data"):
+            log_store.bulk_merge(snap["log_data"])
+            log_dirty = True
+        if snap.get("artist_stats"):
+            stats_store.bulk_merge(snap["artist_stats"])
+            stats_dirty = True
+        snap_items = snap.get("daily_viewer_data") or []
+        if snap_items:
+            try:
+                folder_db = DanbooruData(folder.name)
+                merged = merge_daily_viewer_data(folder_db.load_viewer_data(), snap_items)
+                folder_db.save_viewer_data(merged)
+            except Exception as e:
+                print(f"[snapshot] 合并 {folder.name} 的 snapshot 失败: {e}")
+        clear_runtime_snapshot(str(snap_path))
+    if log_dirty:
+        log_store.save_atomic()
+    if stats_dirty:
+        stats_store.save_atomic()
+
+
+_recover_orphan_snapshots()
+
+
+# ==========================================
+# 2. DownloadJob + JobRegistry
+# ==========================================
+
+@dataclass
+class DownloadJob:
+    """单个下载任务的全部状态。每个任务有自己的 save_dir / viewer_data / snapshot /
+    pause-event / logs，互不干扰；refresh_visible 也按 target_folder 去这里查实例。"""
+    job_id: str
+    target_folder: str   # "YYYY-MM-DD" 或 "tag_xxx"
+    mode: str            # rank / popular / popular_range / tags / collect_ids / download_ids
+    label: str
+    save_dir: str
+    snapshot_path: str
+    db: DanbooruData
+    viewer_data: list = field(default_factory=list)
+    viewer_lock: threading.RLock = field(default_factory=threading.RLock)
+    play_event: threading.Event = field(default_factory=threading.Event)
+    is_running: bool = False
+    logs: list = field(default_factory=list)
+    sent_image_count: int = 0
+    filter_tags: list = field(default_factory=list)
+    thread: object = None
+    started_at: object = None
+
+    def __post_init__(self):
+        if not self.play_event.is_set():
+            self.play_event.set()
+
+    @property
+    def is_paused(self):
+        return self.is_running and not self.play_event.is_set()
+
+    def append_log(self, msg):
+        text = str(msg)
+        try:
+            print(text)
+        except UnicodeEncodeError:
+            print(text.encode("gbk", errors="replace").decode("gbk"))
+        self.logs.append(text)
+        if len(self.logs) > 500:
+            self.logs = self.logs[-500:]
+
+    def append_viewer_entry(self, ids, artist, saved_filename, post):
+        """同进程内防止同一 id/filename 被追加两次（见原 _append_viewer 的 popular_range 重复条目修复）。"""
+        if not saved_filename:
+            return
+        artist_for_record = artist or "未知"
+        post_url = danbooru_api.post_url(ids)
+        web_url = f"/images/{self.target_folder}/{saved_filename}"
+        with self.viewer_lock:
+            for existing in self.viewer_data:
+                if existing.get("post_url") == post_url:
+                    return
+                if existing.get("filename") == saved_filename and existing.get("web_url") == web_url:
+                    return
+            self.viewer_data.append({
+                "artist": artist_for_record,
+                "filename": saved_filename,
+                "local_path": os.path.join(self.save_dir, saved_filename),
+                "post_url": post_url,
+                "web_url": web_url,
+                "score": post.get('score', 0) or 0,
+                "fav_count": post.get('fav_count', 0) or 0,
+                "tags": {
+                    "tag_string_general": post.get('tag_string_general', ''),
+                    "tag_string_character": post.get('tag_string_character', ''),
+                    "tag_string_copyright": post.get('tag_string_copyright', ''),
+                    "tag_string_artist": post.get('tag_string_artist', '')
+                }
+            })
+            self._write_snapshot_locked()
+
+    def _write_snapshot_locked(self):
+        save_runtime_snapshot(
+            log_store.snapshot(),
+            stats_store.snapshot(),
+            self.viewer_data,
+            self.snapshot_path
+        )
+
+    def write_snapshot(self):
+        with self.viewer_lock:
+            self._write_snapshot_locked()
+
+    def flush_viewer_data(self):
+        with self.viewer_lock:
+            self.db.save_viewer_data(self.viewer_data)
+
+    def clear_snapshot(self):
+        clear_runtime_snapshot(self.snapshot_path)
+
+    def switch_target(self, new_folder):
+        """popular_range 模式按日期迭代时用：先把当前 folder 落盘，再换到下一天。"""
+        with self.viewer_lock:
+            try:
+                self.db.save_viewer_data(self.viewer_data)
+            except Exception as e:
+                self.append_log(f"切换目录前落盘失败 ({self.target_folder}): {e}")
+            self.clear_snapshot()
+            self.target_folder = new_folder
+            self.db = DanbooruData(new_folder)
+            self.save_dir = self.db.save_dir
+            self.snapshot_path = os.path.join(self.save_dir, "_runtime_snapshot.json")
+            self.viewer_data = self.db.load_viewer_data()
+            self.sent_image_count = len(self.viewer_data)
+
+
+class JobRegistry:
+    MAX_CONCURRENT = 1  # 默认 1（与旧行为一致）。改 2+ 即可允许并发下载不同目录，但
+                        # Danbooru 有限流，并发 = QPS 翻倍，要注意撞风控的可能。
+
+    def __init__(self):
+        self._jobs: dict = {}
+        self._lock = threading.RLock()
+
+    def list_active(self):
+        with self._lock:
+            return [j for j in self._jobs.values() if j.is_running]
+
+    def can_start(self):
+        return len(self.list_active()) < self.MAX_CONCURRENT
+
+    def primary(self):
+        """优先返回正在跑的 job；若都没活跃，回退到最近 started_at 的（保留 30 秒，
+        让前端 syncStatus 能拉到最后一批 new_logs / new_images / "任务完成" 提示）。"""
+        with self._lock:
+            active = [j for j in self._jobs.values() if j.is_running]
+            if active:
+                return active[0]
+            all_jobs = list(self._jobs.values())
+            if not all_jobs:
+                return None
+            all_jobs.sort(
+                key=lambda j: j.started_at or datetime.datetime.min,
+                reverse=True,
+            )
+            return all_jobs[0]
+
+    def get(self, job_id):
+        with self._lock:
+            return self._jobs.get(job_id)
+
+    def get_by_folder(self, folder):
+        with self._lock:
+            for job in self._jobs.values():
+                if job.is_running and job.target_folder == folder:
+                    return job
+        return None
+
+    def add(self, job):
+        with self._lock:
+            self._jobs[job.job_id] = job
+
+    def remove(self, job_id):
+        with self._lock:
+            self._jobs.pop(job_id, None)
+
+
+jobs = JobRegistry()
+
+
+def append_log(msg):
+    """模块级日志：打印到控制台，并 push 到 primary job 的 logs 环（若有）。
+    refresh/backfill 等非 job 上下文的提示会用这个，没有任务在跑就只 print。"""
+    text = str(msg)
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode("gbk", errors="replace").decode("gbk"))
+    job = jobs.primary()
+    if job is not None:
+        job.logs.append(text)
+        if len(job.logs) > 500:
+            job.logs = job.logs[-500:]
+
+
+def _make_job(target_folder, mode, filter_tags, label=None):
+    db = DanbooruData(target_folder)
+    viewer_data = db.load_viewer_data()
+    job = DownloadJob(
+        job_id=uuid.uuid4().hex[:8],
+        target_folder=target_folder,
+        mode=mode,
+        label=label or f"{mode} · {target_folder}",
+        save_dir=db.save_dir,
+        snapshot_path=os.path.join(db.save_dir, "_runtime_snapshot.json"),
+        db=db,
+        viewer_data=viewer_data,
+        filter_tags=list(filter_tags or []),
+        started_at=datetime.datetime.now(),
     )
-    db_data.save_global_data()
-    db_data.save_viewer_data(daily_viewer_data)
-    clear_runtime_snapshot(runtime_snapshot_path)
+    job.sent_image_count = len(viewer_data)
+    return job
 
 
 def get_available_date_folders():
@@ -139,11 +457,12 @@ def resolve_selected_date(requested_date=None):
         except ValueError:
             pass
 
-    if today_str in available_dates:
-        return today_str, available_dates
+    today = _resolve_today()
+    if today in available_dates:
+        return today, available_dates
     if available_dates:
         return available_dates[0], available_dates
-    return today_str, available_dates
+    return today, available_dates
 
 def build_local_image_library(selected_date=None):
     library = []
@@ -328,35 +647,6 @@ def api_thumbnail(date_str: str, filename: str, w: int = 400):
     )
 
 
-class ScraperState:
-    def __init__(self):
-        self.is_running = False
-        self.play_event = threading.Event()
-        self.play_event.set()
-        self.logs = []
-        self.filter_tags = []
-        self.sent_image_count = len(daily_viewer_data)
-
-state = ScraperState()
-scraper_thread = None
-
-def append_log(msg):
-    text = str(msg)
-    try:
-        print(text)  # 控制台也打印一份
-    except UnicodeEncodeError:
-        safe_text = text.encode("gbk", errors="replace").decode("gbk")
-        print(safe_text)
-    state.logs.append(text)
-    state.logs = state.logs[-500:]
-
-
-def get_today_save_dir():
-    current_day = datetime.datetime.now().strftime('%Y-%m-%d')
-    target_dir = os.path.join(base_download_dir, current_day)
-    os.makedirs(target_dir, exist_ok=True)
-    return current_day, target_dir, os.path.join(target_dir, "_runtime_snapshot.json")
-
 class StartRequest(BaseModel):
     start_page: int
     end_page: int
@@ -426,33 +716,19 @@ class ImageFavoriteRemoveRequest(BaseModel):
     key: str
 
 # ==========================================
-# 3. 核心爬虫逻辑 (融入了打断检测)
+# 3. 核心爬虫逻辑：所有 grabber 都按 job 跑，不再读模块全局
 # ==========================================
-def _ensure_today(db_data_inst, target_date=None):
-    """如果跨天或指定了目标日期，更新全局变量"""
-    global daily_viewer_data, today_str, save_dir, runtime_snapshot_path
-    current_day = target_date if target_date else datetime.datetime.now().strftime('%Y-%m-%d')
 
-    if db_data_inst.today_str != current_day:
-        db_data_inst.__init__(current_day)
-
-    if today_str != current_day:
-        today_str = db_data_inst.today_str
-        save_dir = db_data_inst.save_dir
-        runtime_snapshot_path = os.path.join(save_dir, "_runtime_snapshot.json")
-        with viewer_data_lock:
-            daily_viewer_data = db_data_inst.load_viewer_data()
-
-def _process_post(post, db_data_inst, filter_tags, do_download=True):
-    """处理单个 post：过滤、提取画师、可选下载。返回 (ids, artist, saved_filename) 或 None"""
-    global daily_viewer_data
+def _process_post(post, job, do_download=True):
+    """处理单个 post：过滤、提取画师、可选下载。返回 (ids, artist, saved_filename) 或 None。
+    log.json 走全局 log_store；下载目录由 job.save_dir 决定。"""
     ids = str(post.get('id'))
-    if not ids or ids in db_data_inst.log_data:
+    if not ids or ids in log_store:
         return None
 
     tag_string = post.get('tag_string', '')
-    if any(tag in tag_string for tag in filter_tags):
-        append_log(f"跳过 ID {ids}，包含过滤标签。")
+    if any(tag in tag_string for tag in job.filter_tags):
+        job.append_log(f"跳过 ID {ids}，包含过滤标签。")
         return None
 
     artist = ""
@@ -468,108 +744,72 @@ def _process_post(post, db_data_inst, filter_tags, do_download=True):
         if not image_url:
             return None
 
-        # 文件已在 save_dir 时的早跳过：tag 模式的 _runtime_snapshot.json 在
-        # 进程启动时不会被合并回 log.json（恢复逻辑只看模块级 save_dir 即日期目录），
-        # 所以被打断的 tag 下载会留下"文件在盘上但 ID 不在 log.json"的状态。
-        # 不做这一步的话，每张这类图都会落到 download_image 的"文件已存在"分支：
-        # 既刷出噪音日志，又被 sleep(1) 卡住，重跑整页等几分钟。
-        # 这里识别后只补 log.json，不打日志、不 sleep，下次同 ID 直接走上面的静默跳过。
+        # 文件已在 job.save_dir 时的早跳过：避免被 download_image 的"文件已存在"分支
+        # 卡 sleep(1) + 刷屏。识别后只补 log_store，下一次同 ID 直接静默跳过。
         peek_name = image_url.split('/')[-1].split('?')[0]
-        if peek_name and os.path.exists(os.path.join(save_dir, peek_name)):
+        if peek_name and os.path.exists(os.path.join(job.save_dir, peek_name)):
             saved_filename = peek_name
-            db_data_inst.log_data[ids] = image_url
-            save_runtime_snapshot(db_data_inst.log_data, db_data_inst.artist_stats, daily_viewer_data, runtime_snapshot_path)
+            log_store.record(ids, image_url)
+            job.write_snapshot()
             return ids, artist, saved_filename
 
-        state.play_event.wait()
-        if not state.is_running:
+        job.play_event.wait()
+        if not job.is_running:
             return None
 
-        saved_filename = danbooru_api.download_image(image_url, save_dir, append_log)
+        saved_filename = danbooru_api.download_image(image_url, job.save_dir, job.append_log)
         if saved_filename:
-            db_data_inst.log_data[ids] = image_url
-            save_runtime_snapshot(db_data_inst.log_data, db_data_inst.artist_stats, daily_viewer_data, runtime_snapshot_path)
+            log_store.record(ids, image_url)
+            job.write_snapshot()
             sleep(1)
         else:
-            append_log(f"跳过 ID {ids}，下载失败。")
+            job.append_log(f"跳过 ID {ids}，下载失败。")
             return None
 
     return ids, artist, saved_filename
 
-def _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists):
-    """更新画师统计并归类"""
+
+def _update_artist_stats(job, artist, page_need_update, new_hot_artists):
+    """更新画师统计并归类。stats 走全局 stats_store；disk_drawer/all_drawer 在 job.db 上读。"""
     if not artist:
         return
-    db_data_inst.artist_stats[artist] = db_data_inst.artist_stats.get(artist, 0) + 1
-    if artist in db_data_inst.all_drawer:
-        disk_key = db_data_inst.get_disk_key(artist)
+    stats_store.increment(artist)
+    if artist in job.db.all_drawer:
+        disk_key = job.db.get_disk_key(artist)
         page_need_update[disk_key].append(artist)
     else:
         new_hot_artists.append(artist)
 
-def _append_viewer(ids, artist, saved_filename, post):
-    """往 daily_viewer_data 追加一条记录"""
-    global daily_viewer_data
-    if not saved_filename:
-        return
-    # Danbooru 上有些帖子（如部分纯角色/无主帖）tag_string_artist 是空的，
-    # 之前直接 return 会让图片下载到本地却没有热度信息条目 —— 改成用 "未知"
-    # 作者占位，至少把 score / fav_count / post_url 这些热度元数据保留下来。
-    artist_for_record = artist or "未知"
-    post_url = danbooru_api.post_url(ids)
-    web_url = f"/images/{today_str}/{saved_filename}"
-    with viewer_data_lock:
-        # 同进程内防止同一个 id / filename 被追加两次（修复 popular_range 中
-        # 历史出现的 17 条数据被重复写入的现象）
-        for existing in daily_viewer_data:
-            if existing.get("post_url") == post_url:
-                return
-            if existing.get("filename") == saved_filename and existing.get("web_url") == web_url:
-                return
-        daily_viewer_data.append({
-            "artist": artist_for_record,
-            "filename": saved_filename,
-            "local_path": os.path.join(save_dir, saved_filename),
-            "post_url": post_url,
-            "web_url": web_url,
-            "score": post.get('score', 0) or 0,
-            "fav_count": post.get('fav_count', 0) or 0,
-            "tags": {
-                "tag_string_general": post.get('tag_string_general', ''),
-                "tag_string_character": post.get('tag_string_character', ''),
-                "tag_string_copyright": post.get('tag_string_copyright', ''),
-                "tag_string_artist": post.get('tag_string_artist', '')
-            }
-        })
-        save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
 
-# --- mode: rank (原有默认模式) ---
-def grabber_rank(db_data_inst, page_num, filter_tags):
-    global daily_viewer_data
-    _ensure_today(db_data_inst)
+def _persist_global_data():
+    """grabber 每页末尾调一次：把 log/stats 原子落盘。"""
+    log_store.save_atomic()
+    stats_store.save_atomic()
+
+
+# --- mode: rank ---
+def grabber_rank(job, page_num):
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
 
-    state.play_event.wait()
-    if not state.is_running:
+    job.play_event.wait()
+    if not job.is_running:
         return [], page_need_update
 
     try:
-        append_log(f"[Rank] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
+        job.append_log(f"[Rank] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
         posts = danbooru_api.get_posts_by_rank(page_num)
     except Exception as e:
-        append_log(f"获取页面失败: {e}")
-        save_runtime_snapshot(db_data_inst.log_data, db_data_inst.artist_stats, daily_viewer_data, runtime_snapshot_path)
+        job.append_log(f"获取页面失败: {e}")
+        job.write_snapshot()
         return [], {"1": [], "2": []}
 
-    page_success = 0
-    page_skipped = 0
-    page_failed = 0
+    page_success = page_skipped = page_failed = 0
     for post in posts:
-        if not state.is_running:
+        if not job.is_running:
             break
-        state.play_event.wait()
-        result = _process_post(post, db_data_inst, filter_tags, do_download=True)
+        job.play_event.wait()
+        result = _process_post(post, job, do_download=True)
         if result is None:
             page_skipped += 1
             continue
@@ -578,44 +818,40 @@ def grabber_rank(db_data_inst, page_num, filter_tags):
             page_success += 1
         else:
             page_failed += 1
-        _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists)
-        _append_viewer(ids, artist, saved_filename, post)
+        _update_artist_stats(job, artist, page_need_update, new_hot_artists)
+        job.append_viewer_entry(ids, artist, saved_filename, post)
 
-    append_log(
+    job.append_log(
         f"[Rank] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
-    db_data_inst.save_global_data()
-    with viewer_data_lock:
-        db_data_inst.save_viewer_data(daily_viewer_data)
-    clear_runtime_snapshot(runtime_snapshot_path)
+    _persist_global_data()
+    job.flush_viewer_data()
+    job.clear_snapshot()
     return new_hot_artists, page_need_update
 
-# --- mode: popular (按日期热门) ---
-def grabber_popular(db_data_inst, page_num, filter_tags, target_date):
-    global daily_viewer_data
-    _ensure_today(db_data_inst, target_date)
+
+# --- mode: popular ---
+def grabber_popular(job, page_num, target_date):
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
 
-    state.play_event.wait()
-    if not state.is_running:
+    job.play_event.wait()
+    if not job.is_running:
         return [], page_need_update
 
     try:
-        append_log(f"[Popular] 正在获取 {target_date} 第 {page_num} 页... (host={danbooru_api.get_host()})")
+        job.append_log(f"[Popular] 正在获取 {target_date} 第 {page_num} 页... (host={danbooru_api.get_host()})")
         posts = danbooru_api.get_popular_posts(target_date, page_num)
     except Exception as e:
-        append_log(f"获取页面失败: {e}")
+        job.append_log(f"获取页面失败: {e}")
         return [], {"1": [], "2": []}
 
-    page_success = 0
-    page_skipped = 0
-    page_failed = 0
+    page_success = page_skipped = page_failed = 0
     for post in posts:
-        if not state.is_running:
+        if not job.is_running:
             break
-        state.play_event.wait()
-        result = _process_post(post, db_data_inst, filter_tags, do_download=True)
+        job.play_event.wait()
+        result = _process_post(post, job, do_download=True)
         if result is None:
             page_skipped += 1
             continue
@@ -624,47 +860,40 @@ def grabber_popular(db_data_inst, page_num, filter_tags, target_date):
             page_success += 1
         else:
             page_failed += 1
-        _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists)
-        _append_viewer(ids, artist, saved_filename, post)
+        _update_artist_stats(job, artist, page_need_update, new_hot_artists)
+        job.append_viewer_entry(ids, artist, saved_filename, post)
 
-    append_log(
+    job.append_log(
         f"[Popular] {target_date} 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
-    db_data_inst.save_global_data()
-    with viewer_data_lock:
-        db_data_inst.save_viewer_data(daily_viewer_data)
+    _persist_global_data()
+    job.flush_viewer_data()
     return new_hot_artists, page_need_update
 
-# --- mode: tags (按 tag 查询下载到 hot_pic/tag_xxx/ 文件夹) ---
-def grabber_tags(db_data_inst, page_num, filter_tags, tag_query):
-    """按 Danbooru tag 查询下载图片到 tag 文件夹。共享全局 log.json（在
-    base_dir 根目录），避免和日期文件夹之间重复下载相同 ID 的图片。"""
-    global daily_viewer_data
-    # 这里传给 _ensure_today 的 "target_date" 实际是 tag 文件夹名（tag_xxxxxx），
-    # DanbooruData 只把它当作 save_dir 的最后一段路径，不关心格式
-    _ensure_today(db_data_inst, db_data_inst.today_str)
+
+# --- mode: tags ---
+def grabber_tags(job, page_num, tag_query):
+    """按 Danbooru tag 查询下载到 tag 文件夹。共享全局 log_store 避免和日期文件夹重复下载。"""
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
 
-    state.play_event.wait()
-    if not state.is_running:
+    job.play_event.wait()
+    if not job.is_running:
         return [], page_need_update
 
     try:
-        append_log(f"[Tags] 正在获取 [{tag_query}] 第 {page_num} 页... (host={danbooru_api.get_host()})")
+        job.append_log(f"[Tags] 正在获取 [{tag_query}] 第 {page_num} 页... (host={danbooru_api.get_host()})")
         posts = danbooru_api.get_posts_by_tags(tag_query, page_num)
     except Exception as e:
-        append_log(f"获取页面失败: {e}")
+        job.append_log(f"获取页面失败: {e}")
         return [], {"1": [], "2": []}
 
-    page_success = 0
-    page_skipped = 0
-    page_failed = 0
+    page_success = page_skipped = page_failed = 0
     for post in posts:
-        if not state.is_running:
+        if not job.is_running:
             break
-        state.play_event.wait()
-        result = _process_post(post, db_data_inst, filter_tags, do_download=True)
+        job.play_event.wait()
+        result = _process_post(post, job, do_download=True)
         if result is None:
             page_skipped += 1
             continue
@@ -673,62 +902,57 @@ def grabber_tags(db_data_inst, page_num, filter_tags, tag_query):
             page_success += 1
         else:
             page_failed += 1
-        _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists)
-        _append_viewer(ids, artist, saved_filename, post)
+        _update_artist_stats(job, artist, page_need_update, new_hot_artists)
+        job.append_viewer_entry(ids, artist, saved_filename, post)
 
-    append_log(
+    job.append_log(
         f"[Tags] [{tag_query}] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
-    db_data_inst.save_global_data()
-    with viewer_data_lock:
-        db_data_inst.save_viewer_data(daily_viewer_data)
+    _persist_global_data()
+    job.flush_viewer_data()
     return new_hot_artists, page_need_update
 
-# --- mode: collect_ids (只收集 ID 不下载) ---
-def grabber_collect_ids(db_data_inst, page_num, filter_tags):
-    _ensure_today(db_data_inst)
+
+# --- mode: collect_ids ---
+def grabber_collect_ids(job, page_num):
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
-    daily_ids_data = db_data_inst.load_ids_data()
+    daily_ids_data = job.db.load_ids_data()
 
-    state.play_event.wait()
-    if not state.is_running:
+    job.play_event.wait()
+    if not job.is_running:
         return [], page_need_update
 
     try:
-        append_log(f"[CollectIDs] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
+        job.append_log(f"[CollectIDs] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
         posts = danbooru_api.get_posts_by_rank(page_num)
     except Exception as e:
-        append_log(f"获取页面失败: {e}")
+        job.append_log(f"获取页面失败: {e}")
         return [], {"1": [], "2": []}
 
     for post in posts:
-        if not state.is_running:
+        if not job.is_running:
             break
-        state.play_event.wait()
-        result = _process_post(post, db_data_inst, filter_tags, do_download=False)
+        job.play_event.wait()
+        result = _process_post(post, job, do_download=False)
         if not result:
             continue
         ids, artist, _ = result
-        _update_artist_stats(db_data_inst, artist, page_need_update, new_hot_artists)
+        _update_artist_stats(job, artist, page_need_update, new_hot_artists)
         if artist:
             daily_ids_data.append(ids)
 
-    db_data_inst.save_global_data()
+    _persist_global_data()
     daily_ids_data = list(set(daily_ids_data))
-    db_data_inst.save_ids_data(daily_ids_data)
-    append_log(f"[CollectIDs] 当前已收集 {len(daily_ids_data)} 个 ID")
+    job.db.save_ids_data(daily_ids_data)
+    job.append_log(f"[CollectIDs] 当前已收集 {len(daily_ids_data)} 个 ID")
     return new_hot_artists, page_need_update
 
-# --- mode: download_ids (从已收集的 IDs 批量下载) ---
-def task_download_ids(db_data_inst, filter_tags, inline_ids=None):
-    global daily_viewer_data
-    _ensure_today(db_data_inst)
-    with viewer_data_lock:
-        daily_viewer_data = db_data_inst.load_viewer_data()
 
+# --- mode: download_ids ---
+def task_download_ids(job, inline_ids=None):
     if inline_ids:
-        # 用户从别的客户端复制 IDs 粘贴过来：去重 + 仅保留纯数字串，写入当天 ids_data.json
+        # 粘贴的 IDs：去重 + 只留纯数字串，写入当天 ids_data.json
         cleaned = []
         seen = set()
         for raw in inline_ids:
@@ -739,53 +963,53 @@ def task_download_ids(db_data_inst, filter_tags, inline_ids=None):
             cleaned.append(s)
         ids_data = cleaned
         if ids_data:
-            db_data_inst.save_ids_data(ids_data)
-            append_log(f"[DownloadIDs] 已写入 {len(ids_data)} 个粘贴的 ID 到 {db_data_inst.today_str}/ids_data.json")
+            job.db.save_ids_data(ids_data)
+            job.append_log(f"[DownloadIDs] 已写入 {len(ids_data)} 个粘贴的 ID 到 {job.target_folder}/ids_data.json")
     else:
-        ids_data = db_data_inst.load_ids_data()
+        ids_data = job.db.load_ids_data()
 
     if not ids_data:
-        append_log("[DownloadIDs] 没有可下载的 ID（既未粘贴也未先用「仅收集ID」模式收集）。")
+        job.append_log("[DownloadIDs] 没有可下载的 ID（既未粘贴也未先用「仅收集ID」模式收集）。")
         return
 
-    append_log(f"[DownloadIDs] 开始下载，共 {len(ids_data)} 个 ID")
+    job.append_log(f"[DownloadIDs] 开始下载，共 {len(ids_data)} 个 ID")
     success_count = 0
 
     for pid_str in ids_data:
-        if not state.is_running:
-            append_log("任务已被强制终止。")
+        if not job.is_running:
+            job.append_log("任务已被强制终止。")
             break
-        state.play_event.wait()
+        job.play_event.wait()
 
-        if pid_str in db_data_inst.log_data:
+        if pid_str in log_store:
             continue
 
-        append_log(f"[DownloadIDs] 正在处理 ID: {pid_str}")
+        job.append_log(f"[DownloadIDs] 正在处理 ID: {pid_str}")
         post_data = danbooru_api.fetch_data_with_retry(pid_str)
         if not post_data:
-            append_log(f"ID {pid_str} 获取数据失败，跳过")
+            job.append_log(f"ID {pid_str} 获取数据失败，跳过")
             continue
 
-        if filter_tags:
+        if job.filter_tags:
             tag_string = post_data.get('tag_string', '')
-            if any(tag in tag_string for tag in filter_tags):
-                append_log(f"跳过 ID {pid_str}，包含过滤标签。")
+            if any(tag in tag_string for tag in job.filter_tags):
+                job.append_log(f"跳过 ID {pid_str}，包含过滤标签。")
                 continue
 
         image_url = post_data.get('file_url') or post_data.get('large_file_url')
         if not image_url:
             continue
 
-        state.play_event.wait()
-        if not state.is_running:
+        job.play_event.wait()
+        if not job.is_running:
             break
 
-        saved_filename = danbooru_api.download_image(image_url, save_dir, append_log)
+        saved_filename = danbooru_api.download_image(image_url, job.save_dir, job.append_log)
         if not saved_filename:
-            append_log(f"ID {pid_str} 下载失败，跳过")
+            job.append_log(f"ID {pid_str} 下载失败，跳过")
             continue
 
-        db_data_inst.log_data[pid_str] = image_url
+        log_store.record(pid_str, image_url)
         success_count += 1
 
         artist = ""
@@ -796,171 +1020,164 @@ def task_download_ids(db_data_inst, filter_tags, inline_ids=None):
                 artist = ' '.join(artist_list)
 
         if artist:
-            db_data_inst.artist_stats[artist] = db_data_inst.artist_stats.get(artist, 0) + 1
+            stats_store.increment(artist)
 
-        _append_viewer(pid_str, artist, saved_filename, post_data)
-        save_runtime_snapshot(db_data_inst.log_data, db_data_inst.artist_stats, daily_viewer_data, runtime_snapshot_path)
+        job.append_viewer_entry(pid_str, artist, saved_filename, post_data)
+        job.write_snapshot()
 
-    db_data_inst.save_global_data()
-    with viewer_data_lock:
-        db_data_inst.save_viewer_data(daily_viewer_data)
-    clear_runtime_snapshot(runtime_snapshot_path)
-    append_log(f"[DownloadIDs] 完成，成功下载 {success_count} 张图片。")
+    _persist_global_data()
+    job.flush_viewer_data()
+    job.clear_snapshot()
+    job.append_log(f"[DownloadIDs] 完成，成功下载 {success_count} 张图片。")
 
 
-def scraper_task(start_page, end_page, mode="rank", target_date="", start_date="", end_date="", inline_ids=None, tag_query=""):
-    global scraper_thread
+def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date, inline_ids, tag_query):
+    """单个 job 的执行入口（在 job.thread 里跑）。根据 mode 分发到各 grabber。"""
     try:
         if mode == "download_ids":
-            task_download_ids(db_data, state.filter_tags, inline_ids)
+            task_download_ids(job, inline_ids)
         elif mode == "tags":
-            if not tag_query.strip():
-                append_log("tags 模式需要填写 tag 查询串。")
-                return
-            folder_name = sanitize_tag_folder(tag_query)
-            if not folder_name:
-                append_log(f"tag 查询串 [{tag_query}] 转文件夹名失败。")
-                return
-            append_log(f"[Tags] 目标文件夹: {folder_name} (基于 tag: {tag_query})")
-            tag_db = DanbooruData(folder_name)
-            tag_snapshot_path = os.path.join(tag_db.save_dir, "_runtime_snapshot.json")
-
-            output = tag_db.load_hot_drawer()
-            nu_sets = tag_db.load_need_update()
+            output = job.db.load_hot_drawer()
+            nu_sets = job.db.load_need_update()
             n = start_page
             while n <= end_page:
-                if not state.is_running:
-                    append_log("任务已被强制终止。")
+                if not job.is_running:
+                    job.append_log("任务已被强制终止。")
                     break
-                state.play_event.wait()
-                append_log(f"--- 正在处理 tag [{tag_query}] 第 {n} 页 ---")
-                o, n_u_dict = grabber_tags(tag_db, n, state.filter_tags, tag_query)
-                output = list(set(output + o) - tag_db.all_drawer)
+                job.play_event.wait()
+                job.append_log(f"--- 正在处理 tag [{tag_query}] 第 {n} 页 ---")
+                o, n_u_dict = grabber_tags(job, n, tag_query)
+                output = list(set(output + o) - job.db.all_drawer)
                 for k in ["1", "2"]:
                     nu_sets[k].update(n_u_dict[k])
-                tag_db.save_hot_drawer(list(set(output)))
-                tag_db.save_need_update(nu_sets)
+                job.db.save_hot_drawer(list(set(output)))
+                job.db.save_need_update(nu_sets)
                 n += 1
-            if state.is_running:
-                clear_runtime_snapshot(tag_snapshot_path)
+            if job.is_running:
+                job.clear_snapshot()
         elif mode == "popular_range":
             if not start_date or not end_date:
-                append_log("日期范围缺失。")
+                job.append_log("日期范围缺失。")
                 return
             s_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d")
             e_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d")
-            if s_dt > e_dt: s_dt, e_dt = e_dt, s_dt
+            if s_dt > e_dt:
+                s_dt, e_dt = e_dt, s_dt
 
-            # 按时间顺序（早 → 晚）抓取；超过 2 天时每抓完 2 天休息 10 分钟防风控
             total_days = (e_dt - s_dt).days + 1
             REST_AFTER_DAYS = 2
             REST_SECONDS = 600
             need_throttle = total_days > REST_AFTER_DAYS
             if need_throttle:
-                append_log(f"日期范围共 {total_days} 天，将每 {REST_AFTER_DAYS} 天休息 {REST_SECONDS // 60} 分钟防风控。")
+                job.append_log(f"日期范围共 {total_days} 天，将每 {REST_AFTER_DAYS} 天休息 {REST_SECONDS // 60} 分钟防风控。")
 
             curr_dt = s_dt
             days_since_rest = 0
             while curr_dt <= e_dt:
-                if not state.is_running: break
+                if not job.is_running:
+                    break
                 pop_date = curr_dt.strftime("%Y-%m-%d")
-                append_log(f"=== 开始抓取日期: {pop_date} ===")
-                pop_db = DanbooruData(pop_date)
-                pop_snapshot_path = os.path.join(pop_db.save_dir, "_runtime_snapshot.json")
+                # popular_range 在同一个 job 里按日期迭代：换日时把当前 viewer_data 落盘
+                # 再加载新日期的盘上数据，job.target_folder / save_dir / snapshot_path
+                # 同步更新 —— refresh_visible 会跟着 get_by_folder 找到正确的实例
+                if job.target_folder != pop_date:
+                    job.switch_target(pop_date)
+                job.append_log(f"=== 开始抓取日期: {pop_date} ===")
 
-                output = pop_db.load_hot_drawer()
-                nu_sets = pop_db.load_need_update()
+                output = job.db.load_hot_drawer()
+                nu_sets = job.db.load_need_update()
                 n = start_page
 
                 while n <= end_page:
-                    if not state.is_running: break
-                    state.play_event.wait()
-                    append_log(f"--- 正在处理 {pop_date} 第 {n} 页 ---")
-                    o, n_u_dict = grabber_popular(pop_db, n, state.filter_tags, pop_date)
-                    output = list(set(output + o) - pop_db.all_drawer)
+                    if not job.is_running:
+                        break
+                    job.play_event.wait()
+                    job.append_log(f"--- 正在处理 {pop_date} 第 {n} 页 ---")
+                    o, n_u_dict = grabber_popular(job, n, pop_date)
+                    output = list(set(output + o) - job.db.all_drawer)
                     for k in ["1", "2"]:
                         nu_sets[k].update(n_u_dict[k])
-
-                    pop_db.save_hot_drawer(list(set(output)))
-                    pop_db.save_need_update(nu_sets)
+                    job.db.save_hot_drawer(list(set(output)))
+                    job.db.save_need_update(nu_sets)
                     n += 1
 
-                # 本日期所有页面处理完毕（或被打断），清理这天的临时快照，
-                # 否则会留下陈旧的 _runtime_snapshot.json
-                if state.is_running:
-                    clear_runtime_snapshot(pop_snapshot_path)
+                if job.is_running:
+                    job.clear_snapshot()
                 days_since_rest += 1
                 curr_dt += datetime.timedelta(days=1)
 
-                # 还有剩余日期、累计达到 REST_AFTER_DAYS 时休息（可被暂停/停止打断）
                 if (need_throttle
-                        and state.is_running
+                        and job.is_running
                         and curr_dt <= e_dt
                         and days_since_rest >= REST_AFTER_DAYS):
-                    append_log(f"已抓取 {days_since_rest} 天，休息 {REST_SECONDS // 60} 分钟防风控（可暂停/停止打断）...")
+                    job.append_log(f"已抓取 {days_since_rest} 天，休息 {REST_SECONDS // 60} 分钟防风控（可暂停/停止打断）...")
                     slept = 0
                     while slept < REST_SECONDS:
-                        if not state.is_running: break
-                        state.play_event.wait()
+                        if not job.is_running:
+                            break
+                        job.play_event.wait()
                         sleep(1)
                         slept += 1
                     days_since_rest = 0
-                    if state.is_running:
-                        append_log("休息结束，继续抓取下一天。")
+                    if job.is_running:
+                        job.append_log("休息结束，继续抓取下一天。")
         else:
-            output = db_data.load_hot_drawer()
-            nu_sets = db_data.load_need_update()
+            # rank / popular（单日期）/ collect_ids 共用这个分支
+            output = job.db.load_hot_drawer()
+            nu_sets = job.db.load_need_update()
 
             n = start_page
             mode_label = {"rank": "Rank", "popular": "Popular", "collect_ids": "CollectIDs"}.get(mode, mode)
-            append_log(f"开始抓取 [{mode_label}]，从第 {start_page} 页到第 {end_page} 页")
-            append_log(f"当前过滤 Tags: {state.filter_tags}")
+            job.append_log(f"开始抓取 [{mode_label}]，从第 {start_page} 页到第 {end_page} 页")
+            job.append_log(f"当前过滤 Tags: {job.filter_tags}")
 
             while n <= end_page:
-                if not state.is_running: 
-                    append_log("任务已被强制终止。")
+                if not job.is_running:
+                    job.append_log("任务已被强制终止。")
                     break
-                state.play_event.wait()
-                append_log(f"--- 正在处理第 {n} 页 ---")
+                job.play_event.wait()
+                job.append_log(f"--- 正在处理第 {n} 页 ---")
 
                 if mode == "popular":
-                    pop_date = target_date or db_data.today_str
-                    pop_db = DanbooruData(pop_date)
-                    pop_snapshot_path = os.path.join(pop_db.save_dir, "_runtime_snapshot.json")
-                    o, n_u_dict = grabber_popular(pop_db, n, state.filter_tags, pop_date)
-
-                    output = list(set(output + o) - pop_db.all_drawer)
+                    pop_date = target_date or _resolve_today()
+                    # popular 单日期模式：job 创建时就钉死 target_folder=pop_date，
+                    # 这里直接复用，不再 new pop_db
+                    o, n_u_dict = grabber_popular(job, n, pop_date)
+                    output = list(set(output + o) - job.db.all_drawer)
                     for k in ["1", "2"]:
                         nu_sets[k].update(n_u_dict[k])
-
-                    pop_db.save_hot_drawer(list(set(output)))
-                    pop_db.save_need_update(nu_sets)
-                    # popular 单日期模式同样需要在每页处理完后清理临时快照
-                    if state.is_running:
-                        clear_runtime_snapshot(pop_snapshot_path)
+                    job.db.save_hot_drawer(list(set(output)))
+                    job.db.save_need_update(nu_sets)
+                    if job.is_running:
+                        job.clear_snapshot()
                 elif mode == "collect_ids":
-                    o, n_u_dict = grabber_collect_ids(db_data, n, state.filter_tags)
-                    output = list(set(output + o) - db_data.all_drawer)
+                    o, n_u_dict = grabber_collect_ids(job, n)
+                    output = list(set(output + o) - job.db.all_drawer)
                     for k in ["1", "2"]:
                         nu_sets[k].update(n_u_dict[k])
-                    db_data.save_hot_drawer(list(set(output)))
-                    db_data.save_need_update(nu_sets)
+                    job.db.save_hot_drawer(list(set(output)))
+                    job.db.save_need_update(nu_sets)
                 else:
-                    o, n_u_dict = grabber_rank(db_data, n, state.filter_tags)
-                    output = list(set(output + o) - db_data.all_drawer)
+                    o, n_u_dict = grabber_rank(job, n)
+                    output = list(set(output + o) - job.db.all_drawer)
                     for k in ["1", "2"]:
                         nu_sets[k].update(n_u_dict[k])
-                    db_data.save_hot_drawer(list(set(output)))
-                    db_data.save_need_update(nu_sets)
+                    job.db.save_hot_drawer(list(set(output)))
+                    job.db.save_need_update(nu_sets)
 
                 n += 1
     except Exception as e:
-        save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
-        append_log(f"抓取任务异常中断，已写入临时快照: {e}")
+        job.write_snapshot()
+        job.append_log(f"抓取任务异常中断，已写入临时快照: {e}")
     finally:
-        state.is_running = False
-        scraper_thread = None
-        append_log("所有页面处理完毕或已结束。")
+        job.is_running = False
+        job.append_log("所有页面处理完毕或已结束。")
+        # 任务结束后保留 30 秒让前端拉走最后一批 new_logs/new_images，再从注册表里清掉。
+        # registry 里 is_running=False 不算占用 MAX_CONCURRENT 槽位，所以不影响立刻起下一个 job。
+        def _delayed_remove(job_id=job.job_id):
+            sleep(30)
+            jobs.remove(job_id)
+        threading.Thread(target=_delayed_remove, daemon=True).start()
 
 # ==========================================
 # 4. API 路由定义
@@ -997,68 +1214,148 @@ def get_safe_mode_endpoint():
 
 @app.post("/api/start")
 def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
-    global scraper_thread
-    if state.is_running:
-        return {"msg": "爬虫已经在运行中"}
-    
-    state.filter_tags = [t.strip() for t in req.tags.split(',') if t.strip()]
-    state.is_running = True
-    state.play_event.set()
-    state.logs = []
-    state.sent_image_count = len(daily_viewer_data)
+    if not jobs.can_start():
+        active = jobs.list_active()
+        return {
+            "ok": False,
+            "msg": f"已有 {len(active)} 个任务在跑，达到并发上限 {jobs.MAX_CONCURRENT}",
+        }
 
-    scraper_thread = threading.Thread(
-        target=scraper_task,
-        args=(req.start_page, req.end_page, req.mode, req.target_date, req.start_date, req.end_date, req.ids, req.tag_query),
-        daemon=True
+    filter_tags = [t.strip() for t in req.tags.split(',') if t.strip()]
+
+    # 不同 mode 落到不同的 target_folder：rank/collect_ids 跟随真今天；popular/download_ids
+    # 跟随用户指定 target_date；popular_range 用 start_date 做起点，之后 job 自己用
+    # switch_target 按日期迭代；tags 算出 tag_xxx 文件夹名。
+    if req.mode == "tags":
+        if not (req.tag_query or "").strip():
+            return {"ok": False, "msg": "tags 模式需要填写 tag 查询串。"}
+        folder_name = sanitize_tag_folder(req.tag_query)
+        if not folder_name:
+            return {"ok": False, "msg": f"tag 查询串 [{req.tag_query}] 转文件夹名失败。"}
+        target_folder = folder_name
+        label = f"tags · {req.tag_query}"
+    elif req.mode == "popular":
+        target_folder = req.target_date or _resolve_today()
+        label = f"popular · {target_folder}"
+    elif req.mode == "popular_range":
+        if not req.start_date or not req.end_date:
+            return {"ok": False, "msg": "日期范围缺失。"}
+        target_folder = req.start_date
+        label = f"popular_range · {req.start_date}~{req.end_date}"
+    elif req.mode == "download_ids":
+        target_folder = req.target_date or _resolve_today()
+        label = f"download_ids · {target_folder}"
+    else:
+        target_folder = _resolve_today()
+        label = f"{req.mode} · {target_folder}"
+
+    job = _make_job(target_folder, req.mode, filter_tags, label)
+    job.is_running = True
+    job.play_event.set()
+    jobs.add(job)
+
+    job.thread = threading.Thread(
+        target=_run_job,
+        args=(job, req.start_page, req.end_page, req.mode, req.target_date,
+              req.start_date, req.end_date, req.ids, req.tag_query),
+        daemon=True,
     )
-    scraper_thread.start()
-    mode_labels = {"rank": "排行抓取", "popular": "Popular热门", "collect_ids": "仅收集ID", "download_ids": "按ID下载", "popular_range": "日期范围热门", "tags": "Tag下载"}
-    return {"msg": f"{mode_labels.get(req.mode, '任务')}已启动"}
+    job.thread.start()
+
+    mode_labels = {
+        "rank": "排行抓取", "popular": "Popular热门", "collect_ids": "仅收集ID",
+        "download_ids": "按ID下载", "popular_range": "日期范围热门", "tags": "Tag下载",
+    }
+    return {
+        "ok": True,
+        "msg": f"{mode_labels.get(req.mode, '任务')}已启动",
+        "job_id": job.job_id,
+        "target_folder": job.target_folder,
+    }
+
+
+def _resolve_job(job_id: str):
+    """endpoint 工具：有 job_id 就按 id 取，否则取 primary（最近活跃 / 最近完成）。"""
+    return jobs.get(job_id) if job_id else jobs.primary()
+
 
 @app.post("/api/pause")
-def pause_scraper():
-    state.play_event.clear()
-    append_log("任务已暂停（正在等待当前动作完成）...")
-    return {"msg": "已暂停"}
+def pause_scraper(job_id: str = ""):
+    job = _resolve_job(job_id)
+    if not job or not job.is_running:
+        return {"msg": "没有在跑的任务"}
+    job.play_event.clear()
+    job.append_log("任务已暂停（正在等待当前动作完成）...")
+    return {"msg": "已暂停", "job_id": job.job_id}
+
 
 @app.post("/api/resume")
-def resume_scraper():
-    state.play_event.set()
-    append_log("任务已恢复。")
-    return {"msg": "已恢复"}
+def resume_scraper(job_id: str = ""):
+    job = _resolve_job(job_id)
+    if not job:
+        return {"msg": "没有任务"}
+    job.play_event.set()
+    job.append_log("任务已恢复。")
+    return {"msg": "已恢复", "job_id": job.job_id}
+
 
 @app.post("/api/stop")
-def stop_scraper():
-    state.is_running = False
-    state.play_event.set()
-    save_runtime_snapshot(db_data.log_data, db_data.artist_stats, daily_viewer_data, runtime_snapshot_path)
-    append_log("已强制结束任务，当前进度已写入临时快照。")
-    return {"msg": "已强制结束任务"}
+def stop_scraper(job_id: str = ""):
+    job = _resolve_job(job_id)
+    if not job:
+        return {"msg": "没有任务"}
+    job.is_running = False
+    job.play_event.set()
+    job.write_snapshot()
+    job.append_log("已强制结束任务，当前进度已写入临时快照。")
+    return {"msg": "已强制结束任务", "job_id": job.job_id}
+
 
 @app.get("/api/status")
-def get_status():
-    global daily_viewer_data
-    logs = state.logs.copy()
-    state.logs.clear()
-    
-    # 获取新增的图片数据
-    new_images = []
-    current_count = len(daily_viewer_data)
-    if current_count > state.sent_image_count:
-        # 只切片取出新增加的部分
-        new_images = daily_viewer_data[state.sent_image_count : current_count]
-        state.sent_image_count = current_count
+def get_status(job_id: str = ""):
+    """返回 primary job（或指定 job_id）的状态。
+    没活跃任务时所有关键字段都返回 falsy，前端 sync 看到 is_running=False 自动收尾。"""
+    job = _resolve_job(job_id)
+
+    if job is None:
+        return {
+            "is_running": False,
+            "is_paused": False,
+            "target_folder": "",
+            "new_logs": [],
+            "new_images": [],
+            "jobs": [],
+        }
+
+    # drain logs：push 给前端后从 job 缓冲清掉，下次轮询不重复
+    with job.viewer_lock:
+        logs = list(job.logs)
+        job.logs = []
+        current_count = len(job.viewer_data)
+        new_images = []
+        if current_count > job.sent_image_count:
+            new_images = job.viewer_data[job.sent_image_count:current_count]
+            job.sent_image_count = current_count
 
     return {
-        "is_running": state.is_running,
-        "is_paused": not state.play_event.is_set() if state.is_running else False,
+        "is_running": job.is_running,
+        "is_paused": job.is_paused,
         # 当前下载实际写入的子目录名（日期 "YYYY-MM-DD" 或 tag 文件夹 "tag_xxx"）。
-        # 前端拿这个字段判断 new_images 该追加进哪个画廊，避免 tag 下载的新图
-        # 被错误地 unshift 到日期画廊里（之后用户一刷新就会污染日期 viewer_data.json）。
-        "target_folder": today_str,
+        # 前端用这个匹配 selectedDate 决定 new_images 该不该追加进当前画廊。
+        "target_folder": job.target_folder,
         "new_logs": logs,
-        "new_images": new_images  # 发送给前端渲染
+        "new_images": new_images,
+        # 给前端将来扩展 "多任务 UI" 用的列表；目前只有 1 个（MAX_CONCURRENT=1）
+        "jobs": [
+            {
+                "job_id": j.job_id,
+                "target_folder": j.target_folder,
+                "mode": j.mode,
+                "label": j.label,
+                "is_running": j.is_running,
+            }
+            for j in jobs.list_active()
+        ],
     }
 
 @app.get("/api/gallery_data")
@@ -1145,16 +1442,8 @@ def _backfill_orphan_entries(date_str: str, dd: DanbooruData) -> int:
     data = dd.load_viewer_data()
     known_fns = {item.get("filename") for item in data if item.get("filename")}
 
-    # 反查表：filename -> post_id（取自全局 log.json）
-    # 用 list() 快照一份，避免后台下载线程同时写入 log_data 导致 RuntimeError
-    global_log = db_data.log_data or {}
-    fn_to_pid = {}
-    for pid, url in list(global_log.items()):
-        if not url:
-            continue
-        fn = url.split('/')[-1].split('?')[0]
-        if fn:
-            fn_to_pid[fn] = pid
+    # 反查表：filename -> post_id（取自全局 log_store；snapshot 一份避免下载线程并发写入）
+    fn_to_pid = log_store.filename_to_id_map()
 
     orphans = []
     for image_path in date_dir.iterdir():
@@ -1398,40 +1687,44 @@ def _translate_characters_str(chars_str: str):
 
 @app.post("/api/refresh_visible")
 def refresh_visible(req: RefreshVisibleRequest):
-    """同步刷新一组 filename 的热度信息；对孤立文件用全局 log.json 反查 post_id 后回填。
+    """同步刷新一组 filename 的热度信息；对孤立文件用全局 log_store 反查 post_id 后回填。
     返回 {ok, updates: [{filename, ok, score, fav_count, post_url, artist, characters, tags}]}。
 
     被设计成 stateless / 同步，前端的「刷新热度」按钮拿当前页 15 张图调用即可，
     避免一次刷全日 600+ 张被 Danbooru 风控。
 
     并发模型：
-    - 网络 I/O（Danbooru post 拉取）一律放在 viewer_data_lock 之外，
-      避免阻塞下载线程的每页落盘。
-    - 当目标日期 == 当前下载日期（today_str）时，直接操作模块全局
-      daily_viewer_data，这样后续下载线程把它写回磁盘时不会把这里的更新覆盖掉。
-    - 其它日期没有并发写者，但仍在锁内重新读盘 + 落盘，序列化掉 refresh_visible
-      自身的多并发调用。"""
-    date_str = req.date or db_data.today_str
+    - 网络 I/O（Danbooru post 拉取）一律放在锁外，避免阻塞下载线程的每页落盘。
+    - 如果该 date_str 当前正好有 job 在跑（jobs.get_by_folder 命中），就直接共用
+      job.viewer_data + job.viewer_lock：内存里改完，job 自己每页末尾会写盘，无需再
+      额外 save_viewer_data 一次（也避免和下载线程互相覆盖）。
+    - 没 job 在跑时走干净路径：new 一个 DanbooruData(date_str)，读盘 → 改 → 写盘。
+      永远按 date_str 实例化，不再读模块级 db_data（那是个早就过时的 bug 根源）。"""
+    date_str = req.date or _resolve_today()
     filenames = [fn for fn in (req.filenames or []) if fn]
     if not filenames:
         return {"ok": False, "msg": "filenames 为空", "updates": []}
 
-    is_today = (date_str == today_str)
-    dd = DanbooruData(target_date=date_str) if not is_today else None
+    # 关键路径：根据 target_folder 找当前正在跑的 job；命中就走共享内存路径，否则建临时 dd
+    active_job = jobs.get_by_folder(date_str)
+    dd = None if active_job else DanbooruData(target_date=date_str)
 
-    # Step 1: 在锁内快照 filename -> post_id 的反查表（不持锁做网络 I/O）。
-    # 全局 log.json 用 list() 浅拷一份，避免下载线程并发写入时 RuntimeError。
-    global_log = db_data.log_data or {}
-    fn_to_pid_log = {}
-    for pid, url in list(global_log.items()):
-        if not url:
-            continue
-        fn = url.split('/')[-1].split('?')[0]
-        if fn:
-            fn_to_pid_log[fn] = pid
+    # Step 1: 在锁内快照 filename -> post_id 的反查表（不持锁做网络 I/O）
+    fn_to_pid_log = log_store.filename_to_id_map()
 
-    with viewer_data_lock:
-        source_data = daily_viewer_data if is_today else dd.load_viewer_data()
+    if active_job is not None:
+        with active_job.viewer_lock:
+            source_data = active_job.viewer_data
+            fn_to_pid_initial = {}
+            for it in source_data:
+                fn = it.get("filename")
+                if not fn:
+                    continue
+                pid = _extract_post_id(it.get("post_url", ""))
+                if pid:
+                    fn_to_pid_initial[fn] = pid
+    else:
+        source_data = dd.load_viewer_data()
         fn_to_pid_initial = {}
         for it in source_data:
             fn = it.get("filename")
@@ -1451,7 +1744,7 @@ def refresh_visible(req: RefreshVisibleRequest):
             post = None
         return filename, post_id, post
 
-    # Step 2: 锁外并发拉取所有 post 数据 —— 这里是慢操作（每个 post 都要打 Danbooru）。
+    # Step 2: 锁外并发拉取所有 post 数据 —— 慢操作（每个 post 都要打 Danbooru）
     MAX_WORKERS = 5
     fetched = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -1462,15 +1755,18 @@ def refresh_visible(req: RefreshVisibleRequest):
             except Exception as e:
                 fetched.append(("?", None, None, e))
 
-    # Step 3: 锁内 merge + 落盘。这一段不做网络 I/O，只触磁盘和内存。
+    # Step 3: 锁内 merge + 落盘
     updates = []
-    with viewer_data_lock:
-        target_data = daily_viewer_data if is_today else dd.load_viewer_data()
+    changed = False
+
+    def _apply_updates(target_data):
+        """共用的合并逻辑：把 fetched 的结果 merge 进 target_data（in-place）。
+        返回 changed 标记。"""
+        nonlocal updates
         fn_to_item = {it.get("filename"): it for it in target_data if it.get("filename")}
-        changed = False
+        any_changed = False
 
         for entry in fetched:
-            # 异常分支：tuple 长度为 4 且最后一个是 Exception
             if len(entry) == 4:
                 updates.append({"filename": "?", "ok": False, "msg": str(entry[3])})
                 continue
@@ -1503,20 +1799,14 @@ def refresh_visible(req: RefreshVisibleRequest):
             if item:
                 item["score"] = new_score
                 item["fav_count"] = new_fav
-                # 孤立文件之前可能是 artist="未知"、post_url="#"，这里一并刷新
                 item["artist"] = artist
                 item["post_url"] = post_url
                 merged_tags = item.get("tags") or {}
                 merged_tags.update(tags_full)
                 item["tags"] = merged_tags
-                changed = True
+                any_changed = True
             else:
-                # 跨目录污染防护：tag 下载期间，前端的 syncStatus 会把 tag 文件夹里
-                # 新下的图 unshift 到日期画廊。用户在日期画廊一交互（看图/翻页触发
-                # refreshSinglePost）就会把这些"日期目录里其实没这张图"的 filename
-                # 传过来。原本会通过 log.json 反查到 post_id，按 orphan 路径强行追加
-                # 一条 local_path 指向日期目录但磁盘上根本不存在的脏条目。
-                # 此处先校验文件确实在该日期目录下，不在就直接拒掉，保住数据完整性。
+                # 跨目录污染防护：磁盘上不存在该文件就不创建孤立条目（避免脏数据）
                 expected_local = os.path.join(base_download_dir, date_str, filename)
                 if not os.path.exists(expected_local):
                     updates.append({
@@ -1537,7 +1827,7 @@ def refresh_visible(req: RefreshVisibleRequest):
                 }
                 target_data.append(new_item)
                 fn_to_item[filename] = new_item
-                changed = True
+                any_changed = True
 
             updates.append({
                 "filename": filename,
@@ -1550,12 +1840,20 @@ def refresh_visible(req: RefreshVisibleRequest):
                 "characters": _translate_characters_str(chars_str),
                 "tags": tags_full
             })
+        return any_changed
 
+    if active_job is not None:
+        # 命中正在跑的 job：直接改它的 in-memory viewer_data，落盘由 job 自己负责
+        with active_job.viewer_lock:
+            changed = _apply_updates(active_job.viewer_data)
+            if changed:
+                # 立即落一次盘，避免下载线程崩溃前丢失这次刷新结果
+                active_job.db.save_viewer_data(active_job.viewer_data)
+    else:
+        target_data = source_data
+        changed = _apply_updates(target_data)
         if changed:
-            if is_today:
-                db_data.save_viewer_data(target_data)
-            else:
-                dd.save_viewer_data(target_data)
+            dd.save_viewer_data(target_data)
 
     return {"ok": True, "updates": updates}
 
@@ -1582,7 +1880,7 @@ def api_import_translation(req: TranslationImportRequest):
 def api_untranslated_characters(date: str = ""):
     """聚合指定日期 viewer_data 里所有「翻译字典查不到」的角色 token。
     返回 {tags: [{tag, post_count, fallback_name}]}，按出现次数倒序。"""
-    date_str = date or today_str
+    date_str = date or _resolve_today()
     dd = DanbooruData(target_date=date_str)
     data = dd.load_viewer_data()
 
