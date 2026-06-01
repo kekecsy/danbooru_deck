@@ -2795,8 +2795,8 @@ const modeDescription = computed(() => {
     case 'popular': return '根据指定日期，获取 Explore 页面当天的热门图片。';
     case 'popular_range': return '设定起始与结束日期，批量抓取这段时间内所有的热门图片。';
     case 'collect_ids': return '网络状况不佳时的极速模式：仅拉取列表和元数据，不下载图片本体。';
-    case 'download_ids': return '从已收集的 ID 列表中进行批量下载，常用于断点续传或集中补全。';
-    case 'tags': return '按 tag 查询下载到独立的 tag 文件夹（与日期文件夹并行，共用全局 log.json 防止重复下载）。';
+    case 'download_ids': return '从已收集的 ID 列表中进行批量下载。';
+    case 'tags': return '按 tag 查询下载到tag文件夹。';
     default: return '选择模式后配置参数，点击启动开始执行。';
   }
 });
@@ -2915,8 +2915,8 @@ const tagFolderPreview = computed(() => {
         </span>
         <textarea
           v-model="form.idsText"
-          rows="4"
-          placeholder="支持两种格式：&#10;1) 压缩：dbids:6tewdt.dw （别人复制按钮生成的）&#10;2) 明文：8123456,8456789,8987654 或一行一个 或直接粘贴 URL"
+          rows="2"
+          placeholder="1) 压缩：dbids:6tewdt.dw&#10;2) 明文： 行分隔 / 逗号分隔 或 URL"
           style="font-family: Consolas, monospace; font-size: 12px; resize: vertical; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,0.6);"
         />
         <div class="muted compact-text" style="margin-top: 4px;">
@@ -2938,7 +2938,6 @@ const tagFolderPreview = computed(() => {
       <label class="field-full" v-if="form.mode === 'tags'">
         <span>
           Tag 查询串
-          <span class="muted compact-text">(空格 = AND；冒号支持，如 rating:safe；前缀 - 反向)</span>
         </span>
         <input
           v-model="form.tagQuery"
@@ -2948,7 +2947,6 @@ const tagFolderPreview = computed(() => {
         />
         <div class="muted compact-text" style="margin-top: 4px; line-height: 1.5;">
           下载到独立文件夹 <strong style="color: var(--accent-deep); font-family: Consolas, monospace;">{{ tagFolderPreview || 'tag_...' }}</strong>
-          <span> · 共用全局 log.json，避免和其它文件夹重复下载相同 ID</span>
         </div>
       </label>
       <label class="field-full">
@@ -3014,9 +3012,8 @@ const tagFolderPreview = computed(() => {
         </div>
 
         <div v-if="taskCombos.length" class="tq-combos">
-          <span class="tq-combos-label">常用组合：</span>
           <span v-for="c in taskCombos" :key="c.name" class="tq-combo-chip">
-            <button class="tq-combo-run" @click="runCombo(c)" :disabled="queueRunning || task.isRunning" :title="comboTooltip(c)">▶ {{ c.name }}（{{ c.tasks.length }}）</button>
+            <button class="tq-combo-run" @click="runCombo(c)" :disabled="queueRunning || task.isRunning" :title="comboTooltip(c)">▶ {{ c.name }}</button>
             <button class="tq-combo-load" @click="loadCombo(c)" :disabled="queueRunning" title="只载入到队列，不立即运行">载入</button>
             <button class="tq-mini tq-del" @click="deleteCombo(c.name)" :disabled="queueRunning" title="删除该组合">×</button>
           </span>
