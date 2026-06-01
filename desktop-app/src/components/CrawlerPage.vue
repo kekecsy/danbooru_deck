@@ -24,6 +24,41 @@ async function toggleSafeMode() {
     safeMode.value ? 'success' : 'warning');
 }
 
+// 代理开关：运行时在「走代理 / 直连」间切换。解决「开代理启动后端→后端 PROXIES 定格→
+// 关掉代理软件后下载仍走死代理报错」。直接打后端 /api/set_proxy 即时改 danbooru_api.PROXIES。
+// 默认值仅占位，onMounted 里用后端 /api/proxy_state 的真实状态校正。
+const useProxy = ref(true);
+async function loadProxyState() {
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/proxy_state');
+    const data = await res.json();
+    if (data && typeof data.use_proxy === 'boolean') useProxy.value = data.use_proxy;
+  } catch (e) { /* 后端未就绪时静默，onMounted 在 ensureService 后再调一次 */ }
+}
+async function toggleProxy() {
+  const next = !useProxy.value;
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/set_proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ use_proxy: next })
+    });
+    const data = await res.json();
+    useProxy.value = !!data.use_proxy;
+    habits.useProxy = useProxy.value;
+    localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+    if (data.use_proxy && data.alive === false) {
+      showToast('已切到「走代理」，但探测代理端口不可达，请确认代理软件已开启', 'warning');
+    } else if (data.use_proxy) {
+      showToast('已切到「走代理」下载', 'success');
+    } else {
+      showToast('已切到「直连」下载（不使用代理）', 'success');
+    }
+  } catch (e) {
+    showToast('切换代理失败：' + (e.message || e), 'error');
+  }
+}
+
 const form = ref({
   startPage: habits.rank_start || 1,
   endPage: habits.rank_end || 16,
@@ -49,9 +84,50 @@ watch(() => form.value.mode, (newMode) => {
     form.value.startPage = habits.tags_start || 1;
     form.value.endPage = habits.tags_end || 5;
   }
+  applyDefaultDatesForMode(newMode);
   recentStartPages.value = loadRecentPages(newMode, 'start');
   recentEndPages.value = loadRecentPages(newMode, 'end');
 });
+
+// ---------------- 日期工具 + 「默认昨天」 ----------------
+// popular / popular_range 在日期留空时默认填「昨天」（用户每日例行：早上跑昨天的热门）。
+function todayString() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function yesterdayString() {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+// 队列 / 组合里把日期存成相对令牌，跑时再解析成「当时的」昨天/今天 ——
+// 这样同一个常用组合每天跑都对应新的昨天，而不是被钉死在某个旧日期。
+function resolveDateToken(v) {
+  if (v === '@yesterday') return yesterdayString();
+  if (v === '@today') return todayString();
+  return v || '';
+}
+function tokenizeDate(v) {
+  if (!v) return '';
+  if (v === yesterdayString()) return '@yesterday';
+  if (v === todayString()) return '@today';
+  return v;
+}
+function dateTokenLabel(v) {
+  if (v === '@yesterday') return `昨天(${yesterdayString()})`;
+  if (v === '@today') return `今天(${todayString()})`;
+  return v || '今天';
+}
+function applyDefaultDatesForMode(mode) {
+  if (mode === 'popular') {
+    if (!form.value.targetDate) form.value.targetDate = yesterdayString();
+  } else if (mode === 'popular_range') {
+    if (!form.value.startDate) form.value.startDate = yesterdayString();
+    if (!form.value.endDate) form.value.endDate = yesterdayString();
+  }
+}
+// 初始模式若是 popular / popular_range，进来就把日期填成昨天
+applyDefaultDatesForMode(form.value.mode);
 
 // ---------------- 起始页 / 结束页「最近使用」历史 ----------------
 // 每个模式（rank / popular / popular_range / collect_ids）按 start / end 各自存最近 2 个值
@@ -151,7 +227,6 @@ const task = ref({
   backendError: '',
   backendErrorExpanded: false,
   backendTail: [],
-  showLogs: false,
   maximized: false,
   hideSuccess: true,
   expandedLogIdx: -1
@@ -174,18 +249,27 @@ const caption = ref({
   loading: false,
   saving: false,
   withArtist: habits.captionWithArtist === true,
-  mode: 'mark',          // 'mark' 标记模式（红） | 'edit' 输入模式（绿）
+  mode: 'mark',          // 'mark' 标记模式（红，拖选标红） | 'edit' 输入模式（直接编辑文本框）
   text: '',
   errors: [],            // [{start, end, text}]
-  edits: [],             // [{start, end, original, replacement}]
   meta: null,            // {artist, characters, copyright}
   message: '',
   imagePath: '',
   loaded: false,
   dirty: false,
   pos: { x: 0, y: 0, initialized: false },
-  // 待输入替换文本时的临时状态
-  editDraft: { open: false, start: 0, end: 0, original: '', replacement: '' }
+  // 手动模式：API 不可用 / 不想用 API 时，把 3 阶段 pipeline 的每一轮提示词
+  // 复制到任意 chat LLM（Claude/ChatGPT/Gemini Web），在同一对话里连续粘贴 3
+  // 段，把每轮返回粘回到对应粘贴框；最后一轮的中文段落作为 caption.text。
+  manual: {
+    open: true,            // 主入口，默认展开
+    promptBusy: false,
+    stage: 1,              // 1 | 2 | 3 | 'done'
+    metaUsed: null,        // 拉过 prompt 后置为 true/false
+    s1: { combined: '', pasted: '', parsed: null, parseError: '' },
+    s2: { user: '',     pasted: '', parsed: null, parseError: '' },
+    s3: { user: '',     pasted: '', parseError: '' }
+  }
 });
 const captionTextRef = ref(null);
 const captionDrag = ref({ active: false, dx: 0, dy: 0 });
@@ -198,12 +282,12 @@ function openCaptionWindow() {
   caption.value.imagePath = item.localPath;
   caption.value.message = '';
   caption.value.errors = [];
-  caption.value.edits = [];
   caption.value.text = '';
   caption.value.meta = null;
   caption.value.loaded = false;
   caption.value.dirty = false;
-  caption.value.editDraft.open = false;
+  resetManualPipeline();
+  caption.value.manual.open = true;
   caption.value.open = true;
   if (!caption.value.pos.initialized) {
     const panelWidth = 480;
@@ -248,7 +332,6 @@ async function loadExistingCaption() {
     if (entry) {
       caption.value.text = entry.caption || '';
       caption.value.errors = Array.isArray(entry.errors) ? entry.errors : [];
-      caption.value.edits = Array.isArray(entry.edits) ? entry.edits : [];
       caption.value.meta = {
         artist: entry.artist,
         characters: entry.characters,
@@ -256,6 +339,16 @@ async function loadExistingCaption() {
       };
       caption.value.withArtist = !!entry.with_artist;
       caption.value.loaded = true;
+      // 恢复 Pipeline 每一步内容（保存时写入 entry.pipeline）。按字段合并，
+      // 保留默认形状；prompt（combined/user）不存盘，需要时再点复制重新拉。
+      const p = entry.pipeline;
+      if (p && typeof p === 'object') {
+        const m = caption.value.manual;
+        if (p.stage !== undefined && p.stage !== null) m.stage = p.stage;
+        if (p.s1) m.s1 = { ...m.s1, ...p.s1 };
+        if (p.s2) m.s2 = { ...m.s2, ...p.s2 };
+        if (p.s3) m.s3 = { ...m.s3, ...p.s3 };
+      }
     }
   } catch (e) {
     // 忽略
@@ -279,7 +372,6 @@ async function generateCaption() {
       copyright: result.copyright
     };
     caption.value.errors = [];
-    caption.value.edits = [];
     caption.value.loaded = true;
     caption.value.dirty = true;
     caption.value.message = '生成完成，已可标注错误段。';
@@ -290,22 +382,10 @@ async function generateCaption() {
   }
 }
 
-// 标点吸附：如果选区的首/尾紧贴标点，把标点纳入
+// 标点吸附：仅吸附尾部紧贴的标点，首部不再吸附
 function snapToPunctuation(text, start, end) {
-  while (start > 0 && PUNCT_RE.test(text[start - 1])) start -= 1;
   while (end < text.length && PUNCT_RE.test(text[end])) end += 1;
   return [start, end];
-}
-
-function _allSpans() {
-  // 合并 errors + edits 用于重叠检测（不修改原数组）
-  return [
-    ...caption.value.errors.map(e => ({ ...e, kind: 'error' })),
-    ...caption.value.edits.map(e => ({ ...e, kind: 'edit' }))
-  ];
-}
-function _overlapsExisting(start, end) {
-  return _allSpans().some(s => !(s.end <= start || s.start >= end));
 }
 
 function markCurrentSelection() {
@@ -324,33 +404,7 @@ function markCurrentSelection() {
   let [start, end] = snapToPunctuation(text, start0, end0);
   if (start >= end) return;
 
-  if (caption.value.mode === 'edit') {
-    // 输入模式：打开替换草稿，让用户填入替换文本
-    if (_overlapsExisting(start, end)) {
-      caption.value.message = '选区与已有标记/替换重叠，请先撤销冲突项再操作。';
-      sel.removeAllRanges();
-      return;
-    }
-    caption.value.editDraft.open = true;
-    caption.value.editDraft.start = start;
-    caption.value.editDraft.end = end;
-    caption.value.editDraft.original = text.slice(start, end);
-    caption.value.editDraft.replacement = text.slice(start, end);
-    caption.value.message = '';
-    sel.removeAllRanges();
-    nextTick(() => {
-      const input = document.getElementById('caption-edit-input');
-      if (input) { input.focus(); input.select(); }
-    });
-    return;
-  }
-
-  // 标记模式：合并相邻 error；如果选区落在 edit 上则拒绝
-  if (caption.value.edits.some(e => !(e.end <= start || e.start >= end))) {
-    caption.value.message = '不能在已替换段（绿）上再标红，请先撤销该替换。';
-    sel.removeAllRanges();
-    return;
-  }
+  // 标记模式：拖选标红，合并相邻 error。（输入模式走可编辑文本框，不触发本函数）
   const next = [];
   let merged = { start, end };
   for (const e of caption.value.errors) {
@@ -368,34 +422,8 @@ function markCurrentSelection() {
   sel.removeAllRanges();
 }
 
-function confirmEditDraft() {
-  const d = caption.value.editDraft;
-  if (!d.open) return;
-  const replacement = (d.replacement || '').trim();
-  if (!replacement) {
-    caption.value.message = '替换文本不能为空。';
-    return;
-  }
-  caption.value.edits = [
-    ...caption.value.edits,
-    { start: d.start, end: d.end, original: d.original, replacement }
-  ].sort((a, b) => a.start - b.start);
-  caption.value.editDraft.open = false;
-  caption.value.dirty = true;
-  caption.value.message = '已记录替换。';
-}
-
-function cancelEditDraft() {
-  caption.value.editDraft.open = false;
-}
-
 function removeErrorSpan(idx) {
   caption.value.errors = caption.value.errors.filter((_, i) => i !== idx);
-  caption.value.dirty = true;
-}
-
-function removeEditSpan(idx) {
-  caption.value.edits = caption.value.edits.filter((_, i) => i !== idx);
   caption.value.dirty = true;
 }
 
@@ -404,32 +432,31 @@ function clearAllErrors() {
   caption.value.dirty = true;
 }
 
-function clearAllEdits() {
-  caption.value.edits = [];
-  caption.value.dirty = true;
-}
-
-// 渲染：把 errors（红）和 edits（绿）合并按 start 排序，分段输出。
-// edits 段显示 replacement，errors 段显示原文。
+// 渲染：errors（红）按 start 排序分段输出，错误段显示原文。
+// 仅标记模式用；输入模式直接走可编辑 textarea。
 const captionRenderSegments = computed(() => {
   const text = caption.value.text || '';
-  const spans = [
-    ...caption.value.errors.map((e, i) => ({ ...e, kind: 'error', idx: i })),
-    ...caption.value.edits.map((e, i) => ({ ...e, kind: 'edit', idx: i }))
-  ].sort((a, b) => a.start - b.start);
+  const spans = caption.value.errors
+    .map((e, i) => ({ ...e, idx: i }))
+    .sort((a, b) => a.start - b.start);
   const segs = [];
   let cursor = 0;
   for (const s of spans) {
     if (s.start > cursor) segs.push({ type: 'text', text: text.slice(cursor, s.start) });
-    if (s.kind === 'error') {
-      segs.push({ type: 'error', text: text.slice(s.start, s.end), idx: s.idx });
-    } else {
-      segs.push({ type: 'edit', text: s.replacement, original: s.original, idx: s.idx });
-    }
+    segs.push({ type: 'error', text: text.slice(s.start, s.end), idx: s.idx });
     cursor = Math.max(cursor, s.end);
   }
   if (cursor < text.length) segs.push({ type: 'text', text: text.slice(cursor) });
   return segs;
+});
+
+// 是否有可保存内容：最终文本，或任一 pipeline 步骤已填/已往后走。
+// 让「保存」按钮在只完成中间步骤时也可用，从而保存每一步的进度。
+const captionHasContent = computed(() => {
+  if ((caption.value.text || '').trim()) return true;
+  const m = caption.value.manual;
+  if (m.stage !== 1) return true; // 已进入 stage 2/3/done
+  return !!(m.s1.pasted.trim() || m.s2.pasted.trim() || m.s3.pasted.trim());
 });
 
 async function saveCaption() {
@@ -439,6 +466,7 @@ async function saveCaption() {
     return;
   }
   // JSON 深拷贝去掉 Vue reactive proxy，避免 IPC structuredClone 报「could not be cloned」
+  const m = caption.value.manual;
   const entry = JSON.parse(JSON.stringify({
     caption: caption.value.text,
     with_artist: caption.value.withArtist,
@@ -446,7 +474,8 @@ async function saveCaption() {
     characters: caption.value.meta?.characters || null,
     copyright: caption.value.meta?.copyright || null,
     errors: caption.value.errors,
-    edits: caption.value.edits
+    // Pipeline 每一步内容：重开同一张图时恢复（loadExistingCaption），避免重做 stage
+    pipeline: { stage: m.stage, s1: m.s1, s2: m.s2, s3: m.s3 }
   }));
   const imagePath = String(caption.value.imagePath);
   caption.value.saving = true;
@@ -460,8 +489,8 @@ async function saveCaption() {
     if (result?.ok) {
       caption.value.message = `已保存到 ${result.path}`;
       caption.value.dirty = false;
-      // 立即更新画廊标记
-      const fname = caption.value.imagePath.split(/[\\/]/).pop();
+      // 立即更新画廊标记（仅当有最终文本时；只存了中间步骤不算「已生成」）
+      const fname = caption.value.text.trim() ? caption.value.imagePath.split(/[\\/]/).pop() : '';
       if (fname) {
         const next = new Set(captionedSet.value);
         next.add(fname);
@@ -474,6 +503,139 @@ async function saveCaption() {
     caption.value.message = `保存失败：${e.message || e}`;
   } finally {
     caption.value.saving = false;
+  }
+}
+
+// ---------------- Caption 手动模式（3 阶段 Pipeline） ----------------
+// 用户在外部 chat LLM 同一对话里连续粘贴 stage 1/2/3 三段提示词，
+// 把每轮返回粘回到对应文本框；stage 3 的中文段落即为 caption.text。
+
+function resetManualPipeline() {
+  const m = caption.value.manual;
+  m.stage = 1;
+  m.promptBusy = false;
+  m.metaUsed = null;
+  m.s1 = { combined: '', pasted: '', parsed: null, parseError: '' };
+  m.s2 = { user: '',     pasted: '', parsed: null, parseError: '' };
+  m.s3 = { user: '',     pasted: '', parseError: '' };
+}
+
+function stripCodeFences(text) {
+  if (!text) return '';
+  let s = String(text).trim();
+  // ```json ... ``` 或 ``` ... ```
+  const fence = /^```(?:json|JSON)?\s*([\s\S]*?)\s*```$/m;
+  const m = s.match(fence);
+  if (m) return m[1].trim();
+  // 没有围栏：尝试找第一个 { 到最后一个 }（兼容模型在前后加解释文字的情况）
+  const first = s.indexOf('{');
+  const last = s.lastIndexOf('}');
+  if (first >= 0 && last > first) {
+    return s.slice(first, last + 1);
+  }
+  return s;
+}
+
+async function fetchStagePrompt(stage) {
+  const m = caption.value.manual;
+  const payload = {
+    image_path: caption.value.imagePath,
+    with_artist: !!caption.value.withArtist,
+    stage,
+  };
+  if (stage === 3 && m.s2.parsed) {
+    payload.verify_json = JSON.stringify(m.s2.parsed);
+  }
+  const res = await fetch('http://127.0.0.1:8000/api/caption_prompt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.msg || `获取 stage ${stage} 提示词失败`);
+  m.metaUsed = !!data.meta_used;
+  if (stage === 1) m.s1.combined = data.combined || '';
+  else if (stage === 2) m.s2.user = data.user || '';
+  else if (stage === 3) m.s3.user = data.user || '';
+  return data;
+}
+
+async function copyStagePrompt(stage) {
+  if (!caption.value.imagePath || caption.value.manual.promptBusy) return;
+  const m = caption.value.manual;
+  m.promptBusy = true;
+  caption.value.message = '';
+  try {
+    // withArtist 变更后，stage 3 prompt 需要重新拉；为简单起见每次都重拉。
+    const data = await fetchStagePrompt(stage);
+    const text = stage === 1 ? data.combined : data.user;
+    await navigator.clipboard.writeText(text || '');
+    const len = (text || '').length;
+    const metaNote = m.metaUsed ? '' : ' · 未找到 viewer_data 元数据，prompt 是空白版';
+    const stageLabel = stage === 1 ? 'Stage 1 (观察)'
+                     : stage === 2 ? 'Stage 2 (校验)'
+                     : 'Stage 3 (成文)';
+    showToast(`已复制 ${stageLabel} 提示词（${len} 字）${metaNote}`, 'success');
+  } catch (e) {
+    showToast(`复制失败：${e.message || e}`, 'error');
+  } finally {
+    m.promptBusy = false;
+  }
+}
+
+function parseStageJson(stage) {
+  const m = caption.value.manual;
+  const slot = stage === 1 ? m.s1 : m.s2;
+  const raw = (slot.pasted || '').trim();
+  if (!raw) {
+    slot.parseError = '粘贴框为空';
+    return;
+  }
+  try {
+    const stripped = stripCodeFences(raw);
+    const obj = JSON.parse(stripped);
+    if (!obj || typeof obj !== 'object') throw new Error('解析结果不是对象');
+    slot.parsed = obj;
+    slot.parseError = '';
+    m.stage = stage + 1;
+    caption.value.message = `Stage ${stage} 已解析，进入 Stage ${m.stage}。`;
+  } catch (e) {
+    slot.parsed = null;
+    slot.parseError = `JSON 解析失败：${e.message || e}`;
+  }
+}
+
+function applyFinalCaption() {
+  const m = caption.value.manual;
+  const text = (m.s3.pasted || '').trim();
+  if (!text) {
+    m.s3.parseError = '粘贴框为空';
+    return;
+  }
+  caption.value.text = text;
+  caption.value.errors = [];
+  caption.value.loaded = true;
+  caption.value.dirty = true;
+  m.s3.parseError = '';
+  m.stage = 'done';
+  caption.value.message = '已应用最终描述，点「保存」落盘。';
+}
+
+async function copyCaptionImage() {
+  if (!caption.value.imagePath) return;
+  if (!window.desktopAPI?.caption?.copyImage) {
+    showToast('当前 Electron preload 缺少 caption.copyImage，请重启程序', 'error');
+    return;
+  }
+  try {
+    const result = await window.desktopAPI.caption.copyImage(caption.value.imagePath);
+    if (result?.ok) {
+      showToast('已复制图片到剪贴板，去 LLM 对话框 Ctrl+V 粘贴', 'success');
+    } else {
+      showToast(result?.error || '复制图片失败', 'error');
+    }
+  } catch (e) {
+    showToast(`复制图片失败：${e.message || e}`, 'error');
   }
 }
 
@@ -762,7 +924,7 @@ let pollTimer = null;
 const logBodyRef = ref(null);
 
 watch(() => task.value.totalLogCount, async () => {
-  if (task.value.showLogs && logBodyRef.value) {
+  if (task.value.maximized && logBodyRef.value) {
     await nextTick();
     logBodyRef.value.scrollTop = logBodyRef.value.scrollHeight;
   }
@@ -916,14 +1078,13 @@ function dismissBackendError() {
 
 function toggleLogMaximize() {
   task.value.maximized = !task.value.maximized;
-  // 放大时强制展开，否则只看到一个空的 header 没意义
-  if (task.value.maximized) task.value.showLogs = true;
 }
 
 function toggleLogHeader() {
-  // 放大态下不允许通过 header 折叠 —— 折叠会让人误以为日志消失
+  // 缩小态：日志体收起，点击整条头部即可放大查看；
+  // 放大态：只用右上角「缩小」图标收起，避免误触把日志收走
   if (task.value.maximized) return;
-  task.value.showLogs = !task.value.showLogs;
+  task.value.maximized = true;
 }
 
 // 按行匹配“下载完成 / 文件已存在 / 正在下载 ...”这类逐张日志，
@@ -1198,6 +1359,264 @@ async function stopTask() {
   } catch (error) {
     appendLog(`停止失败: ${error.message}`);
   }
+}
+
+// ================= 多任务队列 + 常用组合（习惯） =================
+// 后端 MAX_CONCURRENT=1：队列在前端顺序驱动，逐个 start → 等完成 → 下一个。
+// 完成检测只读响应式 task.value.isRunning（由 1.2s 的 pollTimer/syncStatus 维护），
+// 绝不在这里自己调用 crawler.status()，否则会抢走 /api/status 的破坏性 drain、吞掉日志。
+let _queueIdSeq = 0;
+const taskQueue = ref([]);          // [{id, mode, startPage, endPage, tags, targetDate, startDate, endDate, tagQuery, idsText, label, status, error}]
+const queueRunning = ref(false);    // 整个队列是否在跑
+const queueAbort = ref(false);      // 停止队列的中断旗标
+const queueIndex = ref(-1);         // 当前正在跑的项下标（-1 = 没在跑）
+const taskCombos = ref(Array.isArray(habits.taskCombos) ? habits.taskCombos : []);
+// 存为常用组合时的命名草稿（Electron 渲染进程不支持 window.prompt，改用应用内输入框）
+const comboDraft = ref({ open: false, name: '' });
+
+const MODE_NAMES = {
+  rank: '排行榜', popular: '日期热门', popular_range: '日期范围',
+  tags: '标签下载', collect_ids: '仅收集ID', download_ids: '按ID下载',
+};
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function queueItemLabel(it) {
+  const name = MODE_NAMES[it.mode] || it.mode;
+  if (it.mode === 'tags') return `${name}「${it.tagQuery || ''}」 ${it.startPage}-${it.endPage}页`;
+  if (it.mode === 'download_ids') return `${name} ${dateTokenLabel(it.targetDate)} (${parsePastedIds(it.idsText || '').length}个ID)`;
+  if (it.mode === 'popular') return `${name} ${dateTokenLabel(it.targetDate)} ${it.startPage}-${it.endPage}页`;
+  if (it.mode === 'popular_range') return `${name} ${dateTokenLabel(it.startDate)}~${dateTokenLabel(it.endDate)}`;
+  return `${name} ${it.startPage}-${it.endPage}页`;
+}
+
+// 快照当前表单为一个队列项（日期转相对令牌，便于常用组合每天复用）
+function snapshotFormToItem() {
+  const f = form.value;
+  return {
+    id: ++_queueIdSeq,
+    mode: f.mode,
+    startPage: Number(f.startPage) || 1,
+    endPage: Number(f.endPage) || 1,
+    tags: f.tags || '',
+    targetDate: tokenizeDate(f.targetDate || ''),
+    startDate: tokenizeDate(f.startDate || ''),
+    endDate: tokenizeDate(f.endDate || ''),
+    tagQuery: f.tagQuery || '',
+    idsText: f.idsText || '',
+    status: 'pending',
+    error: '',
+  };
+}
+
+function addCurrentToQueue() {
+  if (queueRunning.value) return;
+  const f = form.value;
+  // 与 startTask 一致的最小校验
+  if (f.mode === 'tags' && !(f.tagQuery || '').trim()) {
+    showToast('标签下载需要先填 tag 查询串', 'error');
+    return;
+  }
+  if (f.mode === 'download_ids' && !parsePastedIds(f.idsText || '').length) {
+    showToast('按ID下载需要先粘贴有效的 ID', 'error');
+    return;
+  }
+  const item = snapshotFormToItem();
+  item.label = queueItemLabel(item);
+  taskQueue.value.push(item);
+  showToast(`已加入队列：${item.label}`, 'success');
+}
+
+function removeQueueItem(i) {
+  if (queueRunning.value) return;
+  taskQueue.value.splice(i, 1);
+}
+function moveQueueItem(i, dir) {
+  if (queueRunning.value) return;
+  const j = i + dir;
+  if (j < 0 || j >= taskQueue.value.length) return;
+  const arr = taskQueue.value;
+  [arr[i], arr[j]] = [arr[j], arr[i]];
+}
+function clearQueue() {
+  if (queueRunning.value) return;
+  taskQueue.value = [];
+}
+
+function buildQueuePayload(it) {
+  const payload = {
+    start_page: Number(it.startPage) || 1,
+    end_page: Number(it.endPage) || 1,
+    tags: it.tags || '',
+    mode: it.mode || 'rank',
+    target_date: resolveDateToken(it.targetDate || ''),
+    start_date: resolveDateToken(it.startDate || ''),
+    end_date: resolveDateToken(it.endDate || ''),
+    tag_query: it.tagQuery || '',
+  };
+  if (payload.mode === 'download_ids') {
+    const ids = parsePastedIds(it.idsText || '');
+    if (ids.length) payload.ids = ids;
+  }
+  // popular / popular_range 缺日期时兜底昨天（snapshot 时通常已填，这里双保险）
+  if (payload.mode === 'popular' && !payload.target_date) payload.target_date = yesterdayString();
+  if (payload.mode === 'popular_range') {
+    if (!payload.start_date) payload.start_date = yesterdayString();
+    if (!payload.end_date) payload.end_date = yesterdayString();
+  }
+  return payload;
+}
+
+// 等当前任务跑完：只读 task.value.isRunning（1.2s pollTimer 维护），不自己调 status。
+async function waitForTaskIdle() {
+  // 1) 确认任务起来了（后端 start 已同步置 is_running；兜极快完成的任务，最多等 ~4s）
+  const t0 = Date.now();
+  while (!task.value.isRunning && (Date.now() - t0) < 4000) {
+    if (queueAbort.value) return;
+    await sleep(300);
+  }
+  // 2) 等它结束
+  while (task.value.isRunning) {
+    if (queueAbort.value) return;
+    await sleep(500);
+  }
+}
+
+async function runQueue() {
+  if (queueRunning.value) return;
+  if (!taskQueue.value.length) { showToast('队列为空', 'info'); return; }
+  if (task.value.isRunning) { showToast('已有任务在跑，先停止再运行队列', 'error'); return; }
+  queueRunning.value = true;
+  queueAbort.value = false;
+  taskQueue.value.forEach(it => { it.status = 'pending'; it.error = ''; });
+  let okCount = 0, failCount = 0;
+  try {
+    for (let i = 0; i < taskQueue.value.length; i++) {
+      if (queueAbort.value) break;
+      const item = taskQueue.value[i];
+      const n = taskQueue.value.length;
+      queueIndex.value = i;
+      item.status = 'running';
+      try {
+        const payload = buildQueuePayload(item);
+        const result = await window.desktopAPI.crawler.start(payload);
+        if (!result?.ok) {
+          item.status = 'error';
+          item.error = result?.msg || '启动失败';
+          failCount += 1;
+          appendLog(`[队列 ${i + 1}/${n}] 启动失败：${item.error}`);
+          continue;
+        }
+        appendLog(`[队列 ${i + 1}/${n}] 启动：${item.label}`);
+        pushRecentPage(payload.mode, 'start', payload.start_page);
+        pushRecentPage(payload.mode, 'end', payload.end_page);
+        await syncStatus();        // 置 isRunning=true
+        await waitForTaskIdle();   // 等到 isRunning=false
+        if (queueAbort.value) { item.status = 'pending'; break; }
+        if (task.value.backendError) {
+          item.status = 'error';
+          item.error = task.value.backendError;
+          failCount += 1;
+        } else {
+          item.status = 'done';
+          okCount += 1;
+        }
+      } catch (e) {
+        item.status = 'error';
+        item.error = e?.message || String(e);
+        failCount += 1;
+        appendLog(`[队列 ${i + 1}/${n}] 异常：${item.error}`);
+      }
+      await sleep(1000);  // 项间缓一下，降低撞限流概率
+    }
+  } finally {
+    queueRunning.value = false;
+    queueIndex.value = -1;
+  }
+  if (queueAbort.value) showToast(`队列已停止（完成 ${okCount}，失败 ${failCount}）`, 'info');
+  else showToast(`队列完成：成功 ${okCount}，失败 ${failCount}`, failCount ? 'warning' : 'success');
+}
+
+async function stopQueue() {
+  if (!queueRunning.value) return;
+  queueAbort.value = true;
+  if (task.value.isRunning) await stopTask();
+  showToast('正在停止队列...', 'info');
+}
+
+// ---- 常用组合（习惯）：持久化在 localStorage.crawlerHabits.taskCombos ----
+function persistCombos() {
+  habits.taskCombos = taskCombos.value.map(c => ({ name: c.name, tasks: c.tasks }));
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+}
+function stripItemForSave(it) {
+  // 只存可复现字段（保留日期相对令牌），不存 id/label/status
+  return {
+    mode: it.mode,
+    startPage: it.startPage,
+    endPage: it.endPage,
+    tags: it.tags,
+    targetDate: it.targetDate,
+    startDate: it.startDate,
+    endDate: it.endDate,
+    tagQuery: it.tagQuery,
+    idsText: it.idsText,
+  };
+}
+function saveQueueAsCombo() {
+  if (queueRunning.value) return;
+  if (!taskQueue.value.length) { showToast('队列为空，无法保存', 'info'); return; }
+  // Electron 不支持 window.prompt，打开应用内输入框取名
+  comboDraft.value.name = '晨间例行';
+  comboDraft.value.open = true;
+  nextTick(() => {
+    const el = document.getElementById('combo-name-input');
+    if (el) { el.focus(); el.select(); }
+  });
+}
+function confirmSaveCombo() {
+  const name = (comboDraft.value.name || '').trim();
+  if (!name) { showToast('请输入组合名字', 'error'); return; }
+  if (!taskQueue.value.length) { comboDraft.value.open = false; return; }
+  const combo = { name, tasks: taskQueue.value.map(stripItemForSave) };
+  const idx = taskCombos.value.findIndex(c => c.name === name);
+  if (idx >= 0) taskCombos.value.splice(idx, 1, combo);
+  else taskCombos.value.push(combo);
+  persistCombos();
+  comboDraft.value.open = false;
+  showToast(`已保存常用组合「${name}」`, 'success');
+}
+function cancelSaveCombo() { comboDraft.value.open = false; }
+function loadCombo(combo) {
+  if (queueRunning.value) return;
+  taskQueue.value = (combo.tasks || []).map(t => {
+    const it = { ...t, id: ++_queueIdSeq, status: 'pending', error: '' };
+    it.label = queueItemLabel(it);
+    return it;
+  });
+}
+async function runCombo(combo) {
+  if (queueRunning.value || task.value.isRunning) {
+    showToast('已有任务/队列在跑，先停止再运行组合', 'error');
+    return;
+  }
+  loadCombo(combo);
+  await nextTick();
+  await runQueue();
+}
+function deleteCombo(name) {
+  if (queueRunning.value) return;
+  const idx = taskCombos.value.findIndex(c => c.name === name);
+  if (idx >= 0) {
+    taskCombos.value.splice(idx, 1);
+    persistCombos();
+  }
+}
+function comboTooltip(combo) {
+  return (combo.tasks || []).map((t, i) => `${i + 1}. ${queueItemLabel({ ...t })}`).join('\n');
+}
+function queueStatusIcon(it) {
+  return { pending: '○', running: '⏳', done: '✓', error: '⚠' }[it.status] || '○';
 }
 
 async function openLocal(item) {
@@ -2349,6 +2768,8 @@ onMounted(async () => {
   await ensureService();
   // Python 后端就绪后立刻把本地保存的 SFW 偏好推过去，确保即使是当前会话第一次请求也用对 host
   await syncSafeModeToBackend();
+  // 读取后端真实代理状态校正按钮（后端启动时已按探测结果自动决定走代理/直连）
+  await loadProxyState();
   // 静默加载：Python 后端就绪后在后台刷新翻译，不再显示”正在读取”遮罩，消除闪烁
   await loadGallery(gallery.value.selectedDate, true);
   await syncStatus();
@@ -2411,6 +2832,12 @@ const tagFolderPreview = computed(() => {
           @click="toggleSafeMode"
           :title="safeMode ? '当前走 safebooru.donmai.us（无 R-18）。点击切换为完整 danbooru' : '当前走 danbooru.donmai.us（含 NSFW）。点击切回 SFW'"
         >{{ safeMode ? '🛡 SFW' : '🌶 全部内容' }}</button>
+        <button
+          class="ghost proxy-mode-btn"
+          :class="{ 'is-proxy': useProxy, 'is-direct': !useProxy }"
+          @click="toggleProxy"
+          :title="useProxy ? '当前走代理下载。关掉代理软件后请点这里切到「直连」，否则下载会连不上死代理端口' : '当前直连下载（不走代理）。开了代理软件可点这里切回「走代理」'"
+        >{{ useProxy ? '🌐 走代理' : '🔌 直连' }}</button>
       </div>
 
       <div class="mode-selector">
@@ -2419,7 +2846,7 @@ const tagFolderPreview = computed(() => {
         <button class="mode-chip" :class="{ active: form.mode === 'popular' }" @click="form.mode = 'popular'"
           title="按指定日期获取热门帖子并下载">日期热门</button>
         <button class="mode-chip" :class="{ active: form.mode === 'popular_range' }" @click="form.mode = 'popular_range'"
-          title="按指定日期范围获取热门帖子并下载">日期范围热门</button>
+          title="按指定日期范围获取热门帖子并下载">日期范围</button>
         <button class="mode-chip" :class="{ active: form.mode === 'tags' }" @click="form.mode = 'tags'"
           title="按 tag 查询下载到独立的 tag_xxx 文件夹，与日期文件夹并行">标签下载</button>
         <button class="mode-chip" :class="{ active: form.mode === 'collect_ids' }" @click="form.mode = 'collect_ids'"
@@ -2479,7 +2906,7 @@ const tagFolderPreview = computed(() => {
         </label>
       </div>
       <label class="field-full" v-if="['popular', 'download_ids'].includes(form.mode)">
-        <span>目标日期 <span class="muted compact-text">(留空则用今天)</span></span>
+        <span>目标日期 <span class="muted compact-text">{{ form.mode === 'popular' ? '(默认昨天，可改)' : '(留空则用今天)' }}</span></span>
         <input v-model="form.targetDate" type="date" />
       </label>
       <label class="field-full" v-if="form.mode === 'download_ids'">
@@ -2536,6 +2963,66 @@ const tagFolderPreview = computed(() => {
         <button class="ghost" @click="stopTask" :disabled="!task.isRunning">停止</button>
       </div>
 
+      <!-- 多任务队列：把多个下载任务排队顺序执行；可存为常用组合一键复用 -->
+      <div class="task-queue-panel">
+        <div class="tq-header">
+          <span class="tq-title">🗂 多任务队列<span v-if="queueRunning" class="tq-running-badge">运行中 {{ queueIndex + 1 }}/{{ taskQueue.length }}</span></span>
+          <button class="ghost tq-add" @click="addCurrentToQueue" :disabled="queueRunning" title="把上方当前配置作为一个任务加入队列">＋ 加入队列</button>
+        </div>
+
+        <div v-if="taskQueue.length" class="tq-list">
+          <div
+            v-for="(it, i) in taskQueue"
+            :key="it.id"
+            class="tq-item"
+            :class="[it.status, { current: queueRunning && i === queueIndex }]"
+            :title="it.error || queueItemLabel(it)"
+          >
+            <span class="tq-item-status">{{ queueStatusIcon(it) }}</span>
+            <span class="tq-item-idx">{{ i + 1 }}</span>
+            <span class="tq-item-label">{{ it.label }}</span>
+            <span class="tq-item-ops">
+              <button class="tq-mini" @click="moveQueueItem(i, -1)" :disabled="queueRunning || i === 0" title="上移">↑</button>
+              <button class="tq-mini" @click="moveQueueItem(i, 1)" :disabled="queueRunning || i === taskQueue.length - 1" title="下移">↓</button>
+              <button class="tq-mini tq-del" @click="removeQueueItem(i)" :disabled="queueRunning" title="移除">×</button>
+            </span>
+          </div>
+        </div>
+        <div v-else class="tq-empty">
+        </div>
+
+        <div v-if="taskQueue.length" class="tq-actions">
+          <button class="tq-run" @click="runQueue" :disabled="queueRunning || task.isRunning" title="按顺序依次执行队列里的全部任务">运行（{{ taskQueue.length }}）</button>
+          <button class="secondary" @click="stopQueue" :disabled="!queueRunning">停止</button>
+          <button class="ghost" @click="clearQueue" :disabled="queueRunning">清空</button>
+          <button class="ghost" @click="saveQueueAsCombo" :disabled="queueRunning" title="把当前队列存成常用组合，下次一键执行">保存</button>
+        </div>
+
+        <div v-if="comboDraft.open" class="tq-combo-save">
+          <input
+            id="combo-name-input"
+            v-model="comboDraft.name"
+            type="text"
+            maxlength="40"
+            placeholder="组合名字，如：晨间例行"
+            class="tq-combo-save-input"
+            @keyup.enter="confirmSaveCombo"
+            @keyup.esc="cancelSaveCombo"
+          />
+          <button class="secondary" @click="confirmSaveCombo">保存</button>
+          <button class="ghost" @click="cancelSaveCombo">取消</button>
+        </div>
+
+        <div v-if="taskCombos.length" class="tq-combos">
+          <span class="tq-combos-label">常用组合：</span>
+          <span v-for="c in taskCombos" :key="c.name" class="tq-combo-chip">
+            <button class="tq-combo-run" @click="runCombo(c)" :disabled="queueRunning || task.isRunning" :title="comboTooltip(c)">▶ {{ c.name }}（{{ c.tasks.length }}）</button>
+            <button class="tq-combo-load" @click="loadCombo(c)" :disabled="queueRunning" title="只载入到队列，不立即运行">载入</button>
+            <button class="tq-mini tq-del" @click="deleteCombo(c.name)" :disabled="queueRunning" title="删除该组合">×</button>
+          </span>
+        </div>
+      </div>
+
       <div class="status-pills">
         <span class="pill" :class="{ active: task.isRunning }">运行中: {{ task.isRunning ? '是' : '否' }}</span>
         <span class="pill" :class="{ warning: task.isPaused }">已暂停: {{ task.isPaused ? '是' : '否' }}</span>
@@ -2555,20 +3042,23 @@ const tagFolderPreview = computed(() => {
         <pre v-if="task.backendErrorExpanded" class="error-banner-body">{{ task.backendError }}</pre>
       </div>
 
-      <div class="modern-log-wrapper" :class="{ 'is-expanded': task.showLogs, 'is-maximized': task.maximized }">
+      <div class="modern-log-wrapper" :class="{ 'is-maximized': task.maximized }">
         <div class="modern-log-header" @click="toggleLogHeader">
           <div class="log-header-left">
             <span class="status-dot" :class="{ 'is-active': task.isRunning }"></span>
             <span class="log-title">运行动态</span>
           </div>
           <div class="log-header-right" @click.stop>
-            <button
-              class="log-toolbar-btn"
-              :class="{ active: task.hideSuccess }"
-              @click="task.hideSuccess = !task.hideSuccess"
-              :title="task.hideSuccess ? '当前隐藏单张下载/已存在日志，点击切换为显示全部' : '当前显示全部日志，点击只看异常与概要'"
-            >{{ task.hideSuccess ? '只看异常+概要' : '显示全部' }}</button>
-            <button class="log-toolbar-btn" @click="clearLogs" title="清空当前日志">清空</button>
+            <!-- 缩小态只保留「放大」图标；显示全部/清空属于查看日志时才用得到的操作，放大后再出现 -->
+            <template v-if="task.maximized">
+              <button
+                class="log-toolbar-btn"
+                :class="{ active: task.hideSuccess }"
+                @click="task.hideSuccess = !task.hideSuccess"
+                :title="task.hideSuccess ? '当前隐藏单张下载/已存在日志，点击切换为显示全部' : '当前显示全部日志，点击只看异常与概要'"
+              >{{ task.hideSuccess ? '只看异常+概要' : '显示全部' }}</button>
+              <button class="log-toolbar-btn" @click="clearLogs" title="清空当前日志">清空</button>
+            </template>
             <button
               class="log-icon-btn"
               @click="toggleLogMaximize"
@@ -2590,7 +3080,7 @@ const tagFolderPreview = computed(() => {
           </div>
         </div>
         <transition name="log-expand">
-          <div class="modern-log-body" v-show="task.showLogs" ref="logBodyRef">
+          <div class="modern-log-body" v-show="task.maximized" ref="logBodyRef">
             <div v-if="task.hideSuccess && hiddenSuccessCount" class="modern-log-hint">
               已折叠 {{ hiddenSuccessCount }} 条单张下载/已存在日志（点击右上「显示全部」可查看）
             </div>
@@ -3065,6 +3555,9 @@ const tagFolderPreview = computed(() => {
           <h3>📝 图片描述 (Caption) <span class="caption-drag-hint">拖动标题栏移动窗口</span></h3>
           <button class="ghost" @click="closeCaptionWindow" title="关闭">✕</button>
         </div>
+        <!-- 可滚动主体（改动1）：标题栏留在外面当固定拖动把手，其余内容放进这里。 -->
+        <!-- 内容超高时本容器内部滚动，子项 flex-shrink:0 不再被压扁（修复 Stage 2/3 挤压）。 -->
+        <div class="caption-panel-scroll">
         <div class="caption-panel-meta" v-if="caption.meta">
           <span v-if="caption.meta.characters"><b>角色：</b>{{ caption.meta.characters }}</span>
           <span v-if="caption.meta.copyright"><b>作品：</b>{{ caption.meta.copyright }}</span>
@@ -3076,60 +3569,164 @@ const tagFolderPreview = computed(() => {
             包含画师信息
           </label>
           <div class="caption-mode-switch" role="tablist">
-            <button :class="{ active: caption.mode === 'mark' }" @click="caption.mode = 'mark'; caption.editDraft.open = false;" title="拖选标红错误段">🖍 标记模式</button>
-            <button :class="{ active: caption.mode === 'edit' }" @click="caption.mode = 'edit'" title="拖选后输入正确文本替换">✏️ 输入模式</button>
+            <button :class="{ active: caption.mode === 'mark' }" @click="caption.mode = 'mark'" title="拖选标红错误段">🖍 标记模式</button>
+            <button :class="{ active: caption.mode === 'edit' }" @click="caption.mode = 'edit'" title="在下方文本框里直接编辑描述文本">✏️ 输入模式</button>
           </div>
           <div class="caption-panel-actions">
-            <button class="secondary" :disabled="caption.loading" @click="generateCaption">
-              {{ caption.loading ? '生成中...' : (caption.text ? '重新生成' : '生成描述') }}
+            <button :disabled="!captionHasContent || caption.saving" @click="saveCaption" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">
+              {{ caption.saving ? '保存中...' : '💾 保存' }}
             </button>
-            <button :disabled="!caption.text || caption.saving" @click="saveCaption" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">
-              {{ caption.saving ? '保存中...' : '保存' }}
+            <button class="ghost caption-api-fallback" :disabled="caption.loading" @click="generateCaption" title="API 失败时备用：直接调 Gemini 3 阶段管线生成">
+              {{ caption.loading ? 'API 生成中...' : '🚀 API 自动 (备用)' }}
             </button>
           </div>
         </div>
-        <div class="caption-hint" v-if="caption.text">
+        <!-- Pipeline 手动模式：主要入口。在外部 chat LLM 同一对话里连续粘贴 stage 1/2/3 -->
+        <div class="caption-manual pipeline-manual">
+          <div class="pipeline-header">
+            <span class="pipeline-title">🧭 Pipeline 手动模式 <span class="pipeline-badge">主入口</span></span>
+            <button class="ghost pipeline-reset" @click="resetManualPipeline" title="清空所有 stage 重新开始">↻ 重置</button>
+          </div>
+          <div class="pipeline-progress">
+            <span :class="['pipeline-dot', caption.manual.stage === 1 ? 'active' : (caption.manual.stage > 1 || caption.manual.stage === 'done' ? 'done' : '')]">①</span>
+            <span class="pipeline-dot-label">观察</span>
+            <span class="pipeline-dash">─</span>
+            <span :class="['pipeline-dot', caption.manual.stage === 2 ? 'active' : (caption.manual.stage > 2 || caption.manual.stage === 'done' ? 'done' : '')]">②</span>
+            <span class="pipeline-dot-label">校验</span>
+            <span class="pipeline-dash">─</span>
+            <span :class="['pipeline-dot', caption.manual.stage === 3 ? 'active' : (caption.manual.stage === 'done' ? 'done' : '')]">③</span>
+            <span class="pipeline-dot-label">成文</span>
+          </div>
+          <p class="pipeline-tip">
+            打开 Claude / ChatGPT / Gemini Web，<b>在同一个对话</b>里依次粘贴 3 段提示词；每轮把返回粘回对应文本框。
+          </p>
+
+          <!-- Stage 1: observe -->
+          <div :class="['pipeline-stage', caption.manual.stage === 1 ? 'active' : (caption.manual.stage > 1 || caption.manual.stage === 'done' ? 'done' : 'locked')]">
+            <div class="pipeline-stage-head">
+              <span class="pipeline-stage-title">① Stage 1 · 观察 (得到 JSON)</span>
+              <span v-if="caption.manual.stage > 1 || caption.manual.stage === 'done'" class="pipeline-stage-status done">✓ 已完成</span>
+              <span v-else-if="caption.manual.stage === 1" class="pipeline-stage-status active">当前</span>
+            </div>
+            <div v-if="caption.manual.stage === 1" class="pipeline-stage-body">
+              <div class="pipeline-stage-buttons">
+                <button class="secondary" :disabled="caption.manual.promptBusy" @click="copyStagePrompt(1)">
+                  {{ caption.manual.promptBusy ? '复制中...' : '📋 复制 Stage 1 提示词' }}
+                </button>
+                <button class="secondary" @click="copyCaptionImage">🖼️ 复制图片</button>
+              </div>
+              <p class="pipeline-stage-hint">在 LLM 新对话粘贴提示词 + 图片，把返回的 JSON 整段复制到下方：</p>
+              <textarea
+                v-model="caption.manual.s1.pasted"
+                rows="4"
+                placeholder='粘贴 Stage 1 返回的 JSON，例如：{"subjects_count": 1, ...}'
+                class="caption-manual-paste"
+              ></textarea>
+              <div v-if="caption.manual.s1.parseError" class="pipeline-error">⚠️ {{ caption.manual.s1.parseError }}</div>
+              <button
+                :disabled="!caption.manual.s1.pasted.trim()"
+                @click="parseStageJson(1)"
+                class="caption-manual-apply"
+              >解析并进入 Stage 2 →</button>
+            </div>
+            <div v-else-if="caption.manual.stage > 1 || caption.manual.stage === 'done'" class="pipeline-stage-summary">
+              已解析 {{ Object.keys(caption.manual.s1.parsed || {}).length }} 个字段
+            </div>
+          </div>
+
+          <!-- Stage 2: verify -->
+          <div :class="['pipeline-stage', caption.manual.stage === 2 ? 'active' : (caption.manual.stage > 2 || caption.manual.stage === 'done' ? 'done' : 'locked')]">
+            <div class="pipeline-stage-head">
+              <span class="pipeline-stage-title">② Stage 2 · 校验 (得到 JSON)</span>
+              <span v-if="caption.manual.stage > 2 || caption.manual.stage === 'done'" class="pipeline-stage-status done">✓ 已完成</span>
+              <span v-else-if="caption.manual.stage === 2" class="pipeline-stage-status active">当前</span>
+              <span v-else class="pipeline-stage-status locked">🔒 等待 Stage 1</span>
+            </div>
+            <div v-if="caption.manual.stage === 2" class="pipeline-stage-body">
+              <div class="pipeline-stage-buttons">
+                <button class="secondary" :disabled="caption.manual.promptBusy" @click="copyStagePrompt(2)">
+                  {{ caption.manual.promptBusy ? '复制中...' : '📋 复制 Stage 2 提示词' }}
+                </button>
+              </div>
+              <p class="pipeline-stage-hint">在<b>同一对话</b>粘贴上面这段，得到校验 JSON 后粘回下方（含 tag visible/absent 标注）：</p>
+              <textarea
+                v-model="caption.manual.s2.pasted"
+                rows="4"
+                placeholder='粘贴 Stage 2 返回的 JSON，例如：{"character_identification": {...}, "tag_evaluation": [...]}'
+                class="caption-manual-paste"
+              ></textarea>
+              <div v-if="caption.manual.s2.parseError" class="pipeline-error">⚠️ {{ caption.manual.s2.parseError }}</div>
+              <button
+                :disabled="!caption.manual.s2.pasted.trim()"
+                @click="parseStageJson(2)"
+                class="caption-manual-apply"
+              >解析并进入 Stage 3 →</button>
+            </div>
+            <div v-else-if="caption.manual.stage > 2 || caption.manual.stage === 'done'" class="pipeline-stage-summary">
+              已解析 · tag 评估 {{ (caption.manual.s2.parsed?.tag_evaluation || []).length }} 条 · 角色一致性 {{ caption.manual.s2.parsed?.character_identification?.consistent === false ? '❌ 不一致' : (caption.manual.s2.parsed?.character_identification?.consistent ? '✓ 一致' : '—') }}
+            </div>
+          </div>
+
+          <!-- Stage 3: compose -->
+          <div :class="['pipeline-stage', caption.manual.stage === 3 ? 'active' : (caption.manual.stage === 'done' ? 'done' : 'locked')]">
+            <div class="pipeline-stage-head">
+              <span class="pipeline-stage-title">③ Stage 3 · 成文 (得到中文段落)</span>
+              <span v-if="caption.manual.stage === 'done'" class="pipeline-stage-status done">✓ 已完成</span>
+              <span v-else-if="caption.manual.stage === 3" class="pipeline-stage-status active">当前</span>
+              <span v-else class="pipeline-stage-status locked">🔒 等待 Stage 2</span>
+            </div>
+            <div v-if="caption.manual.stage === 3" class="pipeline-stage-body">
+              <div class="pipeline-stage-buttons">
+                <button class="secondary" :disabled="caption.manual.promptBusy" @click="copyStagePrompt(3)">
+                  {{ caption.manual.promptBusy ? '复制中...' : '📋 复制 Stage 3 提示词' }}
+                </button>
+              </div>
+              <p class="pipeline-stage-hint">在同一对话粘贴这段，把返回的<b>中文段落</b>（不是 JSON）粘到下方：</p>
+              <textarea
+                v-model="caption.manual.s3.pasted"
+                rows="5"
+                placeholder="粘贴 Stage 3 返回的最终中文段落..."
+                class="caption-manual-paste"
+              ></textarea>
+              <div v-if="caption.manual.s3.parseError" class="pipeline-error">⚠️ {{ caption.manual.s3.parseError }}</div>
+              <button
+                :disabled="!caption.manual.s3.pasted.trim()"
+                @click="applyFinalCaption"
+                class="caption-manual-apply pipeline-finish"
+              >✓ 用这段作为描述</button>
+            </div>
+            <div v-else-if="caption.manual.stage === 'done'" class="pipeline-stage-summary">
+              已应用为 caption · 字数 {{ (caption.text || '').length }}
+            </div>
+          </div>
+        </div>
+        <div class="caption-hint" v-if="caption.text || caption.mode === 'edit'">
           <template v-if="caption.mode === 'mark'">
-            <b>标记模式</b>：拖选错误片段 → 标红（首尾紧贴标点自动吸附）；点击红段撤销。
+            <b>标记模式</b>：拖选错误片段 → 标红（尾部紧贴标点自动吸附）；点击红段撤销。
           </template>
           <template v-else>
-            <b>输入模式</b>：拖选要修改的片段 → 在弹出输入框中填入正确文本 → 确认（绿字）；点击绿段撤销。
+            <b>输入模式</b>：在下方文本框里直接编辑描述文本，改完点上方「💾 保存」。
           </template>
         </div>
 
-        <!-- 替换草稿（输入模式选区确认） -->
-        <div v-if="caption.editDraft.open" class="caption-edit-draft">
-          <div class="caption-edit-draft-row">
-            <span class="caption-edit-draft-label">原文：</span>
-            <span class="caption-edit-draft-original">{{ caption.editDraft.original }}</span>
-          </div>
-          <div class="caption-edit-draft-row">
-            <span class="caption-edit-draft-label">替换为：</span>
-            <input
-              id="caption-edit-input"
-              type="text"
-              v-model="caption.editDraft.replacement"
-              @keyup.enter="confirmEditDraft"
-              @keyup.esc="cancelEditDraft"
-              class="caption-edit-input"
-              placeholder="输入正确的描述文本..."
-            />
-            <button class="secondary" @click="confirmEditDraft">确认</button>
-            <button class="ghost" @click="cancelEditDraft">取消</button>
-          </div>
-        </div>
-
+        <!-- 底部内容区（改动3）：输入模式=可直接编辑文本框；标记模式=红标渲染。 -->
         <div v-if="caption.loading" class="caption-loading">⏳ Gemini 正在分析图片，请稍候...</div>
+        <textarea
+          v-else-if="caption.mode === 'edit'"
+          v-model="caption.text"
+          @input="caption.dirty = true"
+          class="caption-text-edit"
+          placeholder="在此直接编辑描述文本，改完点上方「💾 保存」。"
+        ></textarea>
         <div v-else-if="!caption.text" class="caption-empty">尚未生成。点击「生成描述」开始。</div>
-        <div v-else class="caption-text-area" :class="{ 'mode-edit': caption.mode === 'edit' }" ref="captionTextRef" @mouseup="markCurrentSelection">
+        <div v-else class="caption-text-area" ref="captionTextRef" @mouseup="markCurrentSelection">
           <template v-for="(seg, i) in captionRenderSegments" :key="i">
             <span v-if="seg.type === 'text'">{{ seg.text }}</span>
-            <span v-else-if="seg.type === 'error'" class="caption-error" @click.stop="removeErrorSpan(seg.idx)" :title="`点击撤销标红：${seg.text}`">{{ seg.text }}</span>
-            <span v-else class="caption-edit" @click.stop="removeEditSpan(seg.idx)" :title="`原文：${seg.original}\n点击撤销替换`">{{ seg.text }}</span>
+            <span v-else class="caption-error" @click.stop="removeErrorSpan(seg.idx)" :title="`点击撤销标红：${seg.text}`">{{ seg.text }}</span>
           </template>
         </div>
-        <div v-if="caption.errors.length || caption.edits.length" class="caption-marks-summary">
-          <div v-if="caption.errors.length" class="caption-error-list">
+        <div v-if="caption.errors.length" class="caption-marks-summary">
+          <div class="caption-error-list">
             <div class="caption-error-list-title">
               <span>🔴 错误标记（{{ caption.errors.length }}）</span>
               <button class="ghost" @click="clearAllErrors">全部清除</button>
@@ -3141,20 +3738,9 @@ const tagFolderPreview = computed(() => {
               </li>
             </ol>
           </div>
-          <div v-if="caption.edits.length" class="caption-edit-list">
-            <div class="caption-edit-list-title">
-              <span>🟢 替换记录（{{ caption.edits.length }}）</span>
-              <button class="ghost" @click="clearAllEdits">全部清除</button>
-            </div>
-            <ol>
-              <li v-for="(e, i) in caption.edits" :key="`edit-${i}`">
-                <span><s>{{ e.original }}</s> → <b>{{ e.replacement }}</b></span>
-                <button class="ghost" @click="removeEditSpan(i)" title="移除">✕</button>
-              </li>
-            </ol>
-          </div>
         </div>
         <div v-if="caption.message" class="caption-message">{{ caption.message }}</div>
+        </div><!-- /caption-panel-scroll -->
     </div>
 
     <div v-if="toast.show" class="toast-overlay" :class="toast.type">
@@ -3753,6 +4339,20 @@ const tagFolderPreview = computed(() => {
   z-index: 10025;
   backdrop-filter: blur(6px);
 }
+/* 浮窗可滚动主体（改动1）：标题栏(header)留在外面当固定拖动把手，其余内容放进这里；
+   内容超高时本容器内部滚动，子项 flex-shrink:0 不再被压扁，修复 Stage 2/3 被挤压。 */
+.caption-panel-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+.caption-panel-scroll > * {
+  flex-shrink: 0;
+}
 .caption-panel-header {
   display: flex;
   align-items: center;
@@ -3810,6 +4410,250 @@ const tagFolderPreview = computed(() => {
 .caption-panel-actions button {
   padding: 6px 12px;
   font-size: 12.5px;
+}
+.caption-manual {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.5);
+  overflow: hidden;
+}
+.caption-manual-toggle {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 7px 10px;
+  background: rgba(139, 92, 246, 0.05);
+  border: none;
+  font-size: 12.5px;
+  color: var(--accent-deep);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.caption-manual-toggle:hover {
+  background: rgba(139, 92, 246, 0.12);
+}
+.caption-manual-arrow {
+  font-size: 10px;
+  color: rgba(0, 0, 0, 0.45);
+}
+.caption-manual-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 10px 10px;
+  border-top: 1px dashed rgba(0, 0, 0, 0.08);
+}
+.caption-manual-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: rgba(0, 0, 0, 0.55);
+  line-height: 1.55;
+}
+.caption-manual-buttons {
+  display: flex;
+  gap: 6px;
+}
+.caption-manual-buttons button {
+  padding: 6px 10px;
+  font-size: 12px;
+  flex: 1;
+}
+.caption-manual-paste {
+  width: 100%;
+  font-family: Consolas, monospace;
+  font-size: 12.5px;
+  resize: vertical;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.7);
+  outline: none;
+  line-height: 1.5;
+}
+.caption-manual-paste:focus {
+  border-color: var(--accent);
+}
+.caption-manual-apply {
+  align-self: flex-end;
+  padding: 6px 14px;
+  font-size: 12.5px;
+  background: linear-gradient(135deg, #10b981, #059669);
+  border: none;
+  color: white;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.caption-manual-apply:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ---------------- Pipeline 手动模式（3 阶段 stepper） ---------------- */
+.pipeline-manual {
+  background: rgba(139, 92, 246, 0.04);
+  border-color: rgba(139, 92, 246, 0.25);
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.pipeline-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.pipeline-title {
+  font-size: 13px;
+  color: var(--accent-deep);
+  font-weight: 600;
+}
+.pipeline-badge {
+  font-size: 10.5px;
+  background: var(--accent);
+  color: white;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 4px;
+  font-weight: 500;
+}
+.pipeline-reset {
+  padding: 3px 8px;
+  font-size: 11.5px;
+}
+.pipeline-progress {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  color: rgba(0, 0, 0, 0.55);
+  padding: 4px 2px;
+}
+.pipeline-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.08);
+  color: rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+  font-weight: 600;
+}
+.pipeline-dot.active {
+  background: var(--accent);
+  color: white;
+}
+.pipeline-dot.done {
+  background: #10b981;
+  color: white;
+}
+.pipeline-dot-label {
+  margin-right: 4px;
+}
+.pipeline-dash {
+  color: rgba(0, 0, 0, 0.25);
+  margin: 0 2px;
+}
+.pipeline-tip {
+  margin: 0;
+  font-size: 11.5px;
+  color: rgba(0, 0, 0, 0.6);
+  line-height: 1.5;
+}
+.pipeline-stage {
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.65);
+  overflow: hidden;
+  transition: border-color 0.15s, opacity 0.15s;
+}
+.pipeline-stage.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.12);
+}
+.pipeline-stage.done {
+  border-color: rgba(16, 185, 129, 0.4);
+  background: rgba(16, 185, 129, 0.04);
+}
+.pipeline-stage.locked {
+  opacity: 0.55;
+}
+.pipeline-stage-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  font-size: 12.5px;
+}
+.pipeline-stage-title {
+  font-weight: 600;
+  color: rgba(0, 0, 0, 0.75);
+}
+.pipeline-stage-status {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.pipeline-stage-status.active {
+  background: var(--accent);
+  color: white;
+}
+.pipeline-stage-status.done {
+  background: #10b981;
+  color: white;
+}
+.pipeline-stage-status.locked {
+  background: rgba(0, 0, 0, 0.08);
+  color: rgba(0, 0, 0, 0.5);
+}
+.pipeline-stage-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 10px 10px;
+  border-top: 1px dashed rgba(0, 0, 0, 0.08);
+}
+.pipeline-stage-buttons {
+  display: flex;
+  gap: 6px;
+}
+.pipeline-stage-buttons button {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.pipeline-stage-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: rgba(0, 0, 0, 0.55);
+  line-height: 1.5;
+}
+.pipeline-stage-summary {
+  padding: 6px 10px 8px;
+  font-size: 11.5px;
+  color: rgba(0, 0, 0, 0.55);
+  border-top: 1px dashed rgba(0, 0, 0, 0.06);
+}
+.pipeline-error {
+  font-size: 11.5px;
+  color: #dc2626;
+  background: rgba(220, 38, 38, 0.08);
+  padding: 4px 8px;
+  border-radius: 4px;
+  border-left: 3px solid #dc2626;
+}
+.pipeline-finish {
+  background: linear-gradient(135deg, #6366f1, #4f46e5) !important;
+}
+.caption-api-fallback {
+  font-size: 11.5px;
+  padding: 4px 10px;
+  opacity: 0.75;
+}
+.caption-api-fallback:hover {
+  opacity: 1;
 }
 .caption-hint {
   font-size: 11.5px;
@@ -3934,114 +4778,46 @@ const tagFolderPreview = computed(() => {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
   font-weight: 700;
 }
-.caption-text-area.mode-edit {
+/* 输入模式：可直接编辑的文本框（改动3，替代旧的绿字替换机制） */
+.caption-text-edit {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 160px;
+  resize: vertical;
   background: linear-gradient(180deg, #fff, #f0fdf4);
-}
-
-/* 替换段（绿） */
-.caption-edit {
-  background: rgba(34, 197, 94, 0.18);
-  color: #15803d;
-  border-bottom: 2px solid #22c55e;
-  border-radius: 3px;
-  padding: 0 2px;
-  cursor: pointer;
-  font-weight: 600;
-}
-.caption-edit:hover {
-  background: rgba(34, 197, 94, 0.3);
-}
-
-/* 输入草稿框 */
-.caption-edit-draft {
-  background: rgba(34, 197, 94, 0.08);
-  border: 1px solid rgba(34, 197, 94, 0.35);
-  border-radius: 8px;
-  padding: 8px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.caption-edit-draft-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12.5px;
-}
-.caption-edit-draft-label {
-  font-weight: 700;
-  color: #15803d;
-  white-space: nowrap;
-}
-.caption-edit-draft-original {
-  background: rgba(0, 0, 0, 0.05);
-  padding: 2px 6px;
-  border-radius: 4px;
-  color: var(--ink);
-  word-break: break-word;
-  flex: 1;
-}
-.caption-edit-input {
-  flex: 1;
-  padding: 5px 8px;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  font-size: 13px;
+  border-radius: 8px;
+  padding: 12px 14px;
+  line-height: 1.8;
+  font-size: 13.5px;
+  font-family: inherit;
+  color: var(--ink);
   outline: none;
 }
-.caption-edit-input:focus {
-  border-color: #22c55e;
-  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.18);
+.caption-text-edit:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(77, 145, 90, 0.15);
 }
 
-/* 标记 + 替换汇总区 */
+/* 标记汇总区（仅红色错误标记；绿色替换记录已随输入模式重做移除） */
 .caption-marks-summary {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
-.caption-edit-list {
-  background: rgba(34, 197, 94, 0.06);
-  border: 1px solid rgba(34, 197, 94, 0.25);
-  border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 12px;
-  max-height: 16vh;
-  overflow-y: auto;
-}
-.caption-edit-list-title, .caption-error-list-title {
+.caption-error-list-title {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   font-weight: 700;
   margin-bottom: 3px;
+  color: #b91c1c;
 }
-.caption-edit-list-title { color: #15803d; }
-.caption-error-list-title { color: #b91c1c; }
-.caption-edit-list-title button, .caption-error-list-title button {
+.caption-error-list-title button {
   font-size: 11px;
   padding: 1px 6px;
   font-weight: normal;
-}
-.caption-edit-list ol {
-  margin: 0;
-  padding-left: 18px;
-}
-.caption-edit-list li {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin: 2px 0;
-}
-.caption-edit-list li button {
-  font-size: 11px;
-  padding: 1px 6px;
-  color: #15803d;
-}
-.caption-edit-list li s {
-  color: rgba(0, 0, 0, 0.45);
 }
 
 /* Modern Log UI */
@@ -5326,6 +6102,200 @@ const tagFolderPreview = computed(() => {
 .safe-mode-btn.is-unsafe:hover {
   background: rgba(209, 86, 40, 0.3);
 }
+/* 代理「走代理 / 直连」开关（改动5）：复用 safe-mode-btn 的胶囊外形 */
+.proxy-mode-btn {
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 12px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  transition: background 0.18s, color 0.18s, border-color 0.18s;
+}
+.proxy-mode-btn.is-proxy {
+  background: rgba(59, 130, 160, 0.15);
+  color: #2a6f8e;
+  border-color: rgba(59, 130, 160, 0.4);
+}
+.proxy-mode-btn.is-proxy:hover {
+  background: rgba(59, 130, 160, 0.25);
+}
+.proxy-mode-btn.is-direct {
+  background: rgba(217, 119, 6, 0.18);
+  color: #b45309;
+  border-color: rgba(217, 119, 6, 0.45);
+}
+.proxy-mode-btn.is-direct:hover {
+  background: rgba(217, 119, 6, 0.3);
+}
+
+/* ---------------- 多任务队列 + 常用组合 ---------------- */
+.task-queue-panel {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.025);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tq-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tq-title {
+  font-weight: 700;
+  font-size: 13px;
+  color: var(--accent-deep);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.tq-running-badge {
+  font-weight: 600;
+  font-size: 11px;
+  color: #2a6f8e;
+  background: rgba(59, 130, 160, 0.15);
+  border: 1px solid rgba(59, 130, 160, 0.4);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.tq-add { font-size: 12px; padding: 3px 10px; }
+.tq-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* 最多显示约 2 行任务，再多用滚轮纵向收纳，避免把下方日志挤出去 */
+  max-height: 72px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 2px;
+}
+.tq-list::-webkit-scrollbar { width: 6px; }
+.tq-list::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.18); border-radius: 3px; }
+.tq-list::-webkit-scrollbar-track { background: transparent; }
+.tq-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: #fff;
+  border: 1px solid var(--line);
+  font-size: 12.5px;
+  flex-shrink: 0;            /* 在滚动容器里保持每行高度，不被压扁 */
+}
+.tq-item.current { box-shadow: 0 0 0 2px rgba(59, 130, 160, 0.35); }
+.tq-item.running { border-color: rgba(59, 130, 160, 0.5); background: rgba(59, 130, 160, 0.06); }
+.tq-item.done { border-color: rgba(16, 185, 129, 0.5); background: rgba(16, 185, 129, 0.06); }
+.tq-item.error { border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.06); }
+.tq-item-status { width: 16px; flex: 0 0 auto; text-align: center; }
+.tq-item.done .tq-item-status { color: #059669; }
+.tq-item.error .tq-item-status { color: #dc2626; }
+.tq-item-idx {
+  min-width: 18px;
+  height: 18px;
+  line-height: 18px;
+  text-align: center;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.06);
+  font-size: 11px;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+.tq-item-label {
+  flex: 1;
+  min-width: 0;             /* 允许收缩到比内容更窄，才能触发横向滚动 */
+  color: var(--ink);
+  white-space: nowrap;      /* 每个任务只占一行，不再换行撑高 */
+  overflow-x: auto;         /* 文字过长时左右滚动查看 */
+  overflow-y: hidden;
+}
+.tq-item-label::-webkit-scrollbar { height: 5px; }
+.tq-item-label::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.18); border-radius: 3px; }
+.tq-item-label::-webkit-scrollbar-track { background: transparent; }
+.tq-item-ops { display: inline-flex; gap: 3px; flex: 0 0 auto; }
+.tq-mini {
+  font-size: 12px;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.8);
+  color: var(--muted);
+  cursor: pointer;
+}
+.tq-mini:hover:not(:disabled) { background: rgba(0, 0, 0, 0.06); color: var(--ink); }
+.tq-mini:disabled { opacity: 0.4; cursor: not-allowed; }
+.tq-del:hover:not(:disabled) { color: #dc2626; border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.08); }
+.tq-empty { font-size: 12px; color: var(--muted); padding: 6px 4px; line-height: 1.6; }
+.tq-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tq-actions button { font-size: 12px; padding: 4px 12px; }
+.tq-actions .tq-run {
+  background: linear-gradient(135deg, #3b82a0, #2a6f8e);
+  border: none;
+  color: #fff;
+  font-weight: 600;
+}
+.tq-combo-save { display: flex; gap: 6px; align-items: center; }
+.tq-combo-save-input {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 7px;
+  font-size: 13px;
+  outline: none;
+  background: #fff;
+  color: var(--ink);
+}
+.tq-combo-save button { font-size: 12px; padding: 4px 12px; }
+.tq-combos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding-top: 6px;
+  border-top: 1px dashed var(--line);
+}
+.tq-combos-label { font-size: 12px; color: var(--muted); }
+.tq-combo-chip {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid rgba(77, 145, 90, 0.4);
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(77, 145, 90, 0.08);
+}
+.tq-combo-run {
+  border: none;
+  background: transparent;
+  color: #2d7a3e;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.tq-combo-run:hover:not(:disabled) { background: rgba(77, 145, 90, 0.18); }
+.tq-combo-load {
+  border: none;
+  border-left: 1px solid rgba(77, 145, 90, 0.3);
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+.tq-combo-load:hover:not(:disabled) { background: rgba(0, 0, 0, 0.05); color: var(--ink); }
+.tq-combo-chip .tq-del {
+  border: none;
+  border-left: 1px solid rgba(77, 145, 90, 0.3);
+  border-radius: 0;
+}
+.tq-combo-chip button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ---------------- 起始页 / 结束页：缩小输入框 + 右侧最近使用记录 ---------------- */
 /* 注意：类名不能用 .page-grid —— 全局 style.css 里 .page-grid 是应用整体布局

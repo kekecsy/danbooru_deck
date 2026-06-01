@@ -9,6 +9,17 @@ from PIL import Image
 from google import genai
 from google.genai import types
 
+from caption_prompt import (
+    DANBOORU_SYSTEM_PROMPT,
+    build_user_prompt,
+    PIPELINE_SYSTEM_PROMPT,
+    OBSERVE_USER_PROMPT,
+    OBSERVE_SCHEMA,
+    build_verify_user_prompt,
+    VERIFY_SCHEMA,
+    build_compose_user_prompt,
+)
+
 # Windows 控制台 UTF-8 输出
 try:
     sys.stdout.reconfigure(encoding="utf-8")
@@ -35,57 +46,10 @@ except Exception as e:
     sys.exit(1)
 
 
-DANBOORU_SYSTEM_PROMPT = """你是一名专业的二次元插画描述与数据标注专家。你的任务是根据所提供的图像以及 Danbooru 风格的标签元数据，生成一段细致、流畅、自然的中文描述。
-
-### 如何使用元数据：
-- 元数据可能包含角色名、版权（作品/系列）以及 Danbooru 通用标签；在显式提供时也可能包含画师信息。把身份类信息视为事实，把通用标签视为画面细节的提示。
-- 始终将标签与图像进行交叉验证：图中没有的标签要安静地忽略，绝不要凭空臆造。
-- 自然地把角色名、所属作品融入行文，**不要机械罗列**。仅当元数据中显式给出画师时，才可适度点出其风格；未给出画师信息时，**不要猜测或编造画师**。
-- **不要原样输出标签字符串**。把它们翻译/转化为流畅的中文描述。
-- 角色名、作品名、画师名可以保留其常见原文（日文/英文）写法，无需强行音译。
-
-### 格式要求：
-1. 只输出最终的中文描述段落，不要任何开场白、标题或 Markdown。
-2. 使用连贯、自然的中文行文，一段为宜，最多两段且衔接紧密。
-3. 语言要细腻、用词准确，避免逗号堆砌式的标签流水账，不要使用项目符号或分级标题。
-
-### 描述应覆盖的内容（按以下顺序融入行文，但保持散文风格）：
-1. 主体与构图：主要角色、姿态、构图与取景、镜头角度、视线方向。
-2. 角色身份与外貌：角色名 + 所属作品（若已知），随后描写发色发型、瞳色、表情、神态及显著特征。
-3. 服饰与配件：服装层次、鞋袜、饰品、所持/所穿物件，以及配色细节。
-4. 背景与场景：环境、地点、时间、值得一提的道具。
-5. 氛围、光影与风格：整体情绪、光照效果、色彩基调；仅在已提供画师信息时，方可自然带出画师的风格倾向。
-"""
+DANBOORU_SYSTEM_PROMPT = DANBOORU_SYSTEM_PROMPT  # 从 caption_prompt 重导出，保留向后兼容
 
 
-def build_user_prompt(meta: dict | None, include_artist: bool = False) -> str:
-    """根据 viewer_data.json 中的条目构造带 tags 上下文的用户提示词。
 
-    画师信息默认不注入；传 include_artist=True 才会作为风格提示加入。
-    """
-    if not meta:
-        return "请按系统指令的结构，针对这张图片生成一段流畅自然的中文描述。"
-
-    tags = meta.get("tags", {}) or {}
-    lines = ["以下是来自图源的元数据（身份信息视为事实，其余视觉标签需与图像交叉验证）：", ""]
-
-    if include_artist:
-        artist = meta.get("artist") or tags.get("tag_string_artist")
-        if artist:
-            lines.append(f"- 画师 (Artist)：{artist}")
-    if tags.get("tag_string_character"):
-        lines.append(f"- 角色 (Character)：{tags['tag_string_character']}")
-    if tags.get("tag_string_copyright"):
-        lines.append(f"- 作品 / 版权 (Series)：{tags['tag_string_copyright']}")
-    if tags.get("tag_string_general"):
-        lines.append(f"- 通用视觉标签 (General tags)：{tags['tag_string_general']}")
-
-    closing = "现在请按系统指令生成最终的中文描述段落：把角色与作品身份自然地融入行文"
-    if include_artist:
-        closing += "，并可适度点出画师的风格倾向"
-    closing += "；忽略图像中不存在的标签；不要直接罗列标签原文。"
-    lines += ["", closing]
-    return "\n".join(lines)
 
 
 def find_metadata(image_path: Path) -> dict | None:
@@ -126,8 +90,228 @@ def generate_caption(image_path: Path, meta: dict | None, include_artist: bool =
     return (response.text or "").strip()
 
 
-def save_caption(image_path: Path, caption: str, meta: dict | None) -> Path:
-    """把结果增量写入同目录 caption.json，key 为 filename。"""
+# ---------------------------------------------------------------------------
+# 3 阶段管线
+# ---------------------------------------------------------------------------
+
+PIPELINE_MODEL = "gemini-2.5-flash"
+
+
+def _parse_json_response(text: str) -> dict:
+    """Gemini 在 response_mime_type=application/json 时一般直接返回干净 JSON，
+    但偶尔会带 ```json 围栏；做一次容错。"""
+    if not text:
+        raise ValueError("空响应")
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        # 去掉 ```json ... ``` 围栏
+        stripped = stripped.split("```", 2)
+        # 形态可能是 ['', 'json\n{...}', ''] 或 ['', '{...}', '']
+        body = stripped[1] if len(stripped) >= 2 else ""
+        if body.lower().startswith("json"):
+            body = body[4:]
+        stripped = body.strip()
+    return json.loads(stripped)
+
+
+def _send_observe(chat, image_path: Path) -> dict:
+    img = Image.open(image_path)
+    resp = chat.send_message(
+        [img, OBSERVE_USER_PROMPT],
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=OBSERVE_SCHEMA,
+            temperature=0.2,
+        ),
+    )
+    return _parse_json_response(resp.text or "")
+
+
+def _send_verify(chat, meta: dict | None) -> dict:
+    resp = chat.send_message(
+        build_verify_user_prompt(meta),
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=VERIFY_SCHEMA,
+            temperature=0.2,
+        ),
+    )
+    return _parse_json_response(resp.text or "")
+
+
+def _send_compose(
+    chat,
+    meta: dict | None,
+    include_artist: bool,
+    verify_result: dict | None,
+    *,
+    skip_verify_note: bool = False,
+) -> str:
+    prompt = build_compose_user_prompt(
+        meta,
+        include_artist=include_artist,
+        verify_result=verify_result,
+        skip_verify_note=skip_verify_note,
+    )
+    resp = chat.send_message(
+        prompt,
+        config=types.GenerateContentConfig(temperature=0.6),
+    )
+    return (resp.text or "").strip()
+
+
+def _fallback_caption_from_observe(observe: dict) -> str:
+    """stage 3 失败时，用 stage 1 的 JSON 拼一段最小可用的兜底中文。"""
+    if not isinstance(observe, dict):
+        return ""
+    parts = []
+    chars = observe.get("characters") or []
+    if chars:
+        c0 = chars[0]
+        seg = f"画面中一位角色，{c0.get('hair_color', '') or ''}{c0.get('hair_style', '') or ''}"
+        eye = c0.get("eye_color")
+        if eye:
+            seg += f"，{eye}色瞳"
+        feats = c0.get("distinguishing_features") or []
+        if feats:
+            seg += "，" + "、".join(feats)
+        expr = c0.get("expression")
+        if expr:
+            seg += f"，神情{expr}"
+        parts.append(seg.rstrip("，") + "。")
+    outfit = observe.get("outfit_layers") or []
+    if outfit:
+        items = "、".join(
+            f"{o.get('color', '')}{o.get('item', '')}".strip()
+            for o in outfit if (o.get("item") or o.get("color"))
+        )
+        if items:
+            parts.append(f"身上着 {items}。")
+    bg = observe.get("background") or {}
+    env = bg.get("environment")
+    mood = bg.get("mood")
+    if env or mood:
+        parts.append(f"背景为{env or '简约'}，氛围{mood or '安静'}。")
+    return "".join(parts)
+
+
+def generate_caption_3stage(
+    image_path: Path,
+    meta: dict | None,
+    include_artist: bool = False,
+    *,
+    debug: bool = False,
+) -> dict:
+    """3 阶段管线：observe → verify → compose。
+
+    返回:
+      {
+        "pipeline": "3stage" | "3stage-partial" | "single-fallback",
+        "caption": str,
+        "observe": dict | None,
+        "verify": dict | None,
+        "stages_ok": [bool, bool, bool],
+        "stage_errors": {1?: str, 2?: str, 3?: str},
+      }
+    """
+    stage_errors: dict[int, str] = {}
+    observe: dict | None = None
+    verify: dict | None = None
+    stages_ok = [False, False, False]
+
+    chat = client.chats.create(
+        model=PIPELINE_MODEL,
+        config=types.GenerateContentConfig(
+            system_instruction=PIPELINE_SYSTEM_PROMPT,
+        ),
+    )
+
+    # Stage 1: observe
+    print("🤖 [1/3] 观察阶段：仅基于图像生成结构化 JSON...", file=sys.stderr)
+    try:
+        observe = _send_observe(chat, image_path)
+        stages_ok[0] = True
+        if debug:
+            print("--- stage 1 (observe) ---", file=sys.stderr)
+            print(json.dumps(observe, ensure_ascii=False, indent=2), file=sys.stderr)
+    except Exception as e:
+        stage_errors[1] = f"{type(e).__name__}: {e}"
+        print(f"⚠️  stage 1 失败: {stage_errors[1]}，回退到单轮模式。", file=sys.stderr)
+        # 全管线失败：直接降级到单轮
+        try:
+            caption = generate_caption(image_path, meta, include_artist=include_artist)
+            return {
+                "pipeline": "single-fallback",
+                "caption": caption,
+                "observe": None,
+                "verify": None,
+                "stages_ok": stages_ok,
+                "stage_errors": stage_errors,
+            }
+        except Exception as e2:
+            stage_errors[0] = f"{type(e2).__name__}: {e2}"
+            return {
+                "pipeline": "failed",
+                "caption": "",
+                "observe": None,
+                "verify": None,
+                "stages_ok": stages_ok,
+                "stage_errors": stage_errors,
+            }
+
+    # Stage 2: verify
+    print("🤖 [2/3] 校验阶段：把 tags 喂给模型做 visible/absent 标注...", file=sys.stderr)
+    try:
+        verify = _send_verify(chat, meta)
+        stages_ok[1] = True
+        if debug:
+            print("--- stage 2 (verify) ---", file=sys.stderr)
+            print(json.dumps(verify, ensure_ascii=False, indent=2), file=sys.stderr)
+    except Exception as e:
+        stage_errors[2] = f"{type(e).__name__}: {e}"
+        print(f"⚠️  stage 2 失败: {stage_errors[2]}，stage 3 将以未校验模式进行。", file=sys.stderr)
+
+    # Stage 3: compose
+    print("🤖 [3/3] 成文阶段：基于已校验事实生成中文段落...", file=sys.stderr)
+    try:
+        caption = _send_compose(
+            chat,
+            meta,
+            include_artist=include_artist,
+            verify_result=verify,
+            skip_verify_note=not stages_ok[1],
+        )
+        if not caption:
+            raise ValueError("stage 3 返回空字符串")
+        stages_ok[2] = True
+    except Exception as e:
+        stage_errors[3] = f"{type(e).__name__}: {e}"
+        print(f"⚠️  stage 3 失败: {stage_errors[3]}，用 stage 1 JSON 兜底拼接。", file=sys.stderr)
+        caption = _fallback_caption_from_observe(observe or {})
+
+    pipeline_label = "3stage" if all(stages_ok) else "3stage-partial"
+    return {
+        "pipeline": pipeline_label,
+        "caption": caption,
+        "observe": observe,
+        "verify": verify,
+        "stages_ok": stages_ok,
+        "stage_errors": stage_errors,
+    }
+
+
+def save_caption(
+    image_path: Path,
+    caption: str,
+    meta: dict | None,
+    *,
+    extra: dict | None = None,
+) -> Path:
+    """把结果增量写入同目录 caption.json，key 为 filename。
+
+    extra: 可选附加字段（如 observe/verify/pipeline/stages_ok），仅在 CLI（非 --json）
+    模式下被传入；--json 模式由前端控制持久化。
+    """
     out_path = image_path.parent / "caption.json"
     store: dict = {}
     if out_path.exists():
@@ -137,12 +321,15 @@ def save_caption(image_path: Path, caption: str, meta: dict | None) -> Path:
         except Exception:
             store = {}
 
-    store[image_path.name] = {
+    entry = {
         "caption": caption,
         "artist": (meta or {}).get("artist"),
         "characters": (meta or {}).get("tags", {}).get("tag_string_character"),
         "copyright": (meta or {}).get("tags", {}).get("tag_string_copyright"),
     }
+    if extra:
+        entry.update(extra)
+    store[image_path.name] = entry
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(store, f, ensure_ascii=False, indent=2)
@@ -160,6 +347,17 @@ def main():
     parser.add_argument("--force", action="store_true", help="即使 caption.json 已有该图条目也重新生成")
     parser.add_argument("--with-artist", action="store_true", help="在提示词中加入画师信息（默认不加入）")
     parser.add_argument("--json", action="store_true", help="只把结果以 JSON 形式输出到 stdout，不写入 caption.json（供 GUI 调用）")
+    parser.add_argument(
+        "--pipeline",
+        choices=["3stage", "single"],
+        default="3stage",
+        help="生成管线：3stage=观察+校验+成文（默认，质量更高）；single=旧的单轮模式",
+    )
+    parser.add_argument(
+        "--debug-pipeline",
+        action="store_true",
+        help="把 observe/verify 的 JSON 中间结果输出到 stderr 便于调试",
+    )
     args = parser.parse_args()
 
     image_path = Path(args.image.strip().strip("'\""))
@@ -184,14 +382,30 @@ def main():
             except Exception:
                 pass
 
-    meta = find_metadata(image_path) if not args.json else None
+    def _run_pipeline(meta_arg):
+        if args.pipeline == "single":
+            text = generate_caption(image_path, meta_arg, include_artist=args.with_artist)
+            return {
+                "pipeline": "single",
+                "caption": text,
+                "observe": None,
+                "verify": None,
+                "stages_ok": [True, False, False],
+                "stage_errors": {},
+            }
+        return generate_caption_3stage(
+            image_path, meta_arg, include_artist=args.with_artist, debug=args.debug_pipeline
+        )
+
+    meta: dict | None = None
+    pipeline_result: dict = {}
     if args.json:
-        # 在 JSON 模式下重定向 stdout，避免 find_metadata/generate_caption 的进度信息污染 JSON
+        # 在 JSON 模式下重定向 stdout，避免 find_metadata/管线进度信息污染 JSON
         _saved_stdout = sys.stdout
         sys.stdout = sys.stderr
         try:
             meta = find_metadata(image_path)
-            caption = generate_caption(image_path, meta, include_artist=args.with_artist)
+            pipeline_result = _run_pipeline(meta)
         except Exception as e:
             sys.stdout = _saved_stdout
             print(json.dumps({"ok": False, "error": f"API 调用或图片处理出错: {e}"}, ensure_ascii=False))
@@ -199,11 +413,14 @@ def main():
         finally:
             sys.stdout = _saved_stdout
     else:
+        meta = find_metadata(image_path)
         try:
-            caption = generate_caption(image_path, meta, include_artist=args.with_artist)
+            pipeline_result = _run_pipeline(meta)
         except Exception as e:
             print(f"❌ API 调用或图片处理出错: {e}")
             sys.exit(1)
+
+    caption = pipeline_result.get("caption", "")
 
     if args.json:
         # JSON 模式：只输出结果，不落盘（由 GUI 决定是否保存）
@@ -215,16 +432,28 @@ def main():
             "artist": (meta or {}).get("artist"),
             "characters": (meta or {}).get("tags", {}).get("tag_string_character"),
             "copyright": (meta or {}).get("tags", {}).get("tag_string_copyright"),
+            "pipeline": pipeline_result.get("pipeline"),
+            "observe": pipeline_result.get("observe"),
+            "verify": pipeline_result.get("verify"),
+            "stages_ok": pipeline_result.get("stages_ok"),
+            "stage_errors": pipeline_result.get("stage_errors") or {},
         }
         print(json.dumps(result, ensure_ascii=False))
         return
 
-    saved_to = save_caption(image_path, caption, meta)
+    # CLI 模式：把中间结果一并写入 caption.json，便于离线检查质量
+    extra = {
+        "pipeline": pipeline_result.get("pipeline"),
+        "observe": pipeline_result.get("observe"),
+        "verify": pipeline_result.get("verify"),
+        "stages_ok": pipeline_result.get("stages_ok"),
+    }
+    saved_to = save_caption(image_path, caption, meta, extra=extra)
 
     print("\n--- 生成的描述 (Caption) ---")
     print(caption)
     print("----------------------------")
-    print(f"✅ 已写入 {saved_to}")
+    print(f"✅ 已写入 {saved_to}  [pipeline={extra['pipeline']}, stages_ok={extra['stages_ok']}]")
 
 
 if __name__ == "__main__":

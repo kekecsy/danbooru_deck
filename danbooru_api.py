@@ -63,6 +63,34 @@ if _RAW_PROXIES and not _proxy_alive(_RAW_PROXIES):
 else:
     PROXIES = _RAW_PROXIES
 
+# 国内访问 Danbooru 常用的本地代理端口（与 caption.py 默认一致）。
+# 仅当用户手动切到「走代理」、但环境/系统又没配代理时作为兜底。
+DEFAULT_PROXY = "http://127.0.0.1:7897"
+
+
+def set_proxy_mode(use_proxy: bool):
+    """运行时切换代理模式，立即影响后续所有 danbooru_api 请求。
+
+    解决「开着代理启动后端 → PROXIES 定格 → 关掉代理软件后下载仍走死代理报错」：
+    - use_proxy=False：清空 PROXIES，强制直连。
+    - use_proxy=True：实时重新读取 env/Windows 注册表里的系统代理；读不到就兜底
+      DEFAULT_PROXY。返回里带 alive 探测结果，前端据此提示端口是否可达。
+    """
+    global PROXIES
+    if not use_proxy:
+        PROXIES = {}
+        return {"use_proxy": False, "proxies": {}, "alive": True}
+    proxies = get_proxies_for_url(f"https://{_HOST}")
+    if not proxies:
+        proxies = {"http": DEFAULT_PROXY, "https": DEFAULT_PROXY}
+    PROXIES = proxies
+    return {"use_proxy": True, "proxies": proxies, "alive": _proxy_alive(proxies)}
+
+
+def get_proxy_state():
+    """当前代理状态：有非空 PROXIES 即视为「走代理」。"""
+    return {"use_proxy": bool(PROXIES), "proxies": PROXIES, "alive": _proxy_alive(PROXIES)}
+
 def check_proxy_simple():
     url = f"https://{_HOST}"
     try:
@@ -209,7 +237,7 @@ def get_wiki(name, timeout=10):
     """
     encode_tag = urllib.parse.quote(name, safe='')
     url = f"https://{_HOST}/wiki_pages.json?search[title]={encode_tag}"
-    proxies = get_proxies_for_url(url)
+    proxies = PROXIES  # 跟随运行时代理开关（set_proxy_mode），与其余请求保持一致
     try:
         resp = requests.get(
             url,

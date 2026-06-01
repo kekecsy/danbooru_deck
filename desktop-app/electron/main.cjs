@@ -59,10 +59,18 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      // 默认 true 时 Chromium 会在窗口失焦/最小化后把 setTimeout/setInterval 节流到
+      // ≥1s（隐藏 5 分钟后进 intensive 模式，≥1min/次）。CrawlerPage.vue 的范围
+      // 刷新用前端 setTimeout 凑 40s 批间休息，被节流会膨胀到几十分钟看起来像卡死。
+      // 关掉换前后台一致的 timer 节奏。
+      backgroundThrottling: false
     }
   });
   win.setMenuBarVisibility(false);
+  // 默认最大化：填满屏幕工作区，保留标题栏/任务栏，可正常还原。
+  // 上面的 width/height 作为用户点「还原」后的窗口尺寸。
+  win.maximize();
 
   // 关闭拦截：右上角 × / Alt+F4 / 系统菜单 关闭时弹出异步确认对话框，
   // 避免后台抓图任务被误关打断。用户确认后再真正关闭。
@@ -573,12 +581,48 @@ ipcMain.handle('caption:save', async (_event, payload) => {
 });
 
 // 列出某日期目录下 caption.json 中已生成的文件名集合（供画廊标记用）
+// 只返回「有最终文本(caption 非空)」的条目：允许中途只保存 pipeline 步骤而不
+// 把图片标成「已生成」（绿色角标语义保持 = 已有成文描述）。
 ipcMain.handle('caption:list-for-date', async (_event, date) => {
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
   const captionPath = path.join(hotPicDir, date, 'caption.json');
   if (!fs.existsSync(captionPath)) return [];
   const store = safeReadJson(captionPath, {});
-  return Object.keys(store);
+  return Object.keys(store).filter(name => {
+    const entry = store[name];
+    return entry && typeof entry.caption === 'string' && entry.caption.trim();
+  });
+});
+
+// Caption 手动模式：把当前图片复制到系统剪贴板，方便用户粘贴到任意 chat LLM
+// (Claude / ChatGPT / Gemini Web)。
+// nativeImage.createFromPath 支持 PNG/JPG/BMP/TIFF；GIF 取首帧；WebP/AVIF 看系统支持。
+// 不支持的格式（动图 zip / avif 在某些 Windows 上）返回 ok:false，由前端 fallback。
+ipcMain.handle('caption:copy-image', async (_event, imagePath) => {
+  const resolved = toAbsolutePath(imagePath);
+  if (!resolved || !fs.existsSync(resolved)) {
+    return { ok: false, error: '文件不存在' };
+  }
+  // 路径越权防护：只允许复制 hot_pic 下的图
+  if (!isWithin(hotPicDir, resolved)) {
+    return { ok: false, error: '非法路径' };
+  }
+  try {
+    const image = nativeImage.createFromPath(resolved);
+    if (image.isEmpty()) {
+      return {
+        ok: false,
+        error: '该图片格式无法转成剪贴板图像（可能是 GIF/WebP/AVIF），请直接把文件拖进 LLM 对话框'
+      };
+    }
+    clipboard.clear();
+    clipboard.writeImage(image);
+    // 再读回来校验真的写进去了（部分系统下 writeImage 静默失败）
+    const written = clipboard.readImage();
+    return { ok: !written.isEmpty() };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
 });
 
 ipcMain.handle('crawler:ensure-service', async () => ensureCrawlerService());

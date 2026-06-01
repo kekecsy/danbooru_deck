@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Source Hint 对齐审核工具</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --card-bg: #16213e;
+            --text: #e0e0e0;
+            --accent: #00d2ff;
+            --border: #2a2a4a;
+            --btn-bg: #0f3460;
+            --btn-hover: #1a508b;
+            --tag-bg: #1e3a5f;
+            --matched: #0d7377;
+            --unmatched: #6b3a3a;
+            --warning: #ffa726;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 30px;
+            padding: 20px;
+        }
+
+        header h1 {
+            font-size: 2em;
+            color: var(--accent);
+            margin-bottom: 8px;
+        }
+
+        header p {
+            color: #888;
+            font-size: 0.9em;
+        }
+
+        .toolbar {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: var(--card-bg);
+            border-radius: 12px;
+            border: 1px solid var(--border);
+            position: sticky;
+            top: 10px;
+            z-index: 100;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 600;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: #fff;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: #1a1a2e;
+        }
+        .btn-primary:hover {
+            filter: brightness(1.2);
+        }
+        .btn-secondary {
+            background: var(--btn-bg);
+        }
+        .btn-secondary:hover {
+            background: var(--btn-hover);
+        }
+        .btn-export {
+            background: #2d6a4f;
+        }
+        .btn-export:hover {
+            background: #40916c;
+        }
+        .btn-danger {
+            background: #9b2226;
+        }
+        .btn-danger:hover {
+            background: #ae2012;
+        }
+
+        .stats {
+            display: flex;
+            gap: 15px;
+            margin-left: auto;
+            font-size: 0.9em;
+        }
+
+        .stat {
+            padding: 8px 14px;
+            border-radius: 20px;
+            font-weight: 600;
+        }
+
+        .stat-total {
+            background: var(--btn-bg);
+        }
+        .stat-matched {
+            background: var(--matched);
+        }
+        .stat-unmatched {
+            background: var(--unmatched);
+        }
+
+        .search-box {
+            padding: 10px 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            background: #0d1b2a;
+            color: var(--text);
+            font-size: 14px;
+            width: 220px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .search-box:focus {
+            border-color: var(--accent);
+        }
+
+        .filter-group {
+            display: flex;
+            gap: 8px;
+        }
+
+        .filter-btn {
+            padding: 8px 14px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: #aaa;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        .filter-btn.active {
+            background: var(--accent);
+            color: #1a1a2e;
+            border-color: var(--accent);
+        }
+        .filter-btn:hover:not(.active) {
+            border-color: #888;
+            color: #fff;
+        }
+
+        .grid {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .row {
+            display: grid;
+            grid-template-columns: 250px 1fr 300px;
+            gap: 12px;
+            align-items: center;
+            padding: 12px 16px;
+            background: var(--card-bg);
+            border-radius: 10px;
+            border: 1px solid var(--border);
+            transition: all 0.2s;
+        }
+        .row:hover {
+            border-color: #555;
+        }
+        .row.matched {
+            border-left: 3px solid #00d2ff;
+        }
+        .row.unmatched {
+            border-left: 3px solid #ff6b6b;
+            background: #1a1217;
+        }
+
+        .ai-hint {
+            font-weight: 700;
+            font-size: 1.05em;
+            color: #fff;
+            word-break: break-all;
+        }
+        .ai-hint small {
+            display: block;
+            font-weight: 400;
+            font-size: 0.75em;
+            color: #888;
+            margin-top: 2px;
+        }
+
+        .suggestions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .suggestion-tag {
+            padding: 6px 12px;
+            border-radius: 20px;
+            background: #1a3a2a;
+            border: 1px solid #2d6a4f;
+            color: #95d5b2;
+            font-size: 0.85em;
+            cursor: pointer;
+            transition: all 0.15s;
+            user-select: none;
+        }
+        .suggestion-tag:hover {
+            background: #2d6a4f;
+            transform: scale(1.03);
+        }
+        .suggestion-tag.active {
+            background: #40916c;
+            border-color: #52b788;
+            color: #fff;
+            font-weight: 600;
+        }
+
+        .no-suggestion {
+            color: #666;
+            font-size: 0.85em;
+            font-style: italic;
+        }
+
+        .custom-input-group {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+        }
+
+        .custom-input {
+            padding: 8px 12px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            background: #0d1b2a;
+            color: var(--text);
+            font-size: 0.85em;
+            width: 140px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .custom-input:focus {
+            border-color: var(--accent);
+        }
+
+        .btn-apply {
+            padding: 6px 12px;
+            border-radius: 20px;
+            border: none;
+            background: var(--accent);
+            color: #1a1a2e;
+            cursor: pointer;
+            font-size: 0.8em;
+            font-weight: 600;
+            transition: all 0.15s;
+        }
+        .btn-apply:hover {
+            filter: brightness(1.2);
+        }
+
+        .btn-clear {
+            padding: 6px 10px;
+            border-radius: 50%;
+            border: 1px solid #555;
+            background: transparent;
+            color: #999;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.15s;
+        }
+        .btn-clear:hover {
+            color: #fff;
+            border-color: #ff6b6b;
+            background: #3a1a1a;
+        }
+
+        .current-merge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .merge-tag {
+            padding: 8px 16px;
+            border-radius: 20px;
+            background: #0d7377;
+            color: #fff;
+            font-weight: 600;
+            font-size: 0.9em;
+        }
+        .merge-empty {
+            padding: 8px 16px;
+            border-radius: 20px;
+            background: transparent;
+            border: 2px dashed #555;
+            color: #888;
+            font-weight: 400;
+            font-size: 0.9em;
+            font-style: italic;
+        }
+
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            z-index: 200;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-overlay.show {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--card-bg);
+            border-radius: 16px;
+            padding: 30px;
+            border: 1px solid var(--border);
+            max-width: 600px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .modal h2 {
+            margin-bottom: 16px;
+            color: var(--accent);
+        }
+        .modal textarea {
+            width: 100%;
+            height: 300px;
+            background: #0d1b2a;
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px;
+            font-family: monospace;
+            font-size: 13px;
+            resize: vertical;
+        }
+        .modal .btn-row {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-end;
+            margin-top: 16px;
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #2d6a4f;
+            color: #fff;
+            padding: 12px 24px;
+            border-radius: 30px;
+            font-weight: 600;
+            z-index: 300;
+            opacity: 0;
+            transition: opacity 0.3s;
+            pointer-events: none;
+        }
+        .toast.show {
+            opacity: 1;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 6px;
+            background: #1e3a5f;
+            border-radius: 3px;
+            margin-top: 6px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: var(--accent);
+            border-radius: 3px;
+            transition: width 0.3s;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🔗 Source Hint 对齐审核</h1>
+            <p>将 AI 识别的不规范 source_hint 手动对齐到官方版权标签</p>
+        </header>
+
+        <!-- 工具栏 -->
+        <div class="toolbar" id="toolbar">
+            <button class="btn btn-primary" onclick="loadFiles()">📂 加载文件</button>
+            <button class="btn btn-export" onclick="exportMapping()">💾 导出映射</button>
+            <button class="btn btn-secondary" onclick="loadExistingMapping()">📥 导入已有映射</button>
+            <button class="btn btn-danger" onclick="clearAll()" style="font-size:12px;">🗑 清除全部</button>
+
+            <input type="text" class="search-box" placeholder="🔍 搜索..." oninput="filterRows(this.value)">
+
+            <div class="filter-group">
+                <button class="filter-btn active" data-filter="all" onclick="setFilter('all', this)">全部</button>
+                <button class="filter-btn" data-filter="matched" onclick="setFilter('matched', this)">已对齐</button>
+                <button class="filter-btn" data-filter="unmatched" onclick="setFilter('unmatched', this)">未对齐</button>
+            </div>
+
+            <div class="stats">
+                <span class="stat stat-total" id="statTotal">总计: 0</span>
+                <span class="stat stat-matched" id="statMatched">已对齐: 0</span>
+                <span class="stat stat-unmatched" id="statUnmatched">待对齐: 0</span>
+            </div>
+        </div>
+
+        <!-- 进度条 -->
+        <div class="progress-bar" style="margin-bottom:20px;">
+            <div class="progress-fill" id="progressBar" style="width:0%"></div>
+        </div>
+
+        <!-- 主列表 -->
+        <div class="grid" id="grid"></div>
+
+        <!-- 文件加载区域(初始) -->
+        <div id="dropZone" style="text-align:center;padding:60px 20px;border:2px dashed #444;border-radius:16px;margin-top:20px;cursor:pointer;transition:all 0.2s;"
+             onclick="document.getElementById('fileInput').click()">
+            <p style="font-size:1.2em;color:#888;">📂 点击此处或拖拽文件</p>
+            <p style="color:#666;font-size:0.85em;">character_chinese_search.json + copyright.json (可选)</p>
+            <input type="file" id="fileInput" accept=".json" multiple style="display:none" onchange="handleFiles(this.files)">
+        </div>
+
+        <!-- 导出预览模态框 -->
+        <div class="modal-overlay" id="modalOverlay">
+            <div class="modal">
+                <h2>📋 映射结果预览</h2>
+                <textarea id="modalTextarea" readonly></textarea>
+                <div class="btn-row">
+                    <button class="btn btn-secondary" onclick="closeModal()">关闭</button>
+                    <button class="btn btn-primary" onclick="downloadJSON()">💾 下载 JSON</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Toast -->
+        <div class="toast" id="toast"></div>
+    </div>
+
+    <script>
+        // ==================== 状态管理 ====================
+        let allRows = [];                 // { aiHint, suggestions[], manualMerge, chars[] }
+        let copyrightTags = [];           // 官方标签列表
+        let currentFilter = 'all';
+        let searchQuery = '';
+
+        // ==================== 工具函数 ====================
+        function showToast(msg, duration = 2000) {
+            const t = document.getElementById('toast');
+            t.textContent = msg;
+            t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), duration);
+        }
+
+        function updateStats() {
+            const total = allRows.length;
+            const matched = allRows.filter(r => r.manualMerge).length;
+            const unmatched = total - matched;
+            document.getElementById('statTotal').textContent = `总计: ${total}`;
+            document.getElementById('statMatched').textContent = `已对齐: ${matched}`;
+            document.getElementById('statUnmatched').textContent = `待对齐: ${unmatched}`;
+            document.getElementById('progressBar').style.width = total ? `${(matched/total*100).toFixed(0)}%` : '0%';
+        }
+
+        // ==================== 文件加载 ====================
+        async function loadFiles() {
+            document.getElementById('fileInput').click();
+        }
+
+        async function handleFiles(files) {
+            let charData = null;
+            let copyrightData = null;
+
+            for (const file of files) {
+                const text = await file.text();
+                try {
+                    const json = JSON.parse(text);
+                    // 简单判断: copyright.json 通常会有 "original" 这个标签
+                    if (json.original && typeof json.original === 'string') {
+                        copyrightData = json;
+                    } else {
+                        charData = json;
+                    }
+                } catch (e) {
+                    showToast(`⚠️ 无法解析 ${file.name}: ${e.message}`);
+                }
+            }
+
+            if (!charData) {
+                showToast('⚠️ 未找到角色数据文件 (character_chinese_search.json)');
+                return;
+            }
+
+            processData(charData, copyrightData);
+            document.getElementById('dropZone').style.display = 'none';
+            showToast(`✅ 加载完成: ${allRows.length} 个不同的 source_hint`);
+        }
+
+        function processData(charData, copyrightData) {
+            // 提取 source_hint -> 角色映射
+            const hintMap = new Map(); // source_hint -> [角色id列表]
+            for (const [charId, info] of Object.entries(charData)) {
+                const hint = (info.source_hint || '').trim();
+                if (!hint) continue;
+                if (!hintMap.has(hint)) hintMap.set(hint, []);
+                hintMap.get(hint).push(charId);
+            }
+
+            // 提取官方标签
+            copyrightTags = copyrightData ? Object.keys(copyrightData) : [];
+
+            // 构建 rows
+            allRows = [];
+            for (const [hint, charIds] of hintMap.entries()) {
+                // 用相似度算法找建议
+                const suggestions = copyrightTags.length > 0
+                    ? findSimilarTags(hint, copyrightTags, 3)
+                    : [];
+                // 如果相似度=1.0 且只有1个完美匹配，可以自动填充
+                const autoMerge = (suggestions.length === 1 && suggestions[0].score === 1.0)
+                    ? suggestions[0].tag
+                    : '';
+
+                allRows.push({
+                    aiHint: hint,
+                    suggestions: suggestions, // [{tag, score}]
+                    manualMerge: autoMerge,
+                    chars: charIds
+                });
+            }
+
+            // 按 aiHint 排序
+            allRows.sort((a, b) => a.aiHint.localeCompare(b.aiHint));
+
+            renderGrid();
+            updateStats();
+        }
+
+        // 简单的相似度匹配 (基于 Levenshtein / 子串)
+        function findSimilarTags(query, tags, limit = 3) {
+            const q = query.toLowerCase().trim();
+            const scored = tags.map(tag => {
+                const t = tag.toLowerCase();
+                let score = 0;
+                // 完全匹配
+                if (q === t) score = 1.0;
+                // 包含关系
+                else if (t.includes(q) || q.includes(t)) score = 0.85;
+                // 编辑距离相似度
+                else score = levenshteinSimilarity(q, t);
+                return { tag, score: parseFloat(score.toFixed(3)) };
+            });
+            scored.sort((a, b) => b.score - a.score);
+            // 只返回 score > 0.3 的
+            return scored.filter(s => s.score > 0.3).slice(0, limit);
+        }
+
+        function levenshteinSimilarity(a, b) {
+            const lenA = a.length, lenB = b.length;
+            const maxLen = Math.max(lenA, lenB);
+            if (maxLen === 0) return 1.0;
+            const matrix = Array(lenA + 1).fill(null).map(() => Array(lenB + 1).fill(0));
+            for (let i = 0; i <= lenA; i++) matrix[i][0] = i;
+            for (let j = 0; j <= lenB; j++) matrix[0][j] = j;
+            for (let i = 1; i <= lenA; i++) {
+                for (let j = 1; j <= lenB; j++) {
+                    const cost = a[i-1] === b[j-1] ? 0 : 1;
+                    matrix[i][j] = Math.min(
+                        matrix[i-1][j] + 1,
+                        matrix[i][j-1] + 1,
+                        matrix[i-1][j-1] + cost
+                    );
+                }
+            }
+            return 1 - matrix[lenA][lenB] / maxLen;
+        }
+
+        // ==================== 渲染 ====================
+        function renderGrid() {
+            const grid = document.getElementById('grid');
+            let filtered = allRows;
+
+            // 应用筛选
+            if (currentFilter === 'matched') filtered = filtered.filter(r => r.manualMerge);
+            else if (currentFilter === 'unmatched') filtered = filtered.filter(r => !r.manualMerge);
+
+            // 应用搜索
+            if (searchQuery) {
+                const q = searchQuery.toLowerCase();
+                filtered = filtered.filter(r =>
+                    r.aiHint.toLowerCase().includes(q) ||
+                    (r.manualMerge && r.manualMerge.toLowerCase().includes(q))
+                );
+            }
+
+            if (filtered.length === 0) {
+                grid.innerHTML = `<div style="text-align:center;padding:40px;color:#666;">暂无数据</div>`;
+                return;
+            }
+
+            grid.innerHTML = filtered.map(row => {
+                const isMatched = !!row.manualMerge;
+                const rowClass = isMatched ? 'matched' : 'unmatched';
+                const charCount = row.chars.length;
+
+                // 建议标签渲染
+                const suggestionsHTML = row.suggestions.length > 0
+                    ? row.suggestions.map(s => {
+                        const activeClass = row.manualMerge === s.tag ? ' active' : '';
+                        const percent = Math.round(s.score * 100);
+                        return `<span class="suggestion-tag${activeClass}"
+                                     onclick="applyMerge('${escapeAttr(row.aiHint)}', '${escapeAttr(s.tag)}')"
+                                     title="相似度: ${percent}%">
+                                    ${escapeHTML(s.tag)} <small>${percent}%</small>
+                                </span>`;
+                    }).join('')
+                    : '<span class="no-suggestion">无建议</span>';
+
+                // 当前对齐结果
+                const mergeDisplay = row.manualMerge
+                    ? `<span class="merge-tag">✅ ${escapeHTML(row.manualMerge)}</span>`
+                    : `<span class="merge-empty">未对齐</span>`;
+
+                return `
+                <div class="row ${rowClass}" id="row-${sanitizeId(row.aiHint)}">
+                    <div class="ai-hint">
+                        ${escapeHTML(row.aiHint)}
+                        <small>使用于 ${charCount} 个角色</small>
+                    </div>
+                    <div class="suggestions">
+                        ${suggestionsHTML}
+                        ${!row.manualMerge ? `
+                            <span style="color:#666;margin:0 4px;">or</span>
+                            <div class="custom-input-group">
+                                <input type="text" class="custom-input"
+                                       placeholder="自定义标签..."
+                                       id="custom-${sanitizeId(row.aiHint)}"
+                                       onkeydown="if(event.key==='Enter')applyCustom('${escapeAttr(row.aiHint)}')">
+                                <button class="btn-apply" onclick="applyCustom('${escapeAttr(row.aiHint)}')">✓</button>
+                            </div>
+                        ` : `
+                            <button class="btn-clear" onclick="clearMerge('${escapeAttr(row.aiHint)}')" title="清除对齐">✕</button>
+                        `}
+                    </div>
+                    <div class="current-merge">
+                        ${mergeDisplay}
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        // ==================== 操作函数 ====================
+        function applyMerge(aiHint, tag) {
+            const row = allRows.find(r => r.aiHint === aiHint);
+            if (row) {
+                row.manualMerge = tag;
+                renderGrid();
+                updateStats();
+            }
+        }
+
+        function applyCustom(aiHint) {
+            const inputId = 'custom-' + sanitizeId(aiHint);
+            const input = document.getElementById(inputId);
+            if (!input) return;
+            const val = input.value.trim();
+            if (!val) return;
+            applyMerge(aiHint, val);
+        }
+
+        function clearMerge(aiHint) {
+            const row = allRows.find(r => r.aiHint === aiHint);
+            if (row) {
+                row.manualMerge = '';
+                renderGrid();
+                updateStats();
+            }
+        }
+
+        function clearAll() {
+            if (!confirm('确定要清除所有对齐结果吗？此操作不可恢复。')) return;
+            allRows.forEach(r => r.manualMerge = '');
+            renderGrid();
+            updateStats();
+            showToast('🗑 已清除全部对齐结果');
+        }
+
+        // ==================== 筛选和搜索 ====================
+        function setFilter(filter, btn) {
+            currentFilter = filter;
+            document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            renderGrid();
+        }
+
+        function filterRows(query) {
+            searchQuery = query;
+            renderGrid();
+        }
+
+        // ==================== 导入/导出 ====================
+        function exportMapping() {
+            const mapping = {};
+            allRows.forEach(r => {
+                if (r.manualMerge) {
+                    mapping[r.aiHint] = r.manualMerge;
+                }
+            });
+            document.getElementById('modalTextarea').value = JSON.stringify(mapping, null, 2);
+            document.getElementById('modalOverlay').classList.add('show');
+        }
+
+        function downloadJSON() {
+            const mapping = {};
+            allRows.forEach(r => {
+                if (r.manualMerge) {
+                    mapping[r.aiHint] = r.manualMerge;
+                }
+            });
+            const blob = new Blob([JSON.stringify(mapping, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'source_hint_mapping.json';
+            a.click();
+            URL.revokeObjectURL(url);
+            closeModal();
+            showToast('💾 映射文件已下载');
+        }
+
+        function loadExistingMapping() {
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.accept = '.json';
+            input.onchange = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                try {
+                    const text = await file.text();
+                    const mapping = JSON.parse(text);
+                    let applied = 0;
+                    allRows.forEach(r => {
+                        if (mapping[r.aiHint] !== undefined && mapping[r.aiHint] !== '') {
+                            r.manualMerge = mapping[r.aiHint];
+                            applied++;
+                        }
+                    });
+                    renderGrid();
+                    updateStats();
+                    showToast(`📥 导入成功，应用了 ${applied} 条映射`);
+                } catch (e) {
+                    showToast('⚠️ 解析失败: ' + e.message);
+                }
+            };
+            input.click();
+        }
+
+        function closeModal() {
+            document.getElementById('modalOverlay').classList.remove('show');
+        }
+
+        // ==================== 辅助函数 ====================
+        function escapeHTML(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function escapeAttr(str) {
+            return str.replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/`/g, '\\`');
+        }
+
+        function sanitizeId(str) {
+            return str.replace(/[^a-zA-Z0-9\u4e00-\u9fff_-]/g, '_');
+        }
+
+        // ==================== 拖拽支持 ====================
+        const dropZone = document.getElementById('dropZone');
+        dropZone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#00d2ff';
+            dropZone.style.background = '#0f1a2a';
+        });
+        dropZone.addEventListener('dragleave', () => {
+            dropZone.style.borderColor = '#444';
+            dropZone.style.background = 'transparent';
+        });
+        dropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dropZone.style.borderColor = '#444';
+            dropZone.style.background = 'transparent';
+            handleFiles(e.dataTransfer.files);
+        });
+
+        // ==================== 模态框关闭 ====================
+        document.getElementById('modalOverlay').addEventListener('click', function(e) {
+            if (e.target === this) closeModal();
+        });
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') closeModal();
+        });
+    </script>
+</body>
+</html>

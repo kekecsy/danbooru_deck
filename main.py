@@ -1212,6 +1212,19 @@ def set_safe_mode_endpoint(req: SafeModeRequest):
 def get_safe_mode_endpoint():
     return {"safe": danbooru_api.get_host() == danbooru_api.HOST_SAFE, "host": danbooru_api.get_host()}
 
+class ProxyModeRequest(BaseModel):
+    use_proxy: bool = True
+
+@app.post("/api/set_proxy")
+def set_proxy_endpoint(req: ProxyModeRequest):
+    """前端代理开关：True 走代理（实时重读系统代理，读不到用默认端口兜底），
+    False 强制直连。设置后立即生效，解决「开代理启动后端→关代理后下载仍走死代理」。"""
+    return {"ok": True, **danbooru_api.set_proxy_mode(req.use_proxy)}
+
+@app.get("/api/proxy_state")
+def proxy_state_endpoint():
+    return {"ok": True, **danbooru_api.get_proxy_state()}
+
 @app.post("/api/start")
 def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
     if not jobs.can_start():
@@ -1264,7 +1277,7 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
 
     mode_labels = {
         "rank": "排行抓取", "popular": "Popular热门", "collect_ids": "仅收集ID",
-        "download_ids": "按ID下载", "popular_range": "日期范围热门", "tags": "Tag下载",
+        "download_ids": "按ID下载", "popular_range": "日期范围", "tags": "Tag下载",
     }
     return {
         "ok": True,
@@ -2222,14 +2235,154 @@ def api_convert_local_zip(req: ConvertLocalZipRequest):
         target_path = Path(req.local_path).resolve()
         if not target_path.exists() or target_path.suffix.lower() != '.zip':
             return {"ok": False, "msg": "无效的 ZIP 文件路径"}
-        
+
         output_path = target_path.with_suffix('.gif')
         if not output_path.exists():
             convert_zip_to_gif(target_path, output_path)
-            
+
         return {"ok": True, "gif_path": str(output_path)}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
+
+
+# ---------------- Caption 手动模式：返回提示词供用户复制 ----------------
+# 用户在 caption 浮窗里点「复制提示词」时调；不真打 Gemini，只构造和 caption.py
+# 一样的 system + user prompt 给前端写到剪贴板。前端再单独把图片复制到剪贴板，
+# 用户就能粘到任意 chat LLM (Claude / ChatGPT / Gemini Web) 手动跑一次。
+
+class CaptionPromptRequest(BaseModel):
+    image_path: str
+    with_artist: bool = False
+    stage: int | None = None        # 1/2/3 → 3 阶段 pipeline；None → 旧的单轮模式
+    verify_json: str | None = None  # stage=3 时用，注入 verify 校验结果
+
+
+def _find_caption_meta(image_path: Path):
+    """复刻 caption.py find_metadata 的查 viewer_data 行为，避免 import caption.py
+    （那会触发 Gemini SDK 在 import 时初始化失败）。"""
+    viewer_json = image_path.parent / "viewer_data.json"
+    if not viewer_json.exists():
+        return None
+    try:
+        with open(viewer_json, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    target = image_path.name
+    for entry in data:
+        if entry.get("filename") == target:
+            return entry
+    return None
+
+
+@app.post("/api/caption_prompt")
+def api_caption_prompt(req: CaptionPromptRequest):
+    """返回给前端用于手动模式的提示词组合。
+
+    支持两种调用：
+    - 缺省 stage：旧的单轮模式，返回 {ok, system, user, combined, meta_used, filename}。
+    - stage=1/2/3：3 阶段 pipeline。stage 1 给 system+observe；stage 2 给
+      verify user prompt；stage 3 给 compose user prompt（可选注入 verify_json
+      中的 fallback_description / consistent 标记）。前端在外部 LLM 同一对话
+      里连续粘贴 3 段即可。
+    """
+    from caption_prompt import (
+        DANBOORU_SYSTEM_PROMPT,
+        build_user_prompt,
+        build_combined_prompt,
+        PIPELINE_SYSTEM_PROMPT,
+        OBSERVE_USER_PROMPT,
+        build_verify_user_prompt,
+        build_compose_user_prompt,
+    )
+    try:
+        image_path = Path(req.image_path).resolve()
+    except Exception as e:
+        return {"ok": False, "msg": f"无效路径: {e}"}
+    if not image_path.exists():
+        return {"ok": False, "msg": "图片不存在"}
+    # 限制只看 hot_pic 下的图，避免任意路径泄露
+    try:
+        image_path.relative_to(Path(base_download_dir).resolve())
+    except ValueError:
+        return {"ok": False, "msg": "路径不在 hot_pic 目录下"}
+
+    meta = _find_caption_meta(image_path)
+    stage = req.stage
+
+    if stage is None:
+        # 旧单轮契约：保持向后兼容
+        user_prompt = build_user_prompt(meta, include_artist=bool(req.with_artist))
+        combined = build_combined_prompt(meta, include_artist=bool(req.with_artist))
+        return {
+            "ok": True,
+            "system": DANBOORU_SYSTEM_PROMPT,
+            "user": user_prompt,
+            "combined": combined,
+            "meta_used": bool(meta),
+            "filename": image_path.name,
+        }
+
+    if stage not in (1, 2, 3):
+        return {"ok": False, "msg": f"stage 必须为 1/2/3，收到 {stage}"}
+
+    if stage == 1:
+        user_prompt = OBSERVE_USER_PROMPT
+        combined = f"{PIPELINE_SYSTEM_PROMPT.rstrip()}\n\n---\n\n{user_prompt}"
+        return {
+            "ok": True,
+            "stage": 1,
+            "system": PIPELINE_SYSTEM_PROMPT,
+            "user": user_prompt,
+            "combined": combined,
+            "meta_used": bool(meta),
+            "filename": image_path.name,
+        }
+
+    if stage == 2:
+        user_prompt = build_verify_user_prompt(meta)
+        return {
+            "ok": True,
+            "stage": 2,
+            "system": None,
+            "user": user_prompt,
+            "combined": user_prompt,
+            "meta_used": bool(meta),
+            "filename": image_path.name,
+        }
+
+    # stage == 3
+    verify_result: dict | None = None
+    skip_verify_note = False
+    if req.verify_json:
+        try:
+            parsed = json.loads(req.verify_json)
+            if isinstance(parsed, dict):
+                verify_result = parsed
+            else:
+                skip_verify_note = True
+        except Exception:
+            skip_verify_note = True
+    else:
+        skip_verify_note = True
+
+    user_prompt = build_compose_user_prompt(
+        meta,
+        include_artist=bool(req.with_artist),
+        verify_result=verify_result,
+        skip_verify_note=skip_verify_note,
+    )
+    return {
+        "ok": True,
+        "stage": 3,
+        "system": None,
+        "user": user_prompt,
+        "combined": user_prompt,
+        "meta_used": bool(meta),
+        "filename": image_path.name,
+        "verify_used": verify_result is not None,
+    }
+
 
 if __name__ == "__main__":
     import uvicorn
