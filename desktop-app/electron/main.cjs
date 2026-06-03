@@ -3,6 +3,7 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
 const { spawn } = require('node:child_process');
+const crypto = require('node:crypto');
 
 const isDev = !app.isPackaged;
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -17,6 +18,7 @@ let crawlerProcess = null;
 let crawlerStartPromise = null;
 let crawlerStdout = [];
 let crawlerLastError = '';
+let thumbCacheDir = '';
 
 let localCustomDict = null;
 function loadLocalCustomDict() {
@@ -458,6 +460,48 @@ ipcMain.handle('file:to-local-url', async (_event, targetPath) => {
   return resolvedPath ? `local://${encodeURIComponent(resolvedPath)}` : '';
 });
 
+// 缩略图缓存目录（按 路径+mtime+尺寸 哈希，命中即复用）
+function ensureThumbCacheDir() {
+  if (!thumbCacheDir) thumbCacheDir = path.join(app.getPath('userData'), 'thumb-cache');
+  if (!fs.existsSync(thumbCacheDir)) fs.mkdirSync(thumbCacheDir, { recursive: true });
+  return thumbCacheDir;
+}
+
+// 生成（或复用缓存）指定长边的缩略图，返回 local:// URL。
+// size=0 表示「原图」；动图/视频/不可解码格式一律回退原图，避免丢失动画或解码失败。
+const THUMBABLE_EXTS = ['.jpg', '.jpeg', '.png', '.webp', '.bmp'];
+ipcMain.handle('file:to-thumb-url', async (_event, payload) => {
+  const { targetPath, size } = payload || {};
+  const resolvedPath = toAbsolutePath(targetPath);
+  if (!resolvedPath || !fs.existsSync(resolvedPath)) return '';
+  const maxEdge = Number(size) || 0;
+  const originalUrl = `local://${encodeURIComponent(resolvedPath)}`;
+  const ext = path.extname(resolvedPath).toLowerCase();
+  if (!maxEdge || !THUMBABLE_EXTS.includes(ext)) return originalUrl; // 原图档位 / 动图等
+  try {
+    const stat = fs.statSync(resolvedPath);
+    const key = crypto.createHash('md5')
+      .update(`${resolvedPath}|${stat.mtimeMs}|${stat.size}|${maxEdge}`)
+      .digest('hex');
+    const isPng = ext === '.png'; // PNG 保留透明通道，其余转 JPEG
+    const cacheFile = path.join(ensureThumbCacheDir(), `${key}.${isPng ? 'png' : 'jpg'}`);
+    if (!fs.existsSync(cacheFile)) {
+      const img = nativeImage.createFromPath(resolvedPath);
+      if (img.isEmpty()) return originalUrl; // 解码失败（部分 webp/avif）回退原图
+      const { width, height } = img.getSize();
+      let out = img;
+      if (Math.max(width, height) > maxEdge) { // 仅缩小，不放大
+        const opts = width >= height ? { width: maxEdge } : { height: maxEdge };
+        out = img.resize({ ...opts, quality: 'good' });
+      }
+      fs.writeFileSync(cacheFile, isPng ? out.toPNG() : out.toJPEG(80));
+    }
+    return `local://${encodeURIComponent(cacheFile)}`;
+  } catch {
+    return originalUrl; // 任何异常都回退原图，保证缩略图始终能显示
+  }
+});
+
 ipcMain.handle('file:exists', async (_event, targetPath) => {
   const resolvedPath = toAbsolutePath(targetPath);
   return resolvedPath ? fs.existsSync(resolvedPath) : false;
@@ -667,10 +711,11 @@ ipcMain.handle('crawler:set-safe-mode', async (_event, safe) => {
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
+  thumbCacheDir = path.join(app.getPath('userData'), 'thumb-cache');
   protocol.handle('local', (request) => {
     const url = request.url.replace(/^local:\/\//, '');
     const filePath = decodeURIComponent(url);
-    const allowedRoots = [hotPicDir, ...presetDirs];
+    const allowedRoots = [hotPicDir, ...presetDirs, thumbCacheDir].filter(Boolean);
     if (!allowedRoots.some(root => isWithin(root, filePath))) {
       return new Response('Access denied', { status: 403 });
     }

@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     readDataUrl: (targetPath) => ipcRenderer.invoke('file:read-data-url', targetPath),
     toFileUrl: (targetPath) => ipcRenderer.invoke('file:to-file-url', targetPath),
     toLocalUrl: (targetPath) => ipcRenderer.invoke('file:to-local-url', targetPath),
+    toThumbUrl: (targetPath, size) => ipcRenderer.invoke('file:to-thumb-url', { targetPath, size }),
     savePng: (suggestedName, uint8Array) => ipcRenderer.invoke('file:save-png', {
       suggestedName,
       bytes: Array.from(uint8Array || [])

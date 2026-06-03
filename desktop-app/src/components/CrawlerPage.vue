@@ -209,13 +209,16 @@ const gallery = ref({
   // 固定 15/页：30/60/120 会同时渲染太多卡片，缩略图 IPC + 网格布局都会卡
   pageSize: 15,
   cardSize: habits.cardSize || 150,
+  // 缩略图长边像素：默认 360（远小于原图，省解码/内存）；0 = 原图。点开看大图仍走原图。
+  thumbSize: habits.thumbSize != null ? habits.thumbSize : 360,
   page: 1
 });
 
-watch(() => [gallery.value.sortBy, gallery.value.hotThreshold, gallery.value.cardSize], () => {
+watch(() => [gallery.value.sortBy, gallery.value.hotThreshold, gallery.value.cardSize, gallery.value.thumbSize], () => {
   habits.sortBy = gallery.value.sortBy;
   habits.hotThreshold = gallery.value.hotThreshold;
   habits.cardSize = gallery.value.cardSize;
+  habits.thumbSize = gallery.value.thumbSize;
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 });
 
@@ -692,12 +695,16 @@ function extractPostId(item) {
   const m = url.match(/\/posts\/(\d+)/);
   return m ? m[1] : '';
 }
+// 优先用 loadGallery 预存的 item.postId，缺失时回退到正则解析（旧路径/未规范化 item）
+function getPostId(item) {
+  return item && item.postId ? item.postId : extractPostId(item);
+}
 function isItemSelected(item) {
-  const id = extractPostId(item);
+  const id = getPostId(item);
   return !!id && selection.value.ids.has(id);
 }
 function toggleItemSelection(item) {
-  const id = extractPostId(item);
+  const id = getPostId(item);
   if (!id) { showToast('该图片没有 Post ID，无法加入选择', 'warning'); return; }
   if (selection.value.ids.has(id)) selection.value.ids.delete(id);
   else selection.value.ids.add(id);
@@ -849,7 +856,7 @@ const selectionIndex = computed(() => {
   const list = filteredLocalImages.value;
   const ps = gallery.value.pageSize || 1;
   for (let i = 0; i < list.length; i++) {
-    const id = extractPostId(list[i]);
+    const id = getPostId(list[i]);
     if (id && selection.value.ids.has(id)) {
       map.set(id, { item: list[i], page: Math.floor(i / ps) + 1, indexInFiltered: i });
     }
@@ -951,7 +958,7 @@ const filteredLocalImages = computed(() => {
     if (hotOnly && (item.score || 0) < threshold) return false;
 
     if (showOnlySelected.value) {
-      const id = extractPostId(item);
+      const id = getPostId(item);
       if (!id || !selection.value.ids.has(id)) return false;
     }
 
@@ -1029,15 +1036,61 @@ const pageNumbers = computed(() => {
   return out;
 });
 
+// 两级页码：每 50 页为一「块」，超过一块才显示块导航
+const PAGE_BLOCK_SIZE = 50;
+// 当前块从 activePage 派生 —— 翻页/跳转/筛选重置都会让块自动跟随，无需额外接线
+const totalBlocks = computed(() => Math.max(1, Math.ceil(activeTotalPages.value / PAGE_BLOCK_SIZE)));
+const hasMultipleBlocks = computed(() => totalBlocks.value > 1); // 少图（≤50 页）退化为现状
+const currentBlock = computed(() => {
+  const b = Math.floor((activePage.value - 1) / PAGE_BLOCK_SIZE);
+  return Math.min(Math.max(0, b), totalBlocks.value - 1); // 夹紧防越界
+});
+const blockStartPage = computed(() => currentBlock.value * PAGE_BLOCK_SIZE + 1);
+const blockEndPage = computed(() => Math.min(activeTotalPages.value, blockStartPage.value + PAGE_BLOCK_SIZE - 1));
+const blockPageNumbers = computed(() => { // 当前块内页码（≤50 个），供分页栏页码选择器渲染
+  const out = [];
+  for (let n = blockStartPage.value; n <= blockEndPage.value; n++) out.push(n);
+  return out;
+});
+const blockLabels = computed(() => // 块下拉选项："1-50" / "51-100" ...
+  Array.from({ length: totalBlocks.value }, (_, i) => {
+    const s = i * PAGE_BLOCK_SIZE + 1;
+    const e = Math.min(activeTotalPages.value, s + PAGE_BLOCK_SIZE - 1);
+    return { index: i, label: `${s}-${e}` };
+  })
+);
+
 const galleryStats = computed(() => {
   const all = gallery.value.images;
   const filtered = filteredLocalImages.value;
-  const scores = filtered.map(i => i.score || 0).filter(s => s > 0);
-  const avg = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
-  const sorted = [...scores].sort((a, b) => a - b);
-  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  // 一趟遍历收集 >0 的分数并累加均值，再对（更小的）正分子集排序求中位数，
+  // 避免原先 map+filter+spread+sort 的多次分配与多趟遍历（上千图时明显更省）
+  let sum = 0;
+  const scores = [];
+  for (let i = 0; i < filtered.length; i++) {
+    const s = filtered[i].score || 0;
+    if (s > 0) { scores.push(s); sum += s; }
+  }
+  const avg = scores.length ? Math.round(sum / scores.length) : 0;
+  scores.sort((a, b) => a - b);
+  const median = scores.length ? scores[Math.floor(scores.length / 2)] : 0;
   return { total: all.length, filtered: filtered.length, avg, median };
 });
+
+// 搜索防抖：输入框绑 searchInput 即时回显，250ms 后才写回 gallery.search（真正参与过滤）
+const searchInput = ref(gallery.value.search);
+let searchDebounceTimer = null;
+function onSearchInput() {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
+  searchDebounceTimer = setTimeout(() => { gallery.value.search = searchInput.value; }, 250);
+}
+// 程序化写入（清空按钮 / 查看器点 token 跳转）：立即同步两端并绕过防抖，避免回显与过滤关键字错位
+function setSearch(keyword) {
+  if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null; }
+  const v = keyword || '';
+  searchInput.value = v;
+  gallery.value.search = v;
+}
 
 const jumpInput = ref(1);
 function doJump() {
@@ -1049,6 +1102,14 @@ function gotoPage(n) {
   if (typeof n !== 'number') return;
   activePage.value = Math.max(1, Math.min(activeTotalPages.value, n));
 }
+// 块导航：跳到目标块的「块首页」
+function gotoBlock(blockIndex) {
+  const b = Math.min(Math.max(0, blockIndex), totalBlocks.value - 1);
+  gotoPage(b * PAGE_BLOCK_SIZE + 1);
+}
+function prevBlock() { gotoBlock(currentBlock.value - 1); }
+function nextBlock() { gotoBlock(currentBlock.value + 1); }
+function onBlockSelect(e) { gotoBlock(Number(e.target.value)); } // select value 是字符串
 
 function appendLog(message) {
   if (!message) return;
@@ -1174,7 +1235,7 @@ async function hydrateThumbs(items) {
     }
 
     if (item.localPath) {
-      item.thumbUrl = await window.desktopAPI.file.toLocalUrl(item.localPath);
+      item.thumbUrl = await window.desktopAPI.file.toThumbUrl(item.localPath, gallery.value.thumbSize);
       return;
     }
 
@@ -1193,6 +1254,7 @@ async function loadGallery(date, silent = false) {
     const normalizedImages = data.images.map(item => ({
       ...item,
       thumbUrl: '',
+      postId: extractPostId(item),
       artistTokens: splitTags(item.artist),
       characterTokens: Array.isArray(item.characters) ? item.characters : splitTags(item.characters)
     }));
@@ -1252,6 +1314,7 @@ async function syncStatus() {
         const appended = status.new_images.map(item => ({
           ...item,
           thumbUrl: '',
+          postId: extractPostId(item),
           artistTokens: splitTags(item.artist),
           characterTokens: Array.isArray(item.characters) ? item.characters : splitTags(item.characters)
         }));
@@ -2553,7 +2616,7 @@ function editItem(item) {
 }
 
 function applySearch(keyword) {
-  gallery.value.search = keyword || '';
+  setSearch(keyword);
 }
 
 const translationFileInput = ref(null);
@@ -2763,6 +2826,12 @@ watch(pagedLocalImages, async items => {
   await hydrateThumbs(items);
 });
 
+// 切换缩略图分辨率：清掉已生成的 thumbUrl，按新尺寸重建当前页（其余页翻到时惰性重建）
+watch(() => gallery.value.thumbSize, () => {
+  gallery.value.images.forEach(it => { it.thumbUrl = ''; });
+  hydrateThumbs(pagedLocalImages.value);
+});
+
 onMounted(async () => {
   await loadGallery();
   await ensureService();
@@ -2782,6 +2851,7 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
   if (pollTimer) window.clearInterval(pollTimer);
   window.removeEventListener('keydown', onKeyDown);
   document.removeEventListener('click', onDocClickForRefreshMenu);
@@ -3138,6 +3208,12 @@ const tagFolderPreview = computed(() => {
             <option :value="180">默认</option>
             <option :value="220">大</option>
           </select>
+          <select v-model.number="gallery.thumbSize" class="search-input" style="width: auto;" title="缩略图分辨率：越低越省内存、翻页越流畅；点开看大图仍是原图">
+            <option :value="240">省流</option>
+            <option :value="360">标准</option>
+            <option :value="540">高清</option>
+            <option :value="0">原图</option>
+          </select>
           <button
             :class="['hot-toggle', { active: gallery.hotOnly }]"
             @click="gallery.hotOnly = !gallery.hotOnly"
@@ -3169,11 +3245,11 @@ const tagFolderPreview = computed(() => {
             </div>
           </div>
           <span class="search-input-wrap">
-            <input v-model="gallery.search" class="search-input search-input-with-clear" type="text" placeholder="搜索作者 / 角色" />
+            <input v-model="searchInput" @input="onSearchInput" class="search-input search-input-with-clear" type="text" placeholder="搜索作者 / 角色" />
             <button
-              v-if="gallery.search"
+              v-if="searchInput"
               class="search-clear-btn"
-              @click="gallery.search = ''"
+              @click="setSearch('')"
               title="清空搜索"
               type="button"
             >×</button>
@@ -3274,7 +3350,7 @@ const tagFolderPreview = computed(() => {
         </article>
       </div>
 
-      <div class="pagination-bar" v-if="activeCount">
+      <div class="pagination-bar cr-pg-bar" v-if="activeCount">
         <button class="ghost pg-btn" @click="gotoPage(1)" :disabled="activePage <= 1" title="首页">«</button>
         <button class="ghost pg-btn" @click="gotoPage(activePage - 1)" :disabled="activePage <= 1" title="上一页 (←)">‹</button>
         <button
@@ -3288,6 +3364,14 @@ const tagFolderPreview = computed(() => {
         <button class="ghost pg-btn" @click="gotoPage(activePage + 1)" :disabled="activePage >= activeTotalPages" title="下一页 (→)">›</button>
         <button class="ghost pg-btn" @click="gotoPage(activeTotalPages)" :disabled="activePage >= activeTotalPages" title="末页">»</button>
         <span class="pg-jump pg-picker-host">
+          <!-- 块导航（每50页一块）并入页码选择组，与跳转/页码列表同一行 -->
+          <template v-if="hasMultipleBlocks">
+            <button class="pg-jump-btn pg-block-mini" @click="prevBlock" :disabled="currentBlock <= 0" title="上一块（50页）">‹‹</button>
+            <select class="pg-block-select" :value="currentBlock" @change="onBlockSelect" title="选择页码区块（每50页）">
+              <option v-for="b in blockLabels" :key="`blk-${b.index}`" :value="b.index">{{ b.label }}</option>
+            </select>
+            <button class="pg-jump-btn pg-block-mini" @click="nextBlock" :disabled="currentBlock >= totalBlocks - 1" title="下一块（50页）">››</button>
+          </template>
           <button class="pg-jump-btn" @click="doJump" title="跳转到输入的页码">跳转</button>
           <input type="number" min="1" :max="activeTotalPages" v-model.number="jumpInput" @keyup.enter="doJump" />
           <button
@@ -3299,12 +3383,20 @@ const tagFolderPreview = computed(() => {
           / {{ activeTotalPages }}
           <div v-if="pagePicker.open" class="pg-picker-panel" @click.stop>
             <div class="pg-picker-head">
-              <span>共 {{ activeTotalPages }} 页 · 点击跳转</span>
+              <div v-if="hasMultipleBlocks" class="pg-picker-block-nav">
+                <button class="ghost pg-block-btn" @click="prevBlock" :disabled="currentBlock <= 0" title="上一块">‹</button>
+                <select class="pg-picker-block-select" :value="currentBlock" @change="onBlockSelect">
+                  <option v-for="b in blockLabels" :key="`pblk-${b.index}`" :value="b.index">{{ b.label }} 页</option>
+                </select>
+                <button class="ghost pg-block-btn" @click="nextBlock" :disabled="currentBlock >= totalBlocks - 1" title="下一块">›</button>
+                <span class="pg-picker-meta">第 {{ currentBlock + 1 }} / {{ totalBlocks }} 块</span>
+              </div>
+              <span v-else>共 {{ activeTotalPages }} 页 · 点击跳转</span>
               <button class="ghost" @click="pagePicker.open = false">×</button>
             </div>
             <div class="pg-picker-grid">
               <button
-                v-for="n in activeTotalPages"
+                v-for="n in blockPageNumbers"
                 :key="`picker-${n}`"
                 class="pg-picker-cell"
                 :class="{ active: n === activePage }"
@@ -5810,6 +5902,45 @@ const tagFolderPreview = computed(() => {
   color: var(--muted);
   padding: 0 4px;
   cursor: pointer;
+}
+/* 两级页码：块导航控件（分页栏块簇 + 页码面板头部块切换） */
+.pg-picker-block-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pg-block-select,
+.pg-picker-block-select {
+  padding: 4px 6px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #fbf4eb, #f2e8db);
+  color: var(--ink);
+  border: 1px solid rgba(74, 53, 25, 0.12);
+  cursor: pointer;
+}
+.pg-picker-block-select {
+  flex: 1;
+  min-width: 90px;
+}
+/* CrawlerPage 分页栏：强制单行，避免块控件让分页栏换行而压缩上方图片网格高度 */
+.cr-pg-bar {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.pg-block-mini {
+  padding: 4px 7px;
+  font-size: 13px;
+}
+.pg-block-btn {
+  padding: 0 6px;
+}
+.pg-picker-meta {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
 }
 .pg-picker-grid {
   display: grid;
