@@ -5,7 +5,6 @@ __pycache__
 drawer
 exiftool
 desktop-app/node_modules
-desktop-app/dist/assets
 artist_favorites.json
 character_favorites.json
 image_favorites.json
