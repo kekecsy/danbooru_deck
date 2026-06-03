@@ -44,6 +44,38 @@
 
 ---
 
+## 🚀 快速开始（macOS / Linux）
+
+> 需要 [Python 3.9+](https://www.python.org/downloads/) 和 [Node.js 18+](https://nodejs.org/)。
+> macOS 推荐先装 [Homebrew](https://brew.sh/)，再用它把依赖一次装齐：
+>
+> ```bash
+> brew install python node uv      # uv 可选，但强烈推荐（装依赖快一个数量级）
+> ```
+>
+> `setup.sh` 会自动识别 uv 并使用；没装也行，会回退到标准 `venv + pip`。
+
+```bash
+1. 下载/克隆本仓库
+2. cd 到项目目录
+3. chmod +x setup.sh start.sh   ← 首次需要给脚本加执行权限
+4. ./setup.sh                   ← 创建 .venv、装依赖、编译前端（优先 uv，回退 pip）
+5. ./start.sh                   ← 启动桌面端
+```
+
+`setup.sh` 的作用（与 Windows 版 `setup.bat` 一一对应）：
+
+- 检查 Python3 / Node.js / uv
+- 在项目根目录创建独立 `.venv`，跑 `uv pip install -r requirements.txt`（或 `pip install`）
+- `desktop-app/` 里跑 `npm install` + `npm run build`
+- 写入 `env_config.json`，把 Python 路径指向上面 `.venv` 里的 `bin/python`
+
+之后只要执行 `./start.sh` 即可启动。
+
+> 不想加执行权限的话，直接 `bash setup.sh` / `bash start.sh` 也能跑。
+
+---
+
 ## 主要功能
 
 - **多模式抓取**：排行榜 / 日期热门 / 日期范围热门 / 仅收集 ID / 按 ID 下载 / 按 Tag 下载。
@@ -64,7 +96,10 @@
 
 ```bash
 uv venv .venv
+# Windows
 uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+# macOS / Linux
+uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
 > uv 自动处理 Python 发现、venv 创建、并行下载和 wheel 缓存，第一次完整安装通常在 10 秒级。
@@ -84,7 +119,8 @@ venv：
 
 ```bash
 python -m venv .venv
-.venv\Scripts\activate
+.venv\Scripts\activate          # Windows
+source .venv/bin/activate       # macOS / Linux
 pip install -r requirements.txt
 ```
 
@@ -96,7 +132,9 @@ pip install -r requirements.txt
 2. 环境变量 `WEB_MOSAIC_PYTHON`
 3. 系统 `PATH` 中的 `python` / `py -3`
 
-`setup.bat` 会自动生成 `env_config.json`；手动写时格式如下：
+`setup.bat`（Windows）/ `setup.sh`（macOS / Linux）会自动生成 `env_config.json`；手动写时格式如下：
+
+Windows（注意 JSON 里反斜杠要写成 `\\`）：
 
 ```json
 {
@@ -104,7 +142,15 @@ pip install -r requirements.txt
 }
 ```
 
-提示：在激活的环境里跑 `where python` 取第一行即可。
+macOS / Linux（正斜杠，无需转义）：
+
+```json
+{
+    "python_path": "/Users/you/web_mosaic_gpt/.venv/bin/python"
+}
+```
+
+提示：在激活的环境里跑 `where python`（Windows）/ `which python3`（macOS / Linux）取第一行即可。
 
 ### 3. 前端
 
@@ -122,7 +168,8 @@ npm run dev        # 开发模式（带热重载 + Electron）
 抓图、管理、打码都不需要 FFMPEG。**只有点"转 GIF"按钮时**才会调用它。需要时任选其一：
 
 ```bash
-winget install Gyan.FFmpeg
+winget install Gyan.FFmpeg   # Windows
+brew install ffmpeg          # macOS
 ```
 
 或从 [FFMPEG 官网](https://ffmpeg.org/download.html) 下载，把 `bin/` 加入系统 `PATH`，在终端中验证：
@@ -137,7 +184,12 @@ ffmpeg -version
 
 国内网络偶尔会被运营商劫持，可以改 hosts 绕过。
 
-文件位置：`C:\Windows\System32\drivers\etc\hosts`，在末尾追加一行：
+文件位置：
+
+- Windows：`C:\Windows\System32\drivers\etc\hosts`（用管理员权限编辑）
+- macOS / Linux：`/etc/hosts`（`sudo nano /etc/hosts`）
+
+在末尾追加一行：
 
 ```text
 104.26.11.39 danbooru.donmai.us
@@ -151,7 +203,8 @@ ffmpeg -version
 
 ```text
 .
-├── setup.bat / start.bat   # 一键安装 / 启动
+├── setup.bat / start.bat   # 一键安装 / 启动（Windows）
+├── setup.sh  / start.sh    # 一键安装 / 启动（macOS / Linux）
 ├── main.py                 # FastAPI 后端入口
 ├── translator.py           # 标签翻译核心
 ├── requirements.txt        # Python 依赖

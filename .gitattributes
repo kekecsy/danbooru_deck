@@ -1,0 +1,2 @@
+# Shell 脚本必须用 LF 换行，否则在 macOS/Linux 上会报 "bad interpreter: ...^M"
+*.sh text eol=lf
