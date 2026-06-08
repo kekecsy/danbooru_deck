@@ -1,6 +1,7 @@
-"""Caption 提示词构造：被 caption.py（Gemini 自动调用）和 main.py（手动模式
-/api/caption_prompt 端点）共用。这里不依赖 Gemini SDK / Pillow，纯字符串处理，
-确保前端「手动复制提示词」功能在没装 google-genai 时也能工作。"""
+"""Caption 提示词构造：供 main.py 的 /api/caption_prompt（手动模式）端点使用。
+这里不依赖 Gemini SDK / Pillow，纯字符串处理，确保前端「手动复制提示词」功能
+独立可用。OBSERVE/VERIFY/COMPOSE_SCHEMA 保留作为各阶段 JSON 产物的契约文档
+（手动模式由 prompt 引导外部 LLM 产出对应形状）。"""
 
 
 DANBOORU_SYSTEM_PROMPT = """你是一名专业的二次元插画描述与数据标注专家。你的任务是根据所提供的图像以及 Danbooru 风格的标签元数据，生成一段细致、流畅、自然的中文描述。
@@ -84,22 +85,37 @@ PIPELINE_SYSTEM_PROMPT = """你是一名严谨的二次元插画分析师与数�
 """
 
 
-OBSERVE_USER_PROMPT = """这是第 1 轮：纯观察。
+# =========================================================================
+# 常规属性（发色 / 发型 / 瞳色）的来源
+# =========================================================================
+# 这些属性不再用手维护的受控枚举去约束 Observe。图源本身自带 danbooru 的 general
+# tags（blonde_hair / green_eyes / long_hair / ponytail …），它们在第 2 轮（Verify）
+# 被逐个判定 visible/absent，visible 的直接进入 verified_tags —— 即「直接采用图片
+# 提供的 danbooru tag」，省掉一套需要长期维护、又和 booru 生态写法割裂的枚举，也
+# 避免把"长度"与"造型"挤进单选。Observe 阶段只负责 tag 容易漏掉的识别锚点（兽耳/
+# 光环/瞳孔纹样 等）与表情，不再判定常规发色/发型/瞳色。
+# 取舍：danbooru 漏标某属性时该属性会缺失；角色核验也不再有独立枚举做硬锚点。
+
+
+OBSERVE_USER_PROMPT = f"""这是第 1 轮：纯观察。
 
 请仅根据图像本身（不要使用任何外部知识或元数据，假设你完全不知道角色是谁、出自什么作品）输出一份结构化 JSON，覆盖以下要素：
 
 - subjects_count: 画中主要人物数量（整数）。
 - composition: framing（close-up / portrait / cowboy_shot / full_body / wide / other）、camera_angle（eye_level / from_below / from_above / dutch / other）、gaze_direction（at_viewer / away / down / up / side / other）。
-- characters: 每个主要角色一项，记录 hair_color、hair_style、hair_accessories（数组）、eye_color、eye_features（如 heart_in_eye、symbol_in_eye、半闭等；没有特殊则填 "none"）、expression（自然中文短语，如"含羞带笑"）、distinguishing_features（数组，记录兽耳/光环/翅膀/角/尾巴/尖耳/瞳孔特殊纹样 等）。
-- outfit_layers: 服饰分层数组，每层独立一项；layer 取值如 outerwear / dress / shirt / skirt / pants / underwear / legwear / footwear / headwear / accessory；item 具体名称；color 精确配色（避免"深色"这种模糊词）；details 记录蕾丝/褶皱/破损/卷起/半脱 等细节。若画面包含可见的内衣/泳装/裸露状态，如实记入对应层级，不要回避。
+- characters: 每个主要角色一项。**注意：发色/发型/瞳色这类常规属性不在这里判定**——它们由第 2 轮直接采用图源自带的 danbooru 标签，纯观察阶段只记录下面这些 tag 容易漏掉的要素：
+  - hair_accessories（数组）、eye_features（如 heart_in_eye、symbol_in_eye、半闭等；没有特殊则填 "none"）、expression（自然中文短语，如"含羞带笑"）、distinguishing_features（数组，记录兽耳/光环/翅膀/角/尾巴/尖耳/瞳孔特殊纹样 等识别锚点）。
+  - ⚠️ distinguishing_features 谨慎：二次元发型常形成耳状/角状轮廓，极易把"翘起的头发"误判成兽耳/角。只有当有独立于头发的结构证据（材质或明暗与头发明显不同、根部与头皮分离、确为耳/角形）时才记 animal_ears/horns 等；拿不准就当作发型、**不要**记入。
+  - 拿不准就填 "unclear" 或留空数组，不要硬凑或自创取值。
+- clothing_tags: 服饰**标签数组**（取代旧的分层结构）。每个元素是一个 booru 风格英文标签，格式 `颜色_物件`，全小写、用下划线连接，例如 `black_thighhighs`、`white_dress`、`pleated_skirt`、`red_ribbon`、`school_uniform`。颜色不确定时可只给物件（如 `gloves`）。若画面包含可见的内衣/泳装/裸露状态，如实记入（如 `white_panties`、`bikini`），不要回避。
 - pose_action: stance（站/坐/跪/趴/躺/其他）、hand_position、body_orientation（正面/侧面/背面/3/4 侧）、action（一句话描述当前正在做什么）。
 - background: environment（场景类型）、props（道具数组）、lighting（如 soft_natural / harsh_rim / studio / night_neon / 等）、palette（主色调）、mood（氛围一两词）。
 - art_style: line_quality（crisp / sketchy / soft）、shading（cel / soft / painterly / flat）、notable_features（数组：如 gradient / glossy / matte / glow 等）。
-- nsfw: { is_nsfw: 布尔, elements: 数组（仅在 is_nsfw=true 时填写画面中的露骨元素，如 nude / sex / penetration / cum 等；如无则空数组） }。
+- nsfw: {{ is_nsfw: 布尔, elements: 数组（仅在 is_nsfw=true 时填写画面中的露骨元素，如 nude / sex / penetration / cum 等；如无则空数组） }}。
 - notable_details: 其他值得提及的视觉细节数组（不重复以上字段已记录的内容）。
 
 要求：
-- 配色尽量精确，例如写 "black thigh-high stockings" 而不是 "black legwear"。
+- clothing_tags 用 booru 标签风格（颜色_物件，全小写下划线）。
 - 看不清就写 "unclear"，不要猜。
 - 输出严格符合上述 schema 的 JSON。"""
 
@@ -122,34 +138,18 @@ OBSERVE_SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "hair_color": {"type": "string"},
-                    "hair_style": {"type": "string"},
                     "hair_accessories": {"type": "array", "items": {"type": "string"}},
-                    "eye_color": {"type": "string"},
                     "eye_features": {"type": "string"},
                     "expression": {"type": "string"},
                     "distinguishing_features": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": [
-                    "hair_color", "hair_style", "hair_accessories",
-                    "eye_color", "eye_features", "expression",
+                    "hair_accessories", "eye_features", "expression",
                     "distinguishing_features",
                 ],
             },
         },
-        "outfit_layers": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "layer": {"type": "string"},
-                    "item": {"type": "string"},
-                    "color": {"type": "string"},
-                    "details": {"type": "string"},
-                },
-                "required": ["layer", "item", "color", "details"],
-            },
-        },
+        "clothing_tags": {"type": "array", "items": {"type": "string"}},
         "pose_action": {
             "type": "object",
             "properties": {
@@ -191,7 +191,7 @@ OBSERVE_SCHEMA = {
         "notable_details": {"type": "array", "items": {"type": "string"}},
     },
     "required": [
-        "subjects_count", "composition", "characters", "outfit_layers",
+        "subjects_count", "composition", "characters", "clothing_tags",
         "pose_action", "background", "art_style", "nsfw", "notable_details",
     ],
 }
@@ -214,7 +214,7 @@ def build_verify_user_prompt(meta: dict | None) -> str:
         f"- 提供的通用视觉标签 (general tags, 空格分隔)：{general or '(无)'}",
         "",
         "请按以下要求作答：",
-        "1. character_identification：判断提供的角色 + 作品与你第 1 轮观察到的角色特征（发色/瞳色/光环/兽耳/服饰风格/识别锚点）是否一致；",
+        "1. character_identification：判断提供的角色 + 作品与你在第 1 轮看到的画面是否一致（比对识别锚点：光环/兽耳/瞳孔纹样/服饰风格，以及你从图中直接看到的发色与瞳色）；",
         "   - consistent=true/false，confidence 0-1，reason 一句中文解释；",
         "   - 若 consistent=false，给出 fallback_description（一段简短中文，描述你实际看到的角色，用以代替名字）；一致则 fallback_description 为 null。",
         "2. tag_evaluation：把 general tags 拆成单个 tag，**逐条**评估：",
@@ -222,6 +222,13 @@ def build_verify_user_prompt(meta: dict | None) -> str:
         "   - reason: 一句简短中文。",
         "   - 类似 highres / commentary_request / absurdres 这种 meta 性标签可以标 uncertain 并在 reason 里说明是元数据。",
         "3. additional_observations：你在第 1 轮看到、但 general tags 没提到的视觉元素（数组，每项一句中文）。",
+        "4. verified_tags：汇总成一个 booru 风格英文标签数组（全小写、下划线连接），用于训练。包含：",
+        "   - tag_evaluation 中 status='visible' 的 general tag（保持其原标签写法）；",
+        "   - **发色/瞳色/发长/发型等常规属性标签（如 blonde_hair / green_eyes / long_hair / ponytail）只要 visible 就必须保留**——它们现在是这些属性的唯一来源，不要省略；",
+        "   - 若 character_identification.consistent=true，再加入身份标签：character、copyright（按原写法）；",
+        "   - 可补充第 1 轮中明确观察到、但 general tags 漏掉的关键视觉标签（来自 additional_observations）；**但高显著识别锚点除外**，那些走第 5 点。",
+        "   - **不要**包含 status='absent' 或纯 meta 性（highres/commentary 等）标签。",
+        "5. review_anchors：高显著的「识别锚点」类特征——animal_ears / animal_ear_fluff / cat_ears / halo / wings / horns / tail / extra_ears 等——若你觉得在画面里看到了、但它**不在上面提供的 general tags 里**，**不要**写进 verified_tags，而是放进 review_anchors（数组，每项含 tag 与 reason）。理由：danbooru 是人工标注，这类显眼特征极少漏标，其缺失是「实际并不存在」的强证据；尤其二次元发型常被误看成兽耳/角，应交人工确认而非自动写入。没有这类存疑项则为空数组。",
         "",
         "严格按 schema 输出 JSON，不要额外解释。",
     ]
@@ -256,8 +263,23 @@ VERIFY_SCHEMA = {
             },
         },
         "additional_observations": {"type": "array", "items": {"type": "string"}},
+        "verified_tags": {"type": "array", "items": {"type": "string"}},
+        "review_anchors": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["tag", "reason"],
+            },
+        },
     },
-    "required": ["character_identification", "tag_evaluation", "additional_observations"],
+    "required": [
+        "character_identification", "tag_evaluation",
+        "additional_observations", "verified_tags", "review_anchors",
+    ],
 }
 
 
@@ -268,10 +290,13 @@ def build_compose_user_prompt(
     *,
     skip_verify_note: bool = False,
 ) -> str:
-    """第 3 轮：基于前两轮的事实写自然中文段落。
+    """第 3 轮：基于前两轮的事实产出结构化 JSON（中英 caption + 属性 + 标签）。
 
     - verify_result: 第 2 轮的 JSON。若为 None 或缺失，按"未校验"提示模型谨慎使用 tags。
     - skip_verify_note: 仅当 stage 2 失败时为 True，提示成文时小心 tags 可能含图中未出现的元素。
+
+    返回的 prompt 要求模型输出 COMPOSE_SCHEMA 形状的 JSON：
+      { caption_en, caption_zh, verified_tags }
     """
     tags = (meta or {}).get("tags", {}) or {}
     char_id = (verify_result or {}).get("character_identification") or {}
@@ -279,16 +304,29 @@ def build_compose_user_prompt(
     consistent = char_id.get("consistent")
 
     lines = [
-        "这是第 3 轮：成文。",
+        "这是第 3 轮：成文（结构化输出）。",
         "",
-        "现在请把第 1 轮的观察与第 2 轮的校验结论融为一段自然、细腻的中文描述。",
+        "请基于第 1 轮观察与第 2 轮校验，输出一个 JSON 对象，含 3 个字段：caption_en、caption_zh、verified_tags。",
         "",
-        "格式与文风要求：",
-        "- 只输出最终段落，不要任何开场白、标题或 markdown。",
-        "- 一段为宜，最多两段且衔接紧密；连贯的散文，不要逗号堆砌式标签流水账。",
-        "- 行文顺序融入：主体与构图 → 角色身份与外貌 → 服饰与配件 → 背景与场景 → 氛围/光影/风格。",
+        "【caption_en】训练用英文 caption。**严格**按下面固定分区模板输出（保留方括号小标题，每区内是 booru 风格英文短语，逗号或换行分隔；该区无内容则留最贴切的最小描述，不要编造）：",
+        "[SUBJECT]",
+        "  人数与主体，如 1girl, solo",
+        "[APPEARANCE]",
+        "  发色/发型/瞳色取自 verified_tags（如 long_hair / blonde_hair / green_eyes，可自然展开为 long blonde hair / green eyes），再加表情与识别特征（如 animal ears）",
+        "[CLOTHES]",
+        "  来自 clothing_tags，如 white dress / black thighhighs",
+        "[POSE]",
+        "  姿态与视线，如 standing / looking at viewer",
+        "[BACKGROUND]",
+        "  环境道具光照，如 bedroom / window / sunlight",
+        "[STYLE]",
+        "  画风，如 anime illustration / cel shading",
         "",
-        "事实使用规则（重要）：",
+        "【caption_zh】阅读用中文散文段落：自然、细腻、连贯（不要逗号堆砌式标签流水账），一段为宜最多两段；行文顺序：主体与构图 → 角色身份与外貌 → 服饰与配件 → 背景与场景 → 氛围/光影/风格。",
+        "",
+        "【verified_tags】照搬第 2 轮的 verified_tags 数组（booru 风格、全小写下划线）；若第 2 轮缺失，则用第 1 轮明确观察到的标签自行汇总。",
+        "",
+        "事实使用规则（同时约束 caption_en 与 caption_zh）：",
     ]
 
     if skip_verify_note:
@@ -302,14 +340,14 @@ def build_compose_user_prompt(
 
     if consistent is False and fallback_desc:
         lines.append(
-            f"- 角色识别校验为不一致：**不要使用元数据中的角色名**。请用以下描述替代角色身份：「{fallback_desc}」。"
+            f"- 角色识别校验为不一致：**不要使用元数据中的角色名**。caption_zh 用以下描述替代角色身份：「{fallback_desc}」；caption_en 的 [SUBJECT] 用通用描述（如 1girl）而非角色名。"
         )
     elif consistent is True:
         name = tags.get("tag_string_character") or ""
         series = tags.get("tag_string_copyright") or ""
         if name or series:
             lines.append(
-                f"- 角色识别校验通过：可以自然地融入角色名「{name}」与所属作品「{series}」，不要机械罗列。"
+                f"- 角色识别校验通过：caption_zh 可自然融入角色名「{name}」与所属作品「{series}」（不要机械罗列）；caption_en 可在 [SUBJECT] 中加入角色名/作品标签。"
             )
 
     if include_artist:
@@ -319,6 +357,17 @@ def build_compose_user_prompt(
 
     lines += [
         "",
-        "现在请输出最终的中文描述段落（仅段落本身）。",
+        "只输出 JSON 本体，不要任何开场白、解释或 markdown 围栏。",
     ]
     return "\n".join(lines)
+
+
+COMPOSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "caption_en": {"type": "string"},
+        "caption_zh": {"type": "string"},
+        "verified_tags": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["caption_en", "caption_zh", "verified_tags"],
+}

@@ -7963,9 +7963,9 @@
   },
   "kayoko_(dress)_(blue_archive)": {
     "has_chinese": true,
-    "chinese_name": "鬼方佳世衣（礼服）",
+    "chinese_name": "鬼方佳代子（礼服）",
     "source_hint": "blue-archive",
-    "translated_description_zh": "《蔚蓝档案》中鬼方佳世的晚礼服换装造型。"
+    "translated_description_zh": "《蔚蓝档案》中鬼方佳代子的晚礼服换装造型。"
   },
   "shoebill_(kemono_friends)": {
     "has_chinese": true,
@@ -10176,10 +10176,10 @@
     "translated_description_zh": "原神角色迪希雅，肤色深棕，长黑发带金色挑染，发型有交叉刘海和猫耳形状的发饰，左耳戴单耳环，身穿黑色高跟靴、黑色短裤、黑色手套（一只无指），衣着多以金色镶边装饰，佩有乌塞赫项圈，并戴红黑束带"
   },
   "medea_(fate)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "fate series",
-    "translated_description_zh": "这是Medea角色在Fate系列所有版本的统一标签。变体包括：原版来自Fate/Stay Night，俗称“Caster”；以及在Fate/Grand Order中出现的年轻版本Medea Lily。外部链接指向Type-Moon Wiki的Medea页面"
+    "has_chinese": true,
+    "chinese_name": "美狄亚",
+    "source_hint": "fate",
+    "translated_description_zh": "《Fate》系列中所有版本美狄亚的统称标签。衍生版本包括：《Fate/stay night》中的原始版本（通常直接被称为“Caster”）以及在《Fate/Grand Order》中登场的少女时期版本（美狄亚·莉莉）。"
   },
   "falin_touden_(tallman)": {
     "has_chinese": false,
@@ -21012,10 +21012,10 @@
     "translated_description_zh": "《日常》中的主要角色之一。她有蓝色短双马尾和立方发饰。她也在《CITY》（Arawi Keiichi）中以成年长发形象出现"
   },
   "hex_maniac_(pokemon_legends:_z-a)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "hex maniac (pokemon)",
-    "translated_description_zh": "Hex Maniac（宝可梦）在《宝可梦传说：Z-A》中的第三次登场，首次在游戏官网公布。她形象为成熟女性，身着深蓝或海军蓝长裙，领口系有紫色蝴蝶结，胸前别有胸针，裙腰呈束腰式设计，裙摆呈波浪形。她留有遮住额头的黑色波浪长发，表情神秘，佩戴紫色耳环和深色鞋子。因其较为成熟的形象，常被画师描绘为胸部更大的版本，相较于她在XY和RSE中的形象。游戏中还可能出现其他变体"
+    "has_chinese": true,
+    "chinese_name": "灵异狂",
+    "source_hint": "pokemon",
+    "translated_description_zh": "这是“灵异狂”在《宝可梦传说 Z-A》中的第三次登场。她身穿带有紫色蝴蝶结领结和胸针的深蓝色长裙，留着遮住额头的黑色凌乱卷发。相比于《宝可梦 XY》和《宝可梦 RSE》中的形象，其外表更加成熟，因此在同人创作中常被画成更大的胸部。"
   },
   "hindenburg_(azur_lane)": {
     "has_chinese": true,
@@ -23604,10 +23604,10 @@
     "translated_description_zh": "惠特妮（Whitney），日本名为茜（Akane），是《宝可梦》金银版中登场的角色。她是活泼健谈、追随潮流的道馆馆长，以可爱的宝可梦为傲，战败时会哭泣。她的标志宝可梦是米尔坦克。她拥有长长的粉红色双马尾，佩戴发卡，身着白色短袖外套、短裤、袜子和鞋子"
   },
   "female_shez_(fire_emblem)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "shez_(fire_emblem)",
-    "translated_description_zh": "Shez_(Fire Emblem) 的女性版本。拥有长长的紫色头发，倾向于遮住一只眼睛，紫色眼睛，以及中等胸围。外观：* !post #5267196 * !post #5920020：[[female shez (awakened) (fire emblem)|觉醒]] * !post #5919645：[[female shez (sharpest blades) (fire emblem)|最锋利之刃]] * !post #6413448：[[female shez (summer) (fire emblem)|夏季]] * !post #8553142：[[female shez (snowfield envoy) (fire emblem)|雪原使者]] * !post #10229890：[[female shez (covert mercenary) (fire emblem)|隐蔽佣兵]] 另见：* [[Male Shez (fire emblem)|"
+    "has_chinese": true,
+    "chinese_name": "谢兹（女）",
+    "source_hint": "fire_emblem",
+    "translated_description_zh": "《火焰之纹章》中谢兹的女性版本。留着往往会遮住一只眼睛的紫色长发，拥有紫色的双瞳和中等身材（欧派）。"
   },
   "jeanne_d'arc_(swimsuit_archer)_(second_ascension)_(fate)": {
     "has_chinese": true,
@@ -77290,5 +77290,35 @@
     "chinese_name": "晓月美琴",
     "source_hint": "original",
     "translated_description_zh": "画师九头龙（Kudo Eru）创作的原创角色（OC）。她是葵玲（Aoi Rei）的女友（百合情侣）。她拥有一头棕色长发和一双红色的眼睛。"
+  },
+  "lucilla_(wuthering_waves)": {
+    "has_chinese": true,
+    "chinese_name": "洛瑟菈",
+    "source_hint": "wuthering_waves",
+    "translated_description_zh": "《鸣潮》中即将上线的可玩角色。声痕位置位于右脚踝上方。外观参考帖子 #10334247。"
+  },
+  "urd_(fate)": {
+    "has_chinese": true,
+    "chinese_name": "终末的Archer",
+    "source_hint": "fate",
+    "translated_description_zh": "《Fate/Grand Order》中登场的Archer职阶从者，于“过去迦勒底”章节中首次引入。她最初以“终末的Archer”之名登场，并曾临时使用化名“时子”。角色设计由Pochi（ぽち小屋。）负责，声优为羊宫妃那。"
+  },
+  "female_shez_(summer)_(fire_emblem)": {
+    "has_chinese": true,
+    "chinese_name": "谢兹（泳装）",
+    "source_hint": "fire_emblem",
+    "translated_description_zh": "《火焰之纹章 英雄》2023年“盛夏的向往”卡池中登场的夏日泳装版女性谢兹。她身穿一件带有红色挑染装饰的黑色比基尼，披着红色小短斗篷，头上戴着发花，脖子上挂着哨子，在同人作品中经常拿着一块冲浪板。"
+  },
+  "adjutant_(snowbreak)": {
+    "has_chinese": true,
+    "chinese_name": "分析员",
+    "source_hint": "snowbreak",
+    "translated_description_zh": "《尘白禁区》的男主角（玩家扮演的主角）。"
+  },
+  "raki_kazuki": {
+    "has_chinese": false,
+    "chinese_name": "",
+    "source_hint": "virtual_youtuber",
+    "translated_description_zh": "一名独立虚拟艺人（VTuber），曾属于VTuber事务所Pixellink。她设定上是一名身为女巫的浣熊娘，留着外侧黑色、内侧粉色的长发，拥有一双黄色的眼睛。默认服装为黑色无袖连衣裙外搭粉色夹克，配白袜与黑鞋。"
   }
 }

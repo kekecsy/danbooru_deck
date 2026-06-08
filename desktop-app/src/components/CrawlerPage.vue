@@ -249,11 +249,13 @@ const viewerToolbarVisible = computed(() => viewer.value.toolbarPinned || viewer
 // ---------------- Caption 悬浮窗口 ----------------
 const caption = ref({
   open: false,
-  loading: false,
   saving: false,
   withArtist: habits.captionWithArtist === true,
   mode: 'mark',          // 'mark' 标记模式（红，拖选标红） | 'edit' 输入模式（直接编辑文本框）
-  text: '',
+  text: '',              // = caption_zh 中文散文（红框标注作用于此）
+  captionEn: '',         // 训练用英文分区模板 caption（只读展示）
+  verifiedTags: [],      // booru 风格已校验标签数组（可增删）
+  tagInput: '',          // verified_tags 添加框的输入
   errors: [],            // [{start, end, text}]
   meta: null,            // {artist, characters, copyright}
   message: '',
@@ -263,7 +265,7 @@ const caption = ref({
   pos: { x: 0, y: 0, initialized: false },
   // 手动模式：API 不可用 / 不想用 API 时，把 3 阶段 pipeline 的每一轮提示词
   // 复制到任意 chat LLM（Claude/ChatGPT/Gemini Web），在同一对话里连续粘贴 3
-  // 段，把每轮返回粘回到对应粘贴框；最后一轮的中文段落作为 caption.text。
+  // 段，把每轮返回粘回到对应粘贴框；最后一轮的结构化 JSON 解析出中英 caption。
   manual: {
     open: true,            // 主入口，默认展开
     promptBusy: false,
@@ -271,7 +273,7 @@ const caption = ref({
     metaUsed: null,        // 拉过 prompt 后置为 true/false
     s1: { combined: '', pasted: '', parsed: null, parseError: '' },
     s2: { user: '',     pasted: '', parsed: null, parseError: '' },
-    s3: { user: '',     pasted: '', parseError: '' }
+    s3: { user: '',     pasted: '', parsed: null, parseError: '' }
   }
 });
 const captionTextRef = ref(null);
@@ -286,6 +288,9 @@ function openCaptionWindow() {
   caption.value.message = '';
   caption.value.errors = [];
   caption.value.text = '';
+  caption.value.captionEn = '';
+  caption.value.verifiedTags = [];
+  caption.value.tagInput = '';
   caption.value.meta = null;
   caption.value.loaded = false;
   caption.value.dirty = false;
@@ -333,7 +338,9 @@ async function loadExistingCaption() {
   try {
     const entry = await window.desktopAPI.caption.read(caption.value.imagePath);
     if (entry) {
-      caption.value.text = entry.caption || '';
+      caption.value.text = entry.caption_zh || entry.caption || '';
+      caption.value.captionEn = entry.caption_en || '';
+      caption.value.verifiedTags = Array.isArray(entry.verified_tags) ? entry.verified_tags : [];
       caption.value.errors = Array.isArray(entry.errors) ? entry.errors : [];
       caption.value.meta = {
         artist: entry.artist,
@@ -355,33 +362,6 @@ async function loadExistingCaption() {
     }
   } catch (e) {
     // 忽略
-  }
-}
-
-async function generateCaption() {
-  if (!caption.value.imagePath || caption.value.loading) return;
-  caption.value.loading = true;
-  caption.value.message = '正在调用 Gemini API 生成描述...';
-  try {
-    const result = await window.desktopAPI.caption.generate(caption.value.imagePath, caption.value.withArtist);
-    if (!result || !result.ok) {
-      caption.value.message = `生成失败：${result?.error || '未知错误'}`;
-      return;
-    }
-    caption.value.text = result.caption || '';
-    caption.value.meta = {
-      artist: result.artist,
-      characters: result.characters,
-      copyright: result.copyright
-    };
-    caption.value.errors = [];
-    caption.value.loaded = true;
-    caption.value.dirty = true;
-    caption.value.message = '生成完成，已可标注错误段。';
-  } catch (e) {
-    caption.value.message = `生成失败：${e.message || e}`;
-  } finally {
-    caption.value.loading = false;
   }
 }
 
@@ -435,6 +415,34 @@ function clearAllErrors() {
   caption.value.dirty = true;
 }
 
+// ---- verified_tags 人工增删（tag 现在是发色/瞳色/锚点的唯一载体，人工可直接改） ----
+function normalizeTag(raw) {
+  return String(raw == null ? '' : raw).trim().toLowerCase().replace(/\s+/g, '_');
+}
+function addVerifiedTag(tag) {
+  const fromInput = tag == null;
+  const t = normalizeTag(fromInput ? caption.value.tagInput : tag);
+  if (!t) return;
+  if (!Array.isArray(caption.value.verifiedTags)) caption.value.verifiedTags = [];
+  if (!caption.value.verifiedTags.includes(t)) {
+    caption.value.verifiedTags.push(t);
+    caption.value.dirty = true;
+  }
+  if (fromInput) caption.value.tagInput = '';
+}
+function removeVerifiedTag(idx) {
+  caption.value.verifiedTags.splice(idx, 1);
+  caption.value.dirty = true;
+}
+// Stage 2 校验里模型存疑、danbooru 未标的高显著锚点（如误判的 cat_ears）；
+// 已在 verified_tags 里的过滤掉，剩下的作为「待人工确认」建议展示。
+const reviewAnchors = computed(() => {
+  const ra = caption.value.manual?.s2?.parsed?.review_anchors;
+  if (!Array.isArray(ra)) return [];
+  const have = new Set((caption.value.verifiedTags || []).map(t => String(t)));
+  return ra.filter(a => a && a.tag && !have.has(String(a.tag)));
+});
+
 // 渲染：errors（红）按 start 排序分段输出，错误段显示原文。
 // 仅标记模式用；输入模式直接走可编辑 textarea。
 const captionRenderSegments = computed(() => {
@@ -471,7 +479,10 @@ async function saveCaption() {
   // JSON 深拷贝去掉 Vue reactive proxy，避免 IPC structuredClone 报「could not be cloned」
   const m = caption.value.manual;
   const entry = JSON.parse(JSON.stringify({
-    caption: caption.value.text,
+    caption: caption.value.text,        // 顶层 caption = 中文散文（保画廊绿标语义/向后兼容）
+    caption_zh: caption.value.text,
+    caption_en: caption.value.captionEn || '',
+    verified_tags: Array.isArray(caption.value.verifiedTags) ? caption.value.verifiedTags : [],
     with_artist: caption.value.withArtist,
     artist: caption.value.meta?.artist || null,
     characters: caption.value.meta?.characters || null,
@@ -511,7 +522,8 @@ async function saveCaption() {
 
 // ---------------- Caption 手动模式（3 阶段 Pipeline） ----------------
 // 用户在外部 chat LLM 同一对话里连续粘贴 stage 1/2/3 三段提示词，
-// 把每轮返回粘回到对应文本框；stage 3 的中文段落即为 caption.text。
+// 把每轮返回粘回到对应文本框；stage 3 现在返回结构化 JSON
+// {caption_en, caption_zh, verified_tags}，解析后中文段落即为 caption.text。
 
 function resetManualPipeline() {
   const m = caption.value.manual;
@@ -520,7 +532,7 @@ function resetManualPipeline() {
   m.metaUsed = null;
   m.s1 = { combined: '', pasted: '', parsed: null, parseError: '' };
   m.s2 = { user: '',     pasted: '', parsed: null, parseError: '' };
-  m.s3 = { user: '',     pasted: '', parseError: '' };
+  m.s3 = { user: '',     pasted: '', parsed: null, parseError: '' };
 }
 
 function stripCodeFences(text) {
@@ -610,18 +622,38 @@ function parseStageJson(stage) {
 
 function applyFinalCaption() {
   const m = caption.value.manual;
-  const text = (m.s3.pasted || '').trim();
-  if (!text) {
+  const raw = (m.s3.pasted || '').trim();
+  if (!raw) {
     m.s3.parseError = '粘贴框为空';
     return;
   }
-  caption.value.text = text;
+  let parsed = null;
+  try {
+    const obj = JSON.parse(stripCodeFences(raw));
+    if (obj && typeof obj === 'object') parsed = obj;
+  } catch (e) {
+    parsed = null;
+  }
+  if (parsed) {
+    m.s3.parsed = parsed;
+    caption.value.text = (parsed.caption_zh || parsed.caption || '').trim();
+    caption.value.captionEn = (parsed.caption_en || '').trim();
+    caption.value.verifiedTags = Array.isArray(parsed.verified_tags) ? parsed.verified_tags : [];
+    m.s3.parseError = '';
+    caption.value.message = '已解析结构化 JSON（中英 caption + 标签），点「保存」落盘。';
+  } else {
+    // 容错：模型没按 JSON 输出时，把整段当中文散文
+    m.s3.parsed = null;
+    caption.value.text = raw;
+    caption.value.captionEn = '';
+    caption.value.verifiedTags = [];
+    m.s3.parseError = '⚠️ 未能解析为 JSON，已按纯中文文本应用（caption_en/标签为空）。';
+    caption.value.message = '已按纯文本应用（非 JSON），点「保存」落盘。';
+  }
   caption.value.errors = [];
   caption.value.loaded = true;
   caption.value.dirty = true;
-  m.s3.parseError = '';
   m.stage = 'done';
-  caption.value.message = '已应用最终描述，点「保存」落盘。';
 }
 
 async function copyCaptionImage() {
@@ -3665,9 +3697,6 @@ const tagFolderPreview = computed(() => {
             <button :disabled="!captionHasContent || caption.saving" @click="saveCaption" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">
               {{ caption.saving ? '保存中...' : '💾 保存' }}
             </button>
-            <button class="ghost caption-api-fallback" :disabled="caption.loading" @click="generateCaption" title="API 失败时备用：直接调 Gemini 3 阶段管线生成">
-              {{ caption.loading ? 'API 生成中...' : '🚀 API 自动 (备用)' }}
-            </button>
           </div>
         </div>
         <!-- Pipeline 手动模式：主要入口。在外部 chat LLM 同一对话里连续粘贴 stage 1/2/3 -->
@@ -3756,10 +3785,10 @@ const tagFolderPreview = computed(() => {
             </div>
           </div>
 
-          <!-- Stage 3: compose -->
+          <!-- Stage 3: compose（结构化 JSON） -->
           <div :class="['pipeline-stage', caption.manual.stage === 3 ? 'active' : (caption.manual.stage === 'done' ? 'done' : 'locked')]">
             <div class="pipeline-stage-head">
-              <span class="pipeline-stage-title">③ Stage 3 · 成文 (得到中文段落)</span>
+              <span class="pipeline-stage-title">③ Stage 3 · 成文 (结构化 JSON：中英 caption + 标签)</span>
               <span v-if="caption.manual.stage === 'done'" class="pipeline-stage-status done">✓ 已完成</span>
               <span v-else-if="caption.manual.stage === 3" class="pipeline-stage-status active">当前</span>
               <span v-else class="pipeline-stage-status locked">🔒 等待 Stage 2</span>
@@ -3770,11 +3799,11 @@ const tagFolderPreview = computed(() => {
                   {{ caption.manual.promptBusy ? '复制中...' : '📋 复制 Stage 3 提示词' }}
                 </button>
               </div>
-              <p class="pipeline-stage-hint">在同一对话粘贴这段，把返回的<b>中文段落</b>（不是 JSON）粘到下方：</p>
+              <p class="pipeline-stage-hint">在同一对话粘贴这段，把返回的<b>结构化 JSON</b>（含 caption_en / caption_zh / verified_tags）粘到下方：</p>
               <textarea
                 v-model="caption.manual.s3.pasted"
-                rows="5"
-                placeholder="粘贴 Stage 3 返回的最终中文段落..."
+                rows="6"
+                placeholder='粘贴 Stage 3 返回的 JSON，例如：{"caption_en": "[SUBJECT]\n1girl...", "caption_zh": "...", "verified_tags": [...]}'
                 class="caption-manual-paste"
               ></textarea>
               <div v-if="caption.manual.s3.parseError" class="pipeline-error">⚠️ {{ caption.manual.s3.parseError }}</div>
@@ -3782,10 +3811,47 @@ const tagFolderPreview = computed(() => {
                 :disabled="!caption.manual.s3.pasted.trim()"
                 @click="applyFinalCaption"
                 class="caption-manual-apply pipeline-finish"
-              >✓ 用这段作为描述</button>
+              >✓ 解析并应用</button>
             </div>
             <div v-else-if="caption.manual.stage === 'done'" class="pipeline-stage-summary">
-              已应用为 caption · 字数 {{ (caption.text || '').length }}
+              已应用 · 中文 {{ (caption.text || '').length }} 字 · 英文 {{ caption.captionEn ? '✓' : '—' }} · 标签 {{ (caption.verifiedTags || []).length }} 个
+            </div>
+          </div>
+        </div>
+
+        <!-- 结构化产物：英文分区 caption（只读）+ 可增删的已校验标签 + 待确认锚点 -->
+        <div v-if="caption.loaded || caption.captionEn || (caption.verifiedTags && caption.verifiedTags.length) || reviewAnchors.length" class="caption-structured">
+          <div v-if="caption.captionEn" class="caption-structured-block">
+            <div class="caption-structured-label">caption_en（训练用，只读）</div>
+            <pre class="caption-structured-en">{{ caption.captionEn }}</pre>
+          </div>
+          <div class="caption-structured-block">
+            <div class="caption-structured-label">verified_tags（{{ (caption.verifiedTags || []).length }}）· 可增删</div>
+            <div class="caption-structured-tags">
+              <span v-for="(t, i) in caption.verifiedTags" :key="`vt-${i}`" class="caption-chip caption-chip-editable">
+                {{ t }}
+                <button class="caption-chip-x" @click="removeVerifiedTag(i)" title="删除此标签">×</button>
+              </span>
+              <span v-if="!caption.verifiedTags || !caption.verifiedTags.length" class="caption-tags-empty">（暂无标签）</span>
+            </div>
+            <div class="caption-tag-add">
+              <input
+                v-model="caption.tagInput"
+                @keyup.enter="addVerifiedTag()"
+                placeholder="添加 booru 标签，回车确认（如 blue_hair）"
+                class="caption-tag-input"
+              />
+              <button class="secondary" :disabled="!caption.tagInput.trim()" @click="addVerifiedTag()">＋ 添加</button>
+            </div>
+          </div>
+          <!-- 模型存疑、danbooru 未标的高显著锚点：人工确认后再加入 verified_tags -->
+          <div v-if="reviewAnchors.length" class="caption-structured-block">
+            <div class="caption-structured-label">⚠️ 待确认锚点（danbooru 未标，模型存疑——发型≈兽耳等易误判，确认真有再加入）</div>
+            <div class="caption-structured-tags">
+              <span v-for="(a, i) in reviewAnchors" :key="`ra-${i}`" class="caption-chip caption-chip-review" :title="a.reason || ''">
+                {{ a.tag }}
+                <button class="caption-chip-add" @click="addVerifiedTag(a.tag)" title="确认并加入 verified_tags">＋</button>
+              </span>
             </div>
           </div>
         </div>
@@ -3799,15 +3865,14 @@ const tagFolderPreview = computed(() => {
         </div>
 
         <!-- 底部内容区（改动3）：输入模式=可直接编辑文本框；标记模式=红标渲染。 -->
-        <div v-if="caption.loading" class="caption-loading">⏳ Gemini 正在分析图片，请稍候...</div>
         <textarea
-          v-else-if="caption.mode === 'edit'"
+          v-if="caption.mode === 'edit'"
           v-model="caption.text"
           @input="caption.dirty = true"
           class="caption-text-edit"
           placeholder="在此直接编辑描述文本，改完点上方「💾 保存」。"
         ></textarea>
-        <div v-else-if="!caption.text" class="caption-empty">尚未生成。点击「生成描述」开始。</div>
+        <div v-else-if="!caption.text" class="caption-empty">尚未生成。用上方 Pipeline 手动模式生成，或切到输入模式直接编写。</div>
         <div v-else class="caption-text-area" ref="captionTextRef" @mouseup="markCurrentSelection">
           <template v-for="(seg, i) in captionRenderSegments" :key="i">
             <span v-if="seg.type === 'text'">{{ seg.text }}</span>
@@ -4736,14 +4801,110 @@ const tagFolderPreview = computed(() => {
 .pipeline-finish {
   background: linear-gradient(135deg, #6366f1, #4f46e5) !important;
 }
-.caption-api-fallback {
+.caption-structured {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 6px 0 2px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(99, 102, 241, 0.05);
+  border: 1px solid rgba(99, 102, 241, 0.15);
+}
+.caption-structured-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.caption-structured-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: rgba(79, 70, 229, 0.85);
+  text-transform: uppercase;
+}
+.caption-structured-en {
+  margin: 0;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: rgba(0, 0, 0, 0.78);
+  background: rgba(255, 255, 255, 0.7);
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+.caption-structured-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+.caption-chip {
+  font-size: 11px;
+  font-family: Consolas, monospace;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  color: rgba(0, 0, 0, 0.7);
+}
+.caption-chip-editable {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.caption-chip-x {
+  border: none;
+  background: transparent;
+  color: rgba(220, 38, 38, 0.7);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 1px;
+}
+.caption-chip-x:hover { color: #dc2626; }
+.caption-chip-review {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.45);
+  color: rgba(146, 64, 14, 0.95);
+}
+.caption-chip-add {
+  border: none;
+  background: transparent;
+  color: rgba(5, 150, 105, 0.9);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 1px;
+}
+.caption-chip-add:hover { color: #059669; }
+.caption-tags-empty {
+  font-size: 11px;
+  color: rgba(0, 0, 0, 0.4);
+}
+.caption-tag-add {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.caption-tag-input {
+  flex: 1;
+  min-width: 0;
   font-size: 11.5px;
-  padding: 4px 10px;
-  opacity: 0.75;
+  font-family: Consolas, monospace;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  background: rgba(255, 255, 255, 0.9);
+  color: rgba(0, 0, 0, 0.8);
+  outline: none;
 }
-.caption-api-fallback:hover {
-  opacity: 1;
-}
+.caption-tag-input:focus { border-color: rgba(99, 102, 241, 0.55); }
 .caption-hint {
   font-size: 11.5px;
   color: rgba(0, 0, 0, 0.55);
@@ -4752,7 +4913,7 @@ const tagFolderPreview = computed(() => {
   border-radius: 6px;
   border-left: 3px solid #8b5cf6;
 }
-.caption-loading, .caption-empty {
+.caption-empty {
   padding: 22px 12px;
   text-align: center;
   color: rgba(0, 0, 0, 0.5);

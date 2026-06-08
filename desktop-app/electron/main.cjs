@@ -538,67 +538,12 @@ ipcMain.handle('file:copy-png', async (_event, payload) => {
 
 ipcMain.handle('preset:list', async () => listPresetFiles());
 
-// ---------------- Caption (Gemini) ----------------
-function spawnPythonJson(scriptPath, args) {
-  return new Promise((resolve, reject) => {
-    const python = getPythonCommand();
-    if (!python) {
-      reject(new Error('未找到可用的 Python 解释器'));
-      return;
-    }
-    const child = spawn(python.command, [...python.args, scriptPath, ...args], {
-      cwd: repoRoot,
-      windowsHide: true,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8' }
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.on('data', chunk => { stdout += chunk.toString(); });
-    child.stderr.on('data', chunk => { stderr += chunk.toString(); });
-    child.on('error', err => reject(err));
-    child.on('close', code => {
-      if (code !== 0) {
-        reject(new Error(stderr.trim() || `python 退出码 ${code}`));
-        return;
-      }
-      try {
-        // 取最后一行有效 JSON（防止前面有零星 print 漏出）
-        const lines = stdout.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
-        const last = lines.reverse().find(l => l.startsWith('{'));
-        if (!last) {
-          reject(new Error('未从 Python 输出中找到 JSON: ' + stdout.slice(-200)));
-          return;
-        }
-        resolve(JSON.parse(last));
-      } catch (err) {
-        reject(new Error(`解析 Python JSON 输出失败: ${err.message}\n输出: ${stdout.slice(-400)}`));
-      }
-    });
-  });
-}
-
+// ---------------- Caption (本地 caption.json 读写) ----------------
 function captionJsonPathFor(imagePath) {
   const resolved = toAbsolutePath(imagePath);
   if (!resolved || !isWithin(hotPicDir, resolved)) return null;
   return path.join(path.dirname(resolved), 'caption.json');
 }
-
-ipcMain.handle('caption:generate', async (_event, payload) => {
-  const { imagePath, withArtist } = payload || {};
-  const resolved = toAbsolutePath(imagePath);
-  if (!resolved || !isWithin(hotPicDir, resolved)) return { ok: false, error: '非法路径' };
-  if (!fs.existsSync(resolved)) return { ok: false, error: '图片不存在' };
-  const scriptPath = path.join(repoRoot, 'caption.py');
-  if (!fs.existsSync(scriptPath)) return { ok: false, error: '未找到 caption.py' };
-  const args = ['--json', resolved];
-  if (withArtist) args.push('--with-artist');
-  try {
-    const result = await spawnPythonJson(scriptPath, args);
-    return result;
-  } catch (err) {
-    return { ok: false, error: err.message };
-  }
-});
 
 ipcMain.handle('caption:read', async (_event, imagePath) => {
   const captionPath = captionJsonPathFor(imagePath);

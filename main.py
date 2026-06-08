@@ -2246,8 +2246,8 @@ def api_convert_local_zip(req: ConvertLocalZipRequest):
 
 
 # ---------------- Caption 手动模式：返回提示词供用户复制 ----------------
-# 用户在 caption 浮窗里点「复制提示词」时调；不真打 Gemini，只构造和 caption.py
-# 一样的 system + user prompt 给前端写到剪贴板。前端再单独把图片复制到剪贴板，
+# 用户在 caption 浮窗里点「复制提示词」时调；本端点不调用任何 LLM，只构造
+# system + user prompt 给前端写到剪贴板。前端再单独把图片复制到剪贴板，
 # 用户就能粘到任意 chat LLM (Claude / ChatGPT / Gemini Web) 手动跑一次。
 
 class CaptionPromptRequest(BaseModel):
@@ -2258,8 +2258,8 @@ class CaptionPromptRequest(BaseModel):
 
 
 def _find_caption_meta(image_path: Path):
-    """复刻 caption.py find_metadata 的查 viewer_data 行为，避免 import caption.py
-    （那会触发 Gemini SDK 在 import 时初始化失败）。"""
+    """在图片同目录查 viewer_data.json 并按 filename 匹配，取出该图元数据
+    （角色 / 作品 / 画师 / tags），供构造手动模式提示词用。"""
     viewer_json = image_path.parent / "viewer_data.json"
     if not viewer_json.exists():
         return None
@@ -2378,6 +2378,7 @@ def api_caption_prompt(req: CaptionPromptRequest):
         "system": None,
         "user": user_prompt,
         "combined": user_prompt,
+        "output": "json",   # stage 3 现在产出结构化 JSON（caption_en/caption_zh/verified_tags），前端按 JSON 解析
         "meta_used": bool(meta),
         "filename": image_path.name,
         "verify_used": verify_result is not None,
