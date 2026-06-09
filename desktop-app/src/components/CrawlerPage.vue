@@ -6120,6 +6120,9 @@ const tagFolderPreview = computed(() => {
 .cr-pg-bar {
   flex-wrap: nowrap;
   overflow-x: auto;
+  /* 只允许横向滚动兜底；不显式关掉纵向，overflow-y 会被浏览器算成 auto，
+     横向滚动条一出现就吃掉行高 → 冒出一条无意义的纵向滚动条（最右侧上下箭头） */
+  overflow-y: hidden;
   scrollbar-width: thin;
 }
 .pg-block-mini {
