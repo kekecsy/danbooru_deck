@@ -871,6 +871,29 @@ function onThumbClick(event, item) {
 const showOnlySelected = ref(false);
 const selectionListOpen = ref(false);
 const pagePicker = ref({ open: false });
+const pagePickerHost = ref(null);   // 分页栏页码组，作为浮层的定位锚点
+const pagePickerStyle = ref({});    // 浮层 position:fixed 的实时坐标（见 positionPagePicker）
+// 浮层 Teleport 到 body 后，用锚点元素的视口坐标把它 fixed 在原来的位置（向上展开、右对齐）。
+// 这样它脱离了分页栏(.cr-pg-bar)的 overflow 裁剪与图片卡片的层叠上下文，永远浮在最上层。
+function positionPagePicker() {
+  const host = pagePickerHost.value;
+  if (!host) return;
+  const r = host.getBoundingClientRect();
+  pagePickerStyle.value = {
+    right: `${Math.max(8, window.innerWidth - r.right)}px`,
+    bottom: `${window.innerHeight - r.top + 8}px`,
+  };
+}
+watch(() => pagePicker.value.open, open => {
+  if (open) {
+    positionPagePicker(); // flush:'pre'——在浮层渲染前算好坐标，避免首帧闪到错误位置
+    window.addEventListener('resize', positionPagePicker);
+    window.addEventListener('scroll', positionPagePicker, true); // 画廊在内层容器滚动，需捕获阶段
+  } else {
+    window.removeEventListener('resize', positionPagePicker);
+    window.removeEventListener('scroll', positionPagePicker, true);
+  }
+});
 
 // 已选清零时自动关掉「只看已选」，否则界面会一张图都不剩且按钮被禁用导致卡死
 watch(() => selection.value.ids.size, (size) => {
@@ -2034,9 +2057,11 @@ function onDocClickForTranslateMenu(e) {
 function onDocClickForPagePicker(e) {
   if (!pagePicker.value.open) return;
   const host = document.querySelector('.pg-picker-host');
-  if (host && !host.contains(e.target)) {
-    pagePicker.value.open = false;
-  }
+  if (host && host.contains(e.target)) return;
+  // 浮层已 Teleport 到 body，不再是 host 的后代，需单独豁免，否则点面板内部会误关
+  const panel = document.querySelector('.pg-picker-panel');
+  if (panel && panel.contains(e.target)) return;
+  pagePicker.value.open = false;
 }
 
 async function refreshSinglePost(item) {
@@ -2889,6 +2914,8 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', onDocClickForRefreshMenu);
   document.removeEventListener('click', onDocClickForTranslateMenu);
   document.removeEventListener('click', onDocClickForPagePicker);
+  window.removeEventListener('resize', positionPagePicker);
+  window.removeEventListener('scroll', positionPagePicker, true);
 });
 
 const modeDescription = computed(() => {
@@ -3395,7 +3422,7 @@ const tagFolderPreview = computed(() => {
         >{{ n }}</button>
         <button class="ghost pg-btn" @click="gotoPage(activePage + 1)" :disabled="activePage >= activeTotalPages" title="下一页 (→)">›</button>
         <button class="ghost pg-btn" @click="gotoPage(activeTotalPages)" :disabled="activePage >= activeTotalPages" title="末页">»</button>
-        <span class="pg-jump pg-picker-host">
+        <span class="pg-jump pg-picker-host" ref="pagePickerHost">
           <!-- 块导航（每50页一块）并入页码选择组，与跳转/页码列表同一行 -->
           <template v-if="hasMultipleBlocks">
             <button class="pg-jump-btn pg-block-mini" @click="prevBlock" :disabled="currentBlock <= 0" title="上一块（50页）">‹‹</button>
@@ -3413,7 +3440,8 @@ const tagFolderPreview = computed(() => {
             :title="pagePicker.open ? '关闭页码列表' : '展开页码列表（10列/行）'"
           >👆</button>
           / {{ activeTotalPages }}
-          <div v-if="pagePicker.open" class="pg-picker-panel" @click.stop>
+          <Teleport to="body">
+          <div v-if="pagePicker.open" class="pg-picker-panel" :style="pagePickerStyle" @click.stop>
             <div class="pg-picker-head">
               <div v-if="hasMultipleBlocks" class="pg-picker-block-nav">
                 <button class="ghost pg-block-btn" @click="prevBlock" :disabled="currentBlock <= 0" title="上一块">‹</button>
@@ -3436,6 +3464,7 @@ const tagFolderPreview = computed(() => {
               >{{ n }}</button>
             </div>
           </div>
+          </Teleport>
         </span>
       </div>
     </section>
@@ -6034,10 +6063,12 @@ const tagFolderPreview = computed(() => {
   border-color: transparent;
 }
 .pg-picker-panel {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  right: 0;
-  z-index: 50;
+  /* Teleport 到 body + position:fixed：彻底脱离分页栏(.cr-pg-bar 的 overflow 裁剪)
+     与图片卡片(content-visibility:auto 形成的层叠上下文)，确保浮层永远在最上层、
+     不被图片盖住。right/bottom 由 JS 按 .pg-picker-host 的视口位置实时计算
+     （见 positionPagePicker）。 */
+  position: fixed;
+  z-index: 9000;
   background: #fff;
   border: 1px solid rgba(74, 53, 25, 0.18);
   border-radius: 12px;
