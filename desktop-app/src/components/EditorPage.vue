@@ -19,6 +19,16 @@ const editorHabits = (() => {
   catch { return {}; }
 })();
 
+// 右侧控件浮层：固定（常驻不透明）/ 收起（隐藏让画布全幅），状态记忆到 editorHabits
+const panelPinned = ref(editorHabits.panelPinned === true);
+const panelCollapsed = ref(editorHabits.panelCollapsed === true);
+watch([panelPinned, panelCollapsed], ([pinned, collapsed]) => {
+  editorHabits.panelPinned = pinned === true;
+  editorHabits.panelCollapsed = collapsed === true;
+  try { localStorage.setItem(STORAGE_KEY_EDITOR_HABITS, JSON.stringify(editorHabits)); }
+  catch { /* localStorage 异常时静默 */ }
+});
+
 const editor = reactive({
   image: null,
   imageSrc: '',
@@ -451,6 +461,20 @@ function clearAll() {
   render();
 }
 
+// 卸载整张图片，回到空拖拽区（区别于只清码块的 clearAll）
+function clearImage() {
+  editor.image = null;
+  editor.imageSrc = '';
+  editor.imageName = '';
+  editor.layers = [];
+  editor.selectedId = null;
+  editor.nextId = 1;
+  editor.sourceMeta.artist = '';
+  editor.sourceMeta.characters = '';
+  editor.sourceMeta.postUrl = '';
+  copyStatus.value = '';
+}
+
 async function createImage(source) {
   return new Promise((resolve, reject) => {
     const image = new Image();
@@ -819,10 +843,20 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="editor-layout">
-    <aside class="panel card editor-side">
+    <aside v-show="!panelCollapsed" class="panel card editor-side" :class="{ 'is-pinned': panelPinned }">
       <div class="panel-head">
         <h2>打码编辑</h2>
         <button class="secondary" @click="emit('back')">返回图库</button>
+      </div>
+
+      <div class="button-row compact editor-panel-chrome">
+        <button
+          class="ghost"
+          :class="{ 'is-active': panelPinned }"
+          @click="panelPinned = !panelPinned"
+          :title="panelPinned ? '已固定（常驻不透明），点击取消固定' : '固定面板（默认半透明，悬浮变清晰）'"
+        >{{ panelPinned ? '📌 已固定' : '📌 固定' }}</button>
+        <button class="ghost" @click="panelCollapsed = true" title="收起面板，让画布全幅显示">收起 ›</button>
       </div>
 
       <div class="button-row">
@@ -935,7 +969,10 @@ onBeforeUnmount(() => {
       <div class="button-row compact">
         <button class="secondary" @click="undoLast" :disabled="!editor.layers.length">撤销</button>
         <button class="ghost" @click="deleteSelected" :disabled="!editor.selectedId">删除选中</button>
-        <button class="ghost" @click="clearAll" :disabled="!editor.layers.length">清空</button>
+        <button class="ghost" @click="clearAll" :disabled="!editor.layers.length">清空码块</button>
+      </div>
+      <div class="button-row compact">
+        <button class="ghost editor-clear-image" @click="clearImage" :disabled="!editor.image">清空图片</button>
       </div>
 
       <label class="field-full">
@@ -987,5 +1024,12 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </section>
+
+    <button
+      v-show="panelCollapsed"
+      class="editor-reopen-btn"
+      @click="panelCollapsed = false"
+      title="展开工具面板"
+    >🎚 工具</button>
   </div>
 </template>

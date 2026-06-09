@@ -147,7 +147,7 @@ input, select {
 .content { min-width: 0; overflow-y: auto; max-height: calc(100vh - 32px); }
 .page-grid { display: grid; grid-template-columns: 340px 1fr; gap: 16px; height: 100%; }
 .crawler-layout { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; min-height: 100%; }
-.editor-layout { display: grid; grid-template-columns: 280px 1fr; gap: 12px; height: 100%; }
+.editor-layout { position: relative; height: 100%; }
 .card { padding: 14px; }
 .gallery-panel { display: flex; flex-direction: column; min-height: 0; }
 .editor-side { overflow: auto; }
@@ -195,6 +195,97 @@ input, select {
 }
 .editor-side .preset-grid {
   gap: 6px;
+}
+
+/* ---------------- 打码页：全幅画布 + 右侧浮层控件 ---------------- */
+/* 画布占满整个 editor-layout；控件做成绝对定位浮层，不再挤占 280px 布局列 */
+.editor-layout .gallery-panel {
+  width: 100%;
+  height: 100%;
+}
+/* 右侧控件浮层：玻璃质感，默认半透明、悬浮变清晰，固定后常驻不透明 */
+.editor-layout .editor-side {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  bottom: 14px;
+  width: 280px;
+  z-index: 30;
+  margin: 0;
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(74, 53, 25, 0.14);
+  border-radius: 14px;
+  box-shadow: 0 18px 44px rgba(87, 58, 25, 0.22);
+  opacity: 0.6;
+  transition: opacity 0.18s ease;
+}
+.editor-layout .editor-side:hover,
+.editor-layout .editor-side.is-pinned {
+  opacity: 1;
+}
+/* 面板 chrome 行：固定 / 收起 */
+.editor-layout .editor-panel-chrome {
+  margin-bottom: 8px;
+}
+.editor-layout .editor-panel-chrome .is-active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  border-color: transparent;
+  color: #fff;
+}
+/* 清空图片：危险色，与「清空码块」区分 */
+.editor-layout .editor-clear-image {
+  flex: 1;
+  color: #a83232;
+  border-color: rgba(168, 50, 50, 0.4);
+}
+.editor-layout .editor-clear-image:not(:disabled):hover {
+  background: rgba(168, 50, 50, 0.12);
+}
+/* 收起态：右上角复原按钮 */
+.editor-layout .editor-reopen-btn {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 30;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  opacity: 0.65;
+  transition: opacity 0.18s ease, background 0.18s ease;
+}
+.editor-layout .editor-reopen-btn:hover {
+  opacity: 1;
+  background: rgba(0, 0, 0, 0.78);
+}
+/* stats 改为画布左上角浮动小条 */
+.editor-layout .canvas-head-compact {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  z-index: 20;
+  margin: 0;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  opacity: 0.45;
+  transition: opacity 0.18s ease;
+}
+.editor-layout .canvas-head-compact:hover {
+  opacity: 1;
+}
+.editor-layout .canvas-head-compact .stats {
+  color: rgba(255, 255, 255, 0.92);
 }
 .control-panel { display: flex; flex-direction: column; min-height: 0; position: sticky; top: 16px; max-height: calc(100vh - 32px); }
 
