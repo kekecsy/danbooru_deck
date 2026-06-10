@@ -211,14 +211,17 @@ const gallery = ref({
   cardSize: habits.cardSize || 150,
   // 缩略图长边像素：默认 360（远小于原图，省解码/内存）；0 = 原图。点开看大图仍走原图。
   thumbSize: habits.thumbSize != null ? habits.thumbSize : 360,
+  // 点开/切换大图是否联网刷新该图 score/收藏数：默认关，离线不报错；开关在工具栏「翻译」右侧
+  refreshOnView: habits.refreshOnView ?? false,
   page: 1
 });
 
-watch(() => [gallery.value.sortBy, gallery.value.hotThreshold, gallery.value.cardSize, gallery.value.thumbSize], () => {
+watch(() => [gallery.value.sortBy, gallery.value.hotThreshold, gallery.value.cardSize, gallery.value.thumbSize, gallery.value.refreshOnView], () => {
   habits.sortBy = gallery.value.sortBy;
   habits.hotThreshold = gallery.value.hotThreshold;
   habits.cardSize = gallery.value.cardSize;
   habits.thumbSize = gallery.value.thumbSize;
+  habits.refreshOnView = gallery.value.refreshOnView;
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 });
 
@@ -1302,7 +1305,7 @@ async function hydrateThumbs(items) {
   }));
 }
 
-async function loadGallery(date, silent = false) {
+async function loadGallery(date, silent = false, preserveView = false) {
   if (!silent) loadingGallery.value = true;
   try {
     const data = await window.desktopAPI.gallery.getByDate(date || gallery.value.selectedDate);
@@ -1319,8 +1322,15 @@ async function loadGallery(date, silent = false) {
     gallery.value.availableTags = Array.isArray(data.availableTags) ? data.availableTags : [];
     gallery.value.today = data.today;
     gallery.value.images = normalizedImages;
-    gallery.value.page = 1;
-    rebuildSortSnapshot();
+    if (preserveView) {
+      // 保持当前页与排序快照：新下载的图按既定设计落到末尾，
+      // 等用户主动点「重新排序」再并入（见 sortSnapshot 注释），不打断正在进行的刷新
+      const tp = Math.max(1, Math.ceil(filteredLocalImages.value.length / gallery.value.pageSize));
+      if (gallery.value.page > tp) gallery.value.page = tp;
+    } else {
+      gallery.value.page = 1;
+      rebuildSortSnapshot();
+    }
     await hydrateThumbs(pagedLocalImages.value);
     refreshCaptionedSet();
   } finally {
@@ -1395,7 +1405,14 @@ async function syncStatus() {
       } else {
         showToast("抓取任务已完成！", "success");
       }
-      await loadGallery(gallery.value.selectedDate);
+      // 只有「下载的日期 == 正在看的日期」才需要整盘 reload。下载 A 但在看 B 时，
+      // B 的盘上数据没变，reload 只会白白跳回第 1 页 + 重排，还会打断 B 正在进行的刷新。
+      // 复用上面 new_images 同款 target_folder 门控；preserveView=true 让同日期 reload
+      // 也保持当前页与排序快照（新图落末尾，等用户主动「重新排序」）。
+      const finishedFolder = status.target_folder || '';
+      if (finishedFolder && finishedFolder === gallery.value.selectedDate) {
+        await loadGallery(gallery.value.selectedDate, false, true);
+      }
     }
   } catch (error) {
     task.value.backendError = error.message;
@@ -2719,7 +2736,8 @@ async function openViewer(item) {
   viewer.value.zoom = 1;
   viewer.value.imageUrl = '';
 
-  refreshSinglePost(item);
+  // 默认不联网刷新（离线时会一直报错）；开关在工具栏「翻译」右侧，开启后才刷新该图热度
+  if (gallery.value.refreshOnView) refreshSinglePost(item);
 
   const ext = (item.filename || '').split('.').pop().toLowerCase();
   // 视频走 FastAPI 静态服务，自带 byte-range 支持，避开 local:// 协议的媒体限制
@@ -2815,7 +2833,7 @@ async function stepViewer(offset) {
   if (next === viewer.value.index) return;
   viewer.value.index = next;
   await syncViewerImage();
-  refreshSinglePost(viewerItem.value);
+  if (gallery.value.refreshOnView) refreshSinglePost(viewerItem.value);
 }
 
 function onViewerWheel(event) {
@@ -3251,7 +3269,7 @@ const tagFolderPreview = computed(() => {
             class="secondary tool-btn"
             @click="rebuildSortSnapshot"
             title="按当前最新 score / 收藏数 重新排序（默认锁定排序，避免点开卡片刷新热度时位置乱跳）"
-          >🔃 重新排序</button>
+          >🔃 排序</button>
           <select v-model="gallery.filterFormat" class="search-input" style="width: auto;">
             <option value="all">全部格式</option>
             <option value="image">图片</option>
@@ -3277,7 +3295,7 @@ const tagFolderPreview = computed(() => {
             :class="['hot-toggle', { active: gallery.hotOnly }]"
             @click="gallery.hotOnly = !gallery.hotOnly"
             :title="`只看 score ≥ ${gallery.hotThreshold}`"
-          >🔥 只看高分</button>
+          >🔥 高分</button>
           <div class="refresh-dropdown">
             <button
               :class="['refresh-btn', { active: refresh.isRunning, 'menu-open': refreshMenu.open }]"
@@ -3338,6 +3356,11 @@ const tagFolderPreview = computed(() => {
               </button>
             </div>
           </div>
+          <button
+            :class="['hot-toggle', { active: gallery.refreshOnView }]"
+            @click="gallery.refreshOnView = !gallery.refreshOnView"
+            title="开启后，点开 / 切换大图会联网刷新该图 score / 收藏数；离线时建议保持关闭"
+          >{{ gallery.refreshOnView ? '刷新：开' : '刷新：关' }}</button>
           <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
         </div>
       </div>
