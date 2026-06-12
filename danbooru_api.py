@@ -8,6 +8,13 @@ from my_utils import get_proxies_for_url
 COOKIES = "_danbooru2_session=dzlzD2gYvCdxOQfBzhHUpXyPWZdvd8kXWARK6n0KdX4VDPgzGj9sLOyHfTrMVFdFpaJLHAP3LfMiptyeQeiNGE1yNM8tY7IGQXtYV2u8aFKglH7khCVW8FVqurTZSNR25VdDBgoTBDzu9p/gTeTrazCCWzLRPlg7hglvs6F6Xmfd7VVN/Mb+HbA5y7HAykGYk9kXDOTbE5s/HTOvPZd3hT6t/WcVUL8VlEW0nv1aiJt2h0byWwJBgBDGIvPgTebOWaH+xlRuqaHPhU0BmTEP+MtffzowVs9EQBUaO6LCky5e+fYQmcxXl68ANSAF/DQmp1EqppEU/TDW86rPMwoLCJZmIfC+XaAe5Z+PnwLV+DeOrBVtWdYWa8klazul6KqGHX8W6Z7WYMOoB9LpDfCzVnyDXOqCA+w2wbM2GuAUI7uH3A3Nuc/Z73esVF/qhN3CyImze/KOleoApwSRSjMXeb6oSpks1MvFGvN2lADMAtibu3cEfpC0glc+0YieVxc2J8TTQFVAhhSb+PYzohNdDR533ubSH5fikI2D8hiZmR1WSl1gWTol2eDkohCDmi5S+tqGOE1em0ZzJ/lpdfBhoJcwMYMA7dWp--YLXy4wFzNb8Zce8g--/4vINxtQJS/LT/9J9QoqKA=="
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0"
 
+
+class TransientImageError(Exception):
+    """图片下载因瞬时网络错误（超时/连接/429/5xx）重试耗尽后抛出，
+    上层据此把该页记入「失败页」供用户一键重试；永久错误不会抛此异常。"""
+    pass
+
+
 # ---------------- SFW 开关 ----------------
 # 默认走 safebooru（无 R-18 内容）；前端通过 /api/set_safe_mode 切换。
 # 所有需要拼 URL 的地方都通过 get_host()/post_url() 读，确保切换即时生效。
@@ -275,7 +282,12 @@ def fetch_data_with_retry(post_id, retries=5, delay=3, timeout=10):
             sleep(delay)
     return None
 
-def download_image(url, folder, custom_print=print):
+def download_image(url, folder, custom_print=print, retries=3, delay=3, raise_on_transient=False):
+    """下载单张图片。瞬时错误（超时 / 连接错误 / 429 / 5xx）内部重试 retries 次。
+    重试耗尽后：raise_on_transient=True 抛 TransientImageError（供桌面端记入「失败页」可重试），
+    否则返回 None（独立 CLI 脚本的旧行为，不破坏现有调用）。
+    永久错误（404 / 410 / 403 / 451，帖子已删除或不可访问）直接返回 None（不重试、不计失败页）。
+    成功返回 filename。"""
     if not url: return None
     filename = url.split('/')[-1].split('?')[0] # 移除 URL 参数
     filepath = os.path.join(folder, filename)
@@ -284,17 +296,29 @@ def download_image(url, folder, custom_print=print):
         custom_print(f"文件已存在: {filename}")
         return filename
 
-    try:
-        custom_print(f"正在下载: {filename} ...")
-        r = requests.get(url, timeout=30, proxies=PROXIES, headers=HEADERS, impersonate="chrome120")
-        if r.status_code == 200:
-            with open(filepath, 'wb') as f:
-                f.write(r.content)
-            custom_print(f"下载完成: {filename}")
-            return filename
-        else:
-            custom_print(f"下载失败 (状态码 {r.status_code}): {url}")
-            return None
-    except Exception as e:
-        custom_print(f"下载出错: {e}")
-        return None
+    PERMANENT = {403, 404, 410, 451}
+    attempt = 0
+    while attempt < retries:
+        attempt += 1
+        try:
+            custom_print(f"正在下载: {filename} ...")
+            r = requests.get(url, timeout=30, proxies=PROXIES, headers=HEADERS, impersonate="chrome120")
+            if r.status_code == 200:
+                with open(filepath, 'wb') as f:
+                    f.write(r.content)
+                custom_print(f"下载完成: {filename}")
+                return filename
+            if r.status_code in PERMANENT:
+                custom_print(f"下载失败(已删除/不可用 {r.status_code}): {url}")
+                return None
+            # 其余状态码（429 / 5xx 等）视为瞬时，重试
+            custom_print(f"下载失败(状态码 {r.status_code})，第 {attempt}/{retries} 次: {url}")
+        except Exception as e:
+            custom_print(f"下载出错(网络)，第 {attempt}/{retries} 次: {e}")
+        if attempt < retries:
+            sleep(delay)
+    if raise_on_transient:
+        raise TransientImageError(f"图片下载重试 {retries} 次仍失败: {filename}")
+    custom_print(f"下载失败(网络，重试 {retries} 次仍失败): {filename}")
+    return None
+

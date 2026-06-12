@@ -237,6 +237,9 @@ const task = ref({
   hideSuccess: true,
   expandedLogIdx: -1
 });
+// 自动重试后仍失败的页：后端 /api/status 透出 failed_pages（[{folder, page}]）。
+// 下载结束后界面弹「⚠ N 页失败 · 重试」横幅，一键定向重跑这些页，无需翻日志。
+const failedPages = ref({ list: [], mode: '', tagQuery: '', retrying: false });
 const viewer = ref({
   open: false,
   index: 0,
@@ -1369,6 +1372,15 @@ async function syncStatus() {
     mergeBackendLogs(status.backendLogs);
     (status.new_logs || []).forEach(appendLog);
 
+    // 失败页：实时同步后端记录（不在重试发起后被旧 job 的残留覆盖——重试发起时已清空）
+    if (Array.isArray(status.failed_pages)) {
+      failedPages.value.list = status.failed_pages;
+      if (status.failed_pages.length) {
+        failedPages.value.mode = status.mode || failedPages.value.mode;
+        failedPages.value.tagQuery = status.tag_query || '';
+      }
+    }
+
     if (status.new_images?.length) {
       // 后端返回的 new_images 是模块全局 daily_viewer_data 的增量切片 —— tag 下载期间
       // 这份全局会被切换到 tag 文件夹，new_images 里也都是 tag 文件夹下的图。
@@ -1466,6 +1478,69 @@ async function startTask() {
   }
 }
 
+// 一键重试失败页：把 failedPages 按 folder 分组（用户场景单日期=单组），用对应 mode
+// 拼 payload 并带 pages 定向重跑。因后端 MAX_CONCURRENT=1，多组时先跑第一组，
+// 剩余组在该 job 结束后横幅会再次出现（仅 popular_range 多日期才会出现多组）。
+async function retryFailedPages() {
+  if (failedPages.value.retrying || task.value.isRunning) {
+    showToast('请等待当前任务结束后再重试', 'info');
+    return;
+  }
+  const list = failedPages.value.list || [];
+  if (!list.length) return;
+
+  // 按 folder 分组
+  const byFolder = new Map();
+  for (const it of list) {
+    const folder = it.folder || '';
+    if (!byFolder.has(folder)) byFolder.set(folder, []);
+    byFolder.get(folder).push(Number(it.page));
+  }
+  const [folder, pages] = byFolder.entries().next().value;
+  const uniqPages = [...new Set(pages)].sort((a, b) => a - b);
+  const mode = failedPages.value.mode || 'popular';
+
+  const payload = {
+    start_page: Math.min(...uniqPages),
+    end_page: Math.max(...uniqPages),
+    tags: form.value.tags || '',
+    mode,
+    pages: uniqPages,
+  };
+  // tag 文件夹以 "tag_" 开头；日期文件夹是 YYYY-MM-DD
+  const isTagFolder = typeof folder === 'string' && folder.startsWith('tag_');
+  if (mode === 'tags' || isTagFolder) {
+    payload.mode = 'tags';
+    payload.tag_query = failedPages.value.tagQuery || '';
+    if (!payload.tag_query.trim()) {
+      showToast('缺少 tag 查询串，无法重试该 tag 任务', 'error');
+      return;
+    }
+  } else if (mode === 'popular' || mode === 'popular_range') {
+    payload.mode = 'popular';
+    payload.target_date = folder;
+  } // rank: 无需 folder
+
+  failedPages.value.retrying = true;
+  try {
+    const result = await window.desktopAPI.crawler.start(payload);
+    appendLog(result.msg || `已发起重试 ${uniqPages.length} 页：${uniqPages.join(', ')}`);
+    showToast(`正在重试 ${uniqPages.length} 页`, 'info');
+    // 清空当前横幅；重试 job 会记录自己的 failed_pages，syncStatus 会重新填充
+    failedPages.value.list = [];
+    await syncStatus();
+  } catch (error) {
+    appendLog(`重试失败: ${error.message}`);
+    showToast('重试发起失败: ' + error.message, 'error');
+  } finally {
+    failedPages.value.retrying = false;
+  }
+}
+
+function dismissFailedPages() {
+  failedPages.value.list = [];
+}
+
 async function pauseTask() {
   try {
     const result = await window.desktopAPI.crawler.pause();
@@ -1506,6 +1581,13 @@ const queueRunning = ref(false);    // 整个队列是否在跑
 const queueAbort = ref(false);      // 停止队列的中断旗标
 const queueIndex = ref(-1);         // 当前正在跑的项下标（-1 = 没在跑）
 const taskCombos = ref(Array.isArray(habits.taskCombos) ? habits.taskCombos : []);
+// 多任务队列面板折叠态：默认折叠省左栏空间，记住用户偏好
+const queuePanelOpen = ref(habits.queuePanelOpen ?? false);
+function toggleQueuePanel() {
+  queuePanelOpen.value = !queuePanelOpen.value;
+  habits.queuePanelOpen = queuePanelOpen.value;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+}
 // 存为常用组合时的命名草稿（Electron 渲染进程不支持 window.prompt，改用应用内输入框）
 const comboDraft = ref({ open: false, name: '' });
 
@@ -3002,6 +3084,8 @@ const tagFolderPreview = computed(() => {
           title="从已收集的 ID 列表批量下载">按ID下载</button>
       </div>
 
+      <!-- 中间可滚动区：表单/按钮/失败横幅/多任务队列/状态/错误条都放这里，超高时内部滚动，永不溢出卡片 -->
+      <div class="control-scroll">
       <div class="field-grid pages-grid" v-if="form.mode !== 'download_ids'">
         <label class="page-field">
           <span>起始页</span>
@@ -3108,13 +3192,29 @@ const tagFolderPreview = computed(() => {
         <button class="ghost" @click="stopTask" :disabled="!task.isRunning">停止</button>
       </div>
 
-      <!-- 多任务队列：把多个下载任务排队顺序执行；可存为常用组合一键复用 -->
+      <!-- 失败页横幅：自动重试后仍失败的页，一键定向重跑，无需翻日志 -->
+      <div v-if="failedPages.list.length" class="failed-pages-banner">
+        <span class="fpb-text">⚠ 有 {{ failedPages.list.length }} 页抓取失败（已自动重试）：第 {{ failedPages.list.map(p => p.page).join(', ') }} 页</span>
+        <div class="fpb-actions">
+          <button class="fpb-retry" @click="retryFailedPages" :disabled="failedPages.retrying || task.isRunning">
+            {{ failedPages.retrying ? '重试中…' : '🔁 重试这些页' }}
+          </button>
+          <button class="fpb-dismiss" @click="dismissFailedPages" title="忽略">✕</button>
+        </div>
+      </div>
+
+      <!-- 多任务队列：把多个下载任务排队顺序执行；可存为常用组合一键复用。默认折叠，省左栏空间 -->
       <div class="task-queue-panel">
-        <div class="tq-header">
-          <span class="tq-title">🗂 多任务队列<span v-if="queueRunning" class="tq-running-badge">运行中 {{ queueIndex + 1 }}/{{ taskQueue.length }}</span></span>
-          <button class="ghost tq-add" @click="addCurrentToQueue" :disabled="queueRunning" title="把上方当前配置作为一个任务加入队列">＋ 加入队列</button>
+        <div class="tq-header" @click="toggleQueuePanel" title="点击展开/收起多任务队列">
+          <span class="tq-title">
+            <span class="tq-chevron" :class="{ open: queuePanelOpen }">▸</span>
+            🗂 多任务队列<span v-if="queueRunning" class="tq-running-badge">运行中 {{ queueIndex + 1 }}/{{ taskQueue.length }}</span>
+            <span v-else-if="!queuePanelOpen && (taskQueue.length || taskCombos.length)" class="tq-count-badge">{{ taskQueue.length }}{{ taskCombos.length ? ` · ${taskCombos.length}组合` : '' }}</span>
+          </span>
+          <button class="ghost tq-add" @click.stop="addCurrentToQueue" :disabled="queueRunning" title="把上方当前配置作为一个任务加入队列">＋ 加入队列</button>
         </div>
 
+        <div v-show="queuePanelOpen">
         <div v-if="taskQueue.length" class="tq-list">
           <div
             v-for="(it, i) in taskQueue"
@@ -3165,6 +3265,8 @@ const tagFolderPreview = computed(() => {
             <button class="tq-mini tq-del" @click="deleteCombo(c.name)" :disabled="queueRunning" title="删除该组合">×</button>
           </span>
         </div>
+        </div>
+        <!-- /v-show queuePanelOpen -->
       </div>
 
       <div class="status-pills">
@@ -3185,6 +3287,8 @@ const tagFolderPreview = computed(() => {
         </div>
         <pre v-if="task.backendErrorExpanded" class="error-banner-body">{{ task.backendError }}</pre>
       </div>
+      </div>
+      <!-- /control-scroll -->
 
       <div class="modern-log-wrapper" :class="{ 'is-maximized': task.maximized }">
         <div class="modern-log-header" @click="toggleLogHeader">
@@ -4316,6 +4420,27 @@ const tagFolderPreview = computed(() => {
         左栏只剩控件高度，导致 absolute 的 inset:0 也只铺这点高度） */
   height: calc(100vh - 32px);
   max-height: calc(100vh - 32px);
+  /* 内容超高时不外溢到圆角卡片外：中段 .control-scroll 内部滚动消化；
+     放大态日志用 absolute inset:0 仍正常（overflow:hidden 不影响子级绝对定位铺满） */
+  overflow: hidden;
+}
+
+/* 三段式左栏：.panel-head + .mode-selector 固定在顶部，.modern-log-wrapper 固定在底部，
+   中间所有表单/按钮/失败横幅/多任务队列/状态/错误条都进 .control-scroll，超高时内部滚动 */
+.control-panel > .panel-head,
+.control-panel > .mode-selector,
+.control-panel > .modern-log-wrapper {
+  flex: 0 0 auto;
+}
+.control-scroll {
+  flex: 1 1 auto;
+  min-height: 0;          /* flex 子项可滚动的关键，否则会撑破父级 */
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  margin-top: 10px;
+  padding-right: 4px;     /* 给滚动条留位，避免压住内容 */
 }
 
 /* 右侧本地图库栏：同样视口高度。
@@ -6486,11 +6611,88 @@ const tagFolderPreview = computed(() => {
   flex-direction: column;
   gap: 8px;
 }
+
+/* 失败页横幅 */
+.failed-pages-banner {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #e0a23d;
+  border-left: 4px solid #e0772d;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #fff4e3, #ffe8cc);
+  color: #6a3a08;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.failed-pages-banner .fpb-text {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.5;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.failed-pages-banner .fpb-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.failed-pages-banner .fpb-retry {
+  padding: 6px 14px;
+  border: none;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #ff8a3d, #e05a17);
+  color: #fff;
+  font-weight: 700;
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.failed-pages-banner .fpb-retry:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.failed-pages-banner .fpb-retry:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.failed-pages-banner .fpb-dismiss {
+  padding: 4px 8px;
+  border: 1px solid rgba(106, 58, 8, 0.35);
+  border-radius: 6px;
+  background: transparent;
+  color: #6a3a08;
+  cursor: pointer;
+  font-size: 12px;
+}
+.failed-pages-banner .fpb-dismiss:hover {
+  background: rgba(106, 58, 8, 0.1);
+}
 .tq-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  cursor: pointer;            /* 整行点击折叠/展开 */
+  user-select: none;
+}
+.tq-chevron {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--muted);
+  transition: transform 0.18s ease;
+}
+.tq-chevron.open {
+  transform: rotate(90deg);
+}
+.tq-count-badge {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--muted);
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 999px;
+  padding: 1px 8px;
 }
 .tq-title {
   font-weight: 700;

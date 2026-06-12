@@ -235,10 +235,22 @@ class DownloadJob:
     filter_tags: list = field(default_factory=list)
     thread: object = None
     started_at: object = None
+    tag_query: str = ""                                   # tags 模式：供「重试失败页」重建请求
+    failed_pages: list = field(default_factory=list)      # [{"folder":..., "page":...}]，自动重试后仍失败的页
 
     def __post_init__(self):
         if not self.play_event.is_set():
             self.play_event.set()
+
+    def record_failed_page(self, page):
+        """记录一个自动重试后仍失败的页（按 folder+page 去重），供前端一键重试。"""
+        entry = {"folder": self.target_folder, "page": int(page)}
+        with self.viewer_lock:
+            for e in self.failed_pages:
+                if e.get("folder") == entry["folder"] and e.get("page") == entry["page"]:
+                    return
+            self.failed_pages.append(entry)
+
 
     @property
     def is_paused(self):
@@ -657,6 +669,7 @@ class StartRequest(BaseModel):
     end_date: str = ""     # popular_range
     ids: list = []         # download_ids 模式可选：内联 IDs；非空则覆盖目标日期的 ids_data.json
     tag_query: str = ""    # tags 模式：Danbooru 多 tag 查询串，如 "hatsune_miku rating:safe"
+    pages: list = []       # 定向重试：非空时只抓这些页码（覆盖 start_page~end_page 区间）
 
 class OpenLocalRequest(BaseModel):
     local_path: str
@@ -719,6 +732,26 @@ class ImageFavoriteRemoveRequest(BaseModel):
 # 3. 核心爬虫逻辑：所有 grabber 都按 job 跑，不再读模块全局
 # ==========================================
 
+def _fetch_page_with_retry(fetch_fn, job, label, attempts=3, base_delay=3):
+    """对「页面列表抓取」做有限次自动重试，消化偶发网络波动（curl 28 超时等）。
+    重试间隔可被暂停/停止打断。成功返回 fetch_fn() 的结果；attempts 次后仍失败返回 None。"""
+    for i in range(1, attempts + 1):
+        if not job.is_running:
+            return None
+        try:
+            return fetch_fn()
+        except Exception as e:
+            job.append_log(f"{label} 第 {i}/{attempts} 次失败: {e}")
+            if i < attempts:
+                # 可中断的退避等待（复用 popular_range 的 sleep + is_running 模式）
+                slept = 0
+                while slept < base_delay * i and job.is_running:
+                    job.play_event.wait()
+                    sleep(1)
+                    slept += 1
+    return None
+
+
 def _process_post(post, job, do_download=True):
     """处理单个 post：过滤、提取画师、可选下载。返回 (ids, artist, saved_filename) 或 None。
     log.json 走全局 log_store；下载目录由 job.save_dir 决定。"""
@@ -757,7 +790,12 @@ def _process_post(post, job, do_download=True):
         if not job.is_running:
             return None
 
-        saved_filename = danbooru_api.download_image(image_url, job.save_dir, job.append_log)
+        try:
+            saved_filename = danbooru_api.download_image(image_url, job.save_dir, job.append_log, raise_on_transient=True)
+        except danbooru_api.TransientImageError as e:
+            # 瞬时网络失败（已内部重试耗尽）：返回哨兵，让 grabber 把本页记入「失败页」供重试
+            job.append_log(f"图片下载失败(网络)，ID {ids} 将计入失败页: {e}")
+            return "__TRANSIENT__"
         if saved_filename:
             log_store.record(ids, image_url)
             job.write_snapshot()
@@ -796,20 +834,27 @@ def grabber_rank(job, page_num):
     if not job.is_running:
         return [], page_need_update
 
-    try:
-        job.append_log(f"[Rank] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
-        posts = danbooru_api.get_posts_by_rank(page_num)
-    except Exception as e:
-        job.append_log(f"获取页面失败: {e}")
+    job.append_log(f"[Rank] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
+    posts = _fetch_page_with_retry(
+        lambda: danbooru_api.get_posts_by_rank(page_num), job, f"[Rank] 第 {page_num} 页"
+    )
+    if posts is None:
+        job.append_log(f"[Rank] 第 {page_num} 页获取失败（已自动重试），已记入失败页可手动重试")
+        job.record_failed_page(page_num)
         job.write_snapshot()
         return [], {"1": [], "2": []}
 
     page_success = page_skipped = page_failed = 0
+    page_had_transient = False
     for post in posts:
         if not job.is_running:
             break
         job.play_event.wait()
         result = _process_post(post, job, do_download=True)
+        if result == "__TRANSIENT__":
+            page_failed += 1
+            page_had_transient = True
+            continue
         if result is None:
             page_skipped += 1
             continue
@@ -821,6 +866,8 @@ def grabber_rank(job, page_num):
         _update_artist_stats(job, artist, page_need_update, new_hot_artists)
         job.append_viewer_entry(ids, artist, saved_filename, post)
 
+    if page_had_transient:
+        job.record_failed_page(page_num)
     job.append_log(
         f"[Rank] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
@@ -839,19 +886,27 @@ def grabber_popular(job, page_num, target_date):
     if not job.is_running:
         return [], page_need_update
 
-    try:
-        job.append_log(f"[Popular] 正在获取 {target_date} 第 {page_num} 页... (host={danbooru_api.get_host()})")
-        posts = danbooru_api.get_popular_posts(target_date, page_num)
-    except Exception as e:
-        job.append_log(f"获取页面失败: {e}")
+    job.append_log(f"[Popular] 正在获取 {target_date} 第 {page_num} 页... (host={danbooru_api.get_host()})")
+    posts = _fetch_page_with_retry(
+        lambda: danbooru_api.get_popular_posts(target_date, page_num),
+        job, f"[Popular] {target_date} 第 {page_num} 页"
+    )
+    if posts is None:
+        job.append_log(f"[Popular] {target_date} 第 {page_num} 页获取失败（已自动重试），已记入失败页可手动重试")
+        job.record_failed_page(page_num)
         return [], {"1": [], "2": []}
 
     page_success = page_skipped = page_failed = 0
+    page_had_transient = False
     for post in posts:
         if not job.is_running:
             break
         job.play_event.wait()
         result = _process_post(post, job, do_download=True)
+        if result == "__TRANSIENT__":
+            page_failed += 1
+            page_had_transient = True
+            continue
         if result is None:
             page_skipped += 1
             continue
@@ -863,6 +918,8 @@ def grabber_popular(job, page_num, target_date):
         _update_artist_stats(job, artist, page_need_update, new_hot_artists)
         job.append_viewer_entry(ids, artist, saved_filename, post)
 
+    if page_had_transient:
+        job.record_failed_page(page_num)
     job.append_log(
         f"[Popular] {target_date} 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
@@ -881,19 +938,27 @@ def grabber_tags(job, page_num, tag_query):
     if not job.is_running:
         return [], page_need_update
 
-    try:
-        job.append_log(f"[Tags] 正在获取 [{tag_query}] 第 {page_num} 页... (host={danbooru_api.get_host()})")
-        posts = danbooru_api.get_posts_by_tags(tag_query, page_num)
-    except Exception as e:
-        job.append_log(f"获取页面失败: {e}")
+    job.append_log(f"[Tags] 正在获取 [{tag_query}] 第 {page_num} 页... (host={danbooru_api.get_host()})")
+    posts = _fetch_page_with_retry(
+        lambda: danbooru_api.get_posts_by_tags(tag_query, page_num),
+        job, f"[Tags] [{tag_query}] 第 {page_num} 页"
+    )
+    if posts is None:
+        job.append_log(f"[Tags] [{tag_query}] 第 {page_num} 页获取失败（已自动重试），已记入失败页可手动重试")
+        job.record_failed_page(page_num)
         return [], {"1": [], "2": []}
 
     page_success = page_skipped = page_failed = 0
+    page_had_transient = False
     for post in posts:
         if not job.is_running:
             break
         job.play_event.wait()
         result = _process_post(post, job, do_download=True)
+        if result == "__TRANSIENT__":
+            page_failed += 1
+            page_had_transient = True
+            continue
         if result is None:
             page_skipped += 1
             continue
@@ -905,6 +970,8 @@ def grabber_tags(job, page_num, tag_query):
         _update_artist_stats(job, artist, page_need_update, new_hot_artists)
         job.append_viewer_entry(ids, artist, saved_filename, post)
 
+    if page_had_transient:
+        job.record_failed_page(page_num)
     job.append_log(
         f"[Tags] [{tag_query}] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
@@ -923,11 +990,12 @@ def grabber_collect_ids(job, page_num):
     if not job.is_running:
         return [], page_need_update
 
-    try:
-        job.append_log(f"[CollectIDs] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
-        posts = danbooru_api.get_posts_by_rank(page_num)
-    except Exception as e:
-        job.append_log(f"获取页面失败: {e}")
+    job.append_log(f"[CollectIDs] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
+    posts = _fetch_page_with_retry(
+        lambda: danbooru_api.get_posts_by_rank(page_num), job, f"[CollectIDs] 第 {page_num} 页"
+    )
+    if posts is None:
+        job.append_log(f"[CollectIDs] 第 {page_num} 页获取失败（已自动重试），跳过")
         return [], {"1": [], "2": []}
 
     for post in posts:
@@ -1004,7 +1072,11 @@ def task_download_ids(job, inline_ids=None):
         if not job.is_running:
             break
 
-        saved_filename = danbooru_api.download_image(image_url, job.save_dir, job.append_log)
+        try:
+            saved_filename = danbooru_api.download_image(image_url, job.save_dir, job.append_log, raise_on_transient=True)
+        except danbooru_api.TransientImageError as e:
+            job.append_log(f"ID {pid_str} 下载失败(网络)，跳过: {e}")
+            continue
         if not saved_filename:
             job.append_log(f"ID {pid_str} 下载失败，跳过")
             continue
@@ -1031,16 +1103,21 @@ def task_download_ids(job, inline_ids=None):
     job.append_log(f"[DownloadIDs] 完成，成功下载 {success_count} 张图片。")
 
 
-def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date, inline_ids, tag_query):
-    """单个 job 的执行入口（在 job.thread 里跑）。根据 mode 分发到各 grabber。"""
+def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date, inline_ids, tag_query, pages=None):
+    """单个 job 的执行入口（在 job.thread 里跑）。根据 mode 分发到各 grabber。
+    pages 非空时为「定向重试模式」：只抓这些页码，忽略 start_page~end_page 区间。"""
+    pages = pages or []
+
+    def _page_seq(s, e):
+        return list(pages) if pages else list(range(s, e + 1))
+
     try:
         if mode == "download_ids":
             task_download_ids(job, inline_ids)
         elif mode == "tags":
             output = job.db.load_hot_drawer()
             nu_sets = job.db.load_need_update()
-            n = start_page
-            while n <= end_page:
+            for n in _page_seq(start_page, end_page):
                 if not job.is_running:
                     job.append_log("任务已被强制终止。")
                     break
@@ -1052,7 +1129,6 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
                     nu_sets[k].update(n_u_dict[k])
                 job.db.save_hot_drawer(list(set(output)))
                 job.db.save_need_update(nu_sets)
-                n += 1
             if job.is_running:
                 job.clear_snapshot()
         elif mode == "popular_range":
@@ -1086,9 +1162,8 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
 
                 output = job.db.load_hot_drawer()
                 nu_sets = job.db.load_need_update()
-                n = start_page
 
-                while n <= end_page:
+                for n in _page_seq(start_page, end_page):
                     if not job.is_running:
                         break
                     job.play_event.wait()
@@ -1099,7 +1174,6 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
                         nu_sets[k].update(n_u_dict[k])
                     job.db.save_hot_drawer(list(set(output)))
                     job.db.save_need_update(nu_sets)
-                    n += 1
 
                 if job.is_running:
                     job.clear_snapshot()
@@ -1126,12 +1200,14 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
             output = job.db.load_hot_drawer()
             nu_sets = job.db.load_need_update()
 
-            n = start_page
             mode_label = {"rank": "Rank", "popular": "Popular", "collect_ids": "CollectIDs"}.get(mode, mode)
-            job.append_log(f"开始抓取 [{mode_label}]，从第 {start_page} 页到第 {end_page} 页")
+            if pages:
+                job.append_log(f"开始抓取 [{mode_label}]，定向重试页码: {pages}")
+            else:
+                job.append_log(f"开始抓取 [{mode_label}]，从第 {start_page} 页到第 {end_page} 页")
             job.append_log(f"当前过滤 Tags: {job.filter_tags}")
 
-            while n <= end_page:
+            for n in _page_seq(start_page, end_page):
                 if not job.is_running:
                     job.append_log("任务已被强制终止。")
                     break
@@ -1165,7 +1241,6 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
                     job.db.save_hot_drawer(list(set(output)))
                     job.db.save_need_update(nu_sets)
 
-                n += 1
     except Exception as e:
         job.write_snapshot()
         job.append_log(f"抓取任务异常中断，已写入临时快照: {e}")
@@ -1263,6 +1338,7 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
         label = f"{req.mode} · {target_folder}"
 
     job = _make_job(target_folder, req.mode, filter_tags, label)
+    job.tag_query = req.tag_query or ""
     job.is_running = True
     job.play_event.set()
     jobs.add(job)
@@ -1270,7 +1346,8 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
     job.thread = threading.Thread(
         target=_run_job,
         args=(job, req.start_page, req.end_page, req.mode, req.target_date,
-              req.start_date, req.end_date, req.ids, req.tag_query),
+              req.start_date, req.end_date, req.ids, req.tag_query,
+              [int(p) for p in (req.pages or [])]),
         daemon=True,
     )
     job.thread.start()
@@ -1337,6 +1414,7 @@ def get_status(job_id: str = ""):
             "target_folder": "",
             "new_logs": [],
             "new_images": [],
+            "failed_pages": [],
             "jobs": [],
         }
 
@@ -1358,6 +1436,10 @@ def get_status(job_id: str = ""):
         "target_folder": job.target_folder,
         "new_logs": logs,
         "new_images": new_images,
+        # 自动重试后仍失败的页（[{folder, page}]），不 drain，保留到 job 被清；前端据此弹「重试失败页」
+        "failed_pages": list(job.failed_pages),
+        "mode": job.mode,
+        "tag_query": job.tag_query,
         # 给前端将来扩展 "多任务 UI" 用的列表；目前只有 1 个（MAX_CONCURRENT=1）
         "jobs": [
             {
