@@ -113,6 +113,8 @@ echo     OK
 REM ---------- [5/6] 装前端依赖 + 编译 ----------
 echo [5/6] 安装前端依赖并编译 ...
 pushd desktop-app
+REM Electron 本体二进制默认从 GitHub 下载，国内常失败；指向国内镜像（仅本次安装生效，不污染系统环境）
+set "ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/"
 if not exist "node_modules" (
     call npm install
     if errorlevel 1 (

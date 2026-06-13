@@ -207,12 +207,23 @@ ffmpeg -version
 Error: Electron failed to install correctly, please delete node_modules/electron and try installing again
 ```
 
-本仓库已在 `desktop-app/.npmrc` 里把下载源指向国内镜像（npmmirror），正常情况下直接重装即可：
+`setup.bat` / `setup.sh` 已经在跑 `npm install` 前把下载源指向国内镜像（npmmirror），走一键脚本通常不会遇到。手动 `npm install` 的话，自己设一下镜像环境变量再装——**`set` / `export` 只在当前终端有效，务必和 `npm install` 在同一个窗口执行**：
+
+**Windows（cmd）：**
+
+```cmd
+cd desktop-app
+rmdir /s /q node_modules\electron
+set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
+npm install
+```
+
+**macOS / Linux：**
 
 ```bash
 cd desktop-app
-rmdir /s /q node_modules\electron      # Windows
-# rm -rf node_modules/electron         # macOS / Linux
+rm -rf node_modules/electron
+export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
 npm install
 ```
 
@@ -225,7 +236,7 @@ rmdir /s /q "%LOCALAPPDATA%\electron\Cache"
 rm -rf ~/.cache/electron ~/Library/Caches/electron
 ```
 
-想用别的镜像或走默认源，改 `desktop-app/.npmrc` 里的 `electron_mirror`，或设环境变量 `ELECTRON_MIRROR` 覆盖。
+想用别的镜像或走默认源，改上面命令里的 `ELECTRON_MIRROR` 值即可（不设这个变量就是默认从 GitHub 下载）。
 
 ---
 

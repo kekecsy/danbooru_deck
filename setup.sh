@@ -90,6 +90,8 @@ echo "    OK"
 # ---------- [5/6] 装前端依赖 + 编译 ----------
 echo "[5/6] 安装前端依赖并编译 ..."
 cd desktop-app
+# Electron 本体二进制默认从 GitHub 下载，国内常失败；指向国内镜像（仅本脚本进程生效，不污染用户环境）
+export ELECTRON_MIRROR="https://npmmirror.com/mirrors/electron/"
 if [ ! -d "node_modules" ]; then
     npm install || { echo "[X] npm install 失败。"; cd "$SCRIPT_DIR"; exit 1; }
 fi
