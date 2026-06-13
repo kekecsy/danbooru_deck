@@ -199,6 +199,36 @@ ffmpeg -version
 
 ---
 
+## Electron 装不上 / 报 "Electron failed to install correctly"？
+
+`npm install` 会在 postinstall 阶段从 GitHub 下载约 285MB 的 Electron 本体，国内网络经常失败，导致 `npm run dev` / `start.bat` 报：
+
+```text
+Error: Electron failed to install correctly, please delete node_modules/electron and try installing again
+```
+
+本仓库已在 `desktop-app/.npmrc` 里把下载源指向国内镜像（npmmirror），正常情况下直接重装即可：
+
+```bash
+cd desktop-app
+rmdir /s /q node_modules\electron      # Windows
+# rm -rf node_modules/electron         # macOS / Linux
+npm install
+```
+
+仍失败的话，多半是 `@electron/get` 缓存了半截的坏文件，清掉再装：
+
+```bash
+# Windows
+rmdir /s /q "%LOCALAPPDATA%\electron\Cache"
+# macOS / Linux
+rm -rf ~/.cache/electron ~/Library/Caches/electron
+```
+
+想用别的镜像或走默认源，改 `desktop-app/.npmrc` 里的 `electron_mirror`，或设环境变量 `ELECTRON_MIRROR` 覆盖。
+
+---
+
 ## 项目结构
 
 ```text
