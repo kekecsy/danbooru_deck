@@ -4,11 +4,9 @@ import os
 import re
 import time
 from requests.utils import get_environ_proxies
-import exiftool
 import sys
 import subprocess
 import tempfile
-import exiftool
 
 def get_proxies_for_url(url):
     proxies = get_environ_proxies(url)
@@ -161,20 +159,6 @@ def clear_runtime_snapshot(runtime_snapshot_path):
         os.remove(runtime_snapshot_path)
     except PermissionError:
         pass
-
-def add_extra_info_to_img(img_path, extra_info):
-    exiftool_path = r"./exiftool/exiftool-13.54_64/exiftool(-k).exe"
-    with exiftool.ExifTool(exiftool_path) as et:
-        # 构建参数列表，对应 exiftool -Artist="作者名" -Copyright="版权信息" -overwrite_original 图片路径
-        args = [
-            f"-Artist={extra_info.get('artist')}",
-            f"-Copyright={extra_info.get('urls')}",
-            "-overwrite_original",
-            img_path
-        ]
-        # 执行命令
-        et.execute(*args)
-        print(f"成功为 {img_path} 添加元数据")
 
 
 if __name__ == "__main__":
