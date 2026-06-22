@@ -7963,9 +7963,9 @@
   },
   "kayoko_(dress)_(blue_archive)": {
     "has_chinese": true,
-    "chinese_name": "鬼方佳代子（礼服）",
+    "chinese_name": "鬼方佳世衣（礼服）",
     "source_hint": "blue-archive",
-    "translated_description_zh": "《蔚蓝档案》中鬼方佳代子的晚礼服换装造型。"
+    "translated_description_zh": "《蔚蓝档案》中鬼方佳世的晚礼服换装造型。"
   },
   "shoebill_(kemono_friends)": {
     "has_chinese": true,
@@ -21828,10 +21828,10 @@
     "translated_description_zh": "可玩角色，出自《胜利女神：NIKKE》。是‘最畅销书’小队成员，与幻影（Phantom）和奥卡娜（Arcana）同队。方舟图书馆的管理员，与幻影一起工作。由于她长期的妄想和忧郁性格，她与他人保持距离，但内心深处渴望友谊和爱情，梦想着终于能找到它们的那一天"
   },
   "nagusa_(blue_archive)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "blue archive",
-    "translated_description_zh": "蔚蓝档案中的学生。百花繚乱冲突解决委员会副会长。全名为 Goryou Nagusa。配音演员为 Sakura Kaoru。外观：默认姿势，泳装版本。外部链接：Blue Archive Wiki 条目"
+    "has_chinese": true,
+    "chinese_name": "御陵名草",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "来自《蔚蓝档案》（Blue Archive）的学生角色，所属学园为“百花缭乱纠纷调解委员会”，担任副委员长。其全名为御陵名草（Goryou Nagusa）。该角色存在常服与泳装等不同形象版本，由声优佐仓薰（Sakura Kaoru）配音。"
   },
   "minegumo_(kancolle)": {
     "has_chinese": true,
@@ -77320,5 +77320,11 @@
     "chinese_name": "",
     "source_hint": "virtual_youtuber",
     "translated_description_zh": "一名独立虚拟艺人（VTuber），曾属于VTuber事务所Pixellink。她设定上是一名身为女巫的浣熊娘，留着外侧黑色、内侧粉色的长发，拥有一双黄色的眼睛。默认服装为黑色无袖连衣裙外搭粉色夹克，配白袜与黑鞋。"
+  },
+  "norma_hollowell": {
+    "has_chinese": true,
+    "chinese_name": "诺尔玛·霍洛韦尔",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "来自《绝区零》（Zenless Zone Zero）的角色。由日语声优伊住井风香（Izumi Fuuka）与英语声优 Madeline Dorroh 配音。该角色的具体外观信息在原文中未完整给出。"
   }
 }

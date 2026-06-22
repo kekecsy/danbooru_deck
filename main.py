@@ -42,6 +42,7 @@ from my_utils import (
     tag_folder_display,
 )
 import danbooru_api
+import gelbooru_api
 from danbooru_data import DanbooruData
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -59,6 +60,106 @@ ARTIST_FAVORITES_JSON = BASE_DIR / "artist_favorites.json"
 CHARACTER_FAVORITES_JSON = BASE_DIR / "character_favorites.json"
 # 图片收藏存盘文件，结构 {"date/filename": {date, filename, artist, ...}}
 IMAGE_FAVORITES_JSON = BASE_DIR / "image_favorites.json"
+LIBRARY_ROOTS_JSON = BASE_DIR / "library_roots.json"
+
+
+def _safe_library_id(raw: str, fallback: str) -> str:
+    value = re.sub(r"[^a-zA-Z0-9_-]+", "_", (raw or "").strip()).strip("_")
+    return value or fallback
+
+
+def _load_library_roots_config():
+    """Return ordered gallery roots. Missing config keeps the historical ./hot_pic behavior.
+
+    library_roots.json accepts either:
+      ["D:/pics/hot_pic", {"id": "archive", "label": "Archive", "path": "E:/hot_pic"}]
+    or {"roots": [...]}.
+    """
+    default_path = (BASE_DIR / "hot_pic").resolve()
+    roots = [{
+        "id": "default",
+        "label": "hot_pic",
+        "path": default_path,
+        "is_default": True,
+    }]
+    if not LIBRARY_ROOTS_JSON.exists():
+        return roots
+    try:
+        raw = load_json(str(LIBRARY_ROOTS_JSON), [])
+    except Exception:
+        raw = []
+    entries = raw.get("roots", []) if isinstance(raw, dict) else raw
+    if not isinstance(entries, list):
+        return roots
+
+    seen_paths = {str(default_path).lower()}
+    seen_ids = {"default"}
+    for idx, entry in enumerate(entries):
+        if isinstance(entry, str):
+            raw_path = entry
+            raw_id = ""
+            label = ""
+        elif isinstance(entry, dict):
+            raw_path = entry.get("path") or entry.get("root") or ""
+            raw_id = entry.get("id") or ""
+            label = entry.get("label") or entry.get("name") or ""
+        else:
+            continue
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = (BASE_DIR / path).resolve()
+        else:
+            path = path.resolve()
+        path_key = str(path).lower()
+        if path_key in seen_paths:
+            continue
+        lib_id = _safe_library_id(raw_id, f"lib{idx + 1}")
+        base_id = lib_id
+        suffix = 2
+        while lib_id in seen_ids:
+            lib_id = f"{base_id}_{suffix}"
+            suffix += 1
+        seen_paths.add(path_key)
+        seen_ids.add(lib_id)
+        roots.append({
+            "id": lib_id,
+            "label": label or path.name or lib_id,
+            "path": path,
+            "is_default": False,
+        })
+    return roots
+
+
+def get_library_roots():
+    return _load_library_roots_config()
+
+
+def get_library_roots_payload():
+    return [
+        {
+            "id": root["id"],
+            "label": root["label"],
+            "path": str(root["path"]),
+            "is_default": root.get("is_default", False),
+        }
+        for root in get_library_roots()
+    ]
+
+
+def is_path_in_library_roots(target_path: Path) -> bool:
+    try:
+        resolved = target_path.resolve()
+    except Exception:
+        return False
+    for root in get_library_roots():
+        try:
+            resolved.relative_to(root["path"].resolve())
+            return True
+        except ValueError:
+            continue
+    return False
 
 # ==========================================
 # 1. 共享资源服务（log.json / artist_stats.json 跨任务共享）
@@ -236,6 +337,7 @@ class DownloadJob:
     thread: object = None
     started_at: object = None
     tag_query: str = ""                                   # tags 模式：供「重试失败页」重建请求
+    tag_source: str = "danbooru"                          # tags 模式：danbooru / gelbooru
     failed_pages: list = field(default_factory=list)      # [{"folder":..., "page":...}]，自动重试后仍失败的页
 
     def __post_init__(self):
@@ -271,8 +373,18 @@ class DownloadJob:
         if not saved_filename:
             return
         artist_for_record = artist or "未知"
-        post_url = danbooru_api.post_url(ids)
+        post_url = post.get("post_url") or danbooru_api.post_url(ids)
         web_url = f"/images/{self.target_folder}/{saved_filename}"
+        tags_full = {
+            "tag_string_general": post.get('tag_string_general', ''),
+            "tag_string_character": post.get('tag_string_character', ''),
+            "tag_string_copyright": post.get('tag_string_copyright', ''),
+            "tag_string_artist": post.get('tag_string_artist', '')
+        }
+        for extra_key in ("tag_string_meta", "tag_string", "rating", "md5"):
+            value = post.get(extra_key)
+            if value:
+                tags_full[extra_key] = value
         with self.viewer_lock:
             for existing in self.viewer_data:
                 if existing.get("post_url") == post_url:
@@ -287,12 +399,7 @@ class DownloadJob:
                 "web_url": web_url,
                 "score": post.get('score', 0) or 0,
                 "fav_count": post.get('fav_count', 0) or 0,
-                "tags": {
-                    "tag_string_general": post.get('tag_string_general', ''),
-                    "tag_string_character": post.get('tag_string_character', ''),
-                    "tag_string_copyright": post.get('tag_string_copyright', ''),
-                    "tag_string_artist": post.get('tag_string_artist', '')
-                }
+                "tags": tags_full
             })
             self._write_snapshot_locked()
 
@@ -400,7 +507,7 @@ def append_log(msg):
             job.logs = job.logs[-500:]
 
 
-def _make_job(target_folder, mode, filter_tags, label=None):
+def _make_job(target_folder, mode, filter_tags, label=None, tag_source="danbooru"):
     db = DanbooruData(target_folder)
     viewer_data = db.load_viewer_data()
     job = DownloadJob(
@@ -413,6 +520,7 @@ def _make_job(target_folder, mode, filter_tags, label=None):
         db=db,
         viewer_data=viewer_data,
         filter_tags=list(filter_tags or []),
+        tag_source=tag_source,
         started_at=datetime.datetime.now(),
     )
     job.sent_image_count = len(viewer_data)
@@ -421,31 +529,38 @@ def _make_job(target_folder, mode, filter_tags, label=None):
 
 def get_available_date_folders():
     date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-    folders = []
-    for item in Path(base_download_dir).iterdir():
-        if not item.is_dir() or not date_pattern.match(item.name):
+    folders = set()
+    for root in get_library_roots():
+        base = root["path"]
+        if not base.exists():
             continue
-        try:
-            datetime.datetime.strptime(item.name, "%Y-%m-%d")
-        except ValueError:
-            continue
-        folders.append(item.name)
+        for item in base.iterdir():
+            if not item.is_dir() or not date_pattern.match(item.name):
+                continue
+            try:
+                datetime.datetime.strptime(item.name, "%Y-%m-%d")
+            except ValueError:
+                continue
+            folders.add(item.name)
     return sorted(folders, reverse=True)
 
 def get_available_tag_folders():
-    """扫描 hot_pic/ 下所有以 tag_ 开头的文件夹，返回 [{"folder": ..., "display": ...}]。
-    用于和日期文件夹并行：日期=按时间归档，tag=按主题归档，二者共用同一份 log.json。"""
-    folders = []
-    base = Path(base_download_dir)
-    if not base.exists():
-        return folders
-    for item in base.iterdir():
-        if not item.is_dir() or not is_tag_folder(item.name):
+    """扫描所有图库根目录下以 tag_ 开头的文件夹，按 folder 虚拟合并。"""
+    by_folder = {}
+    for root in get_library_roots():
+        base = root["path"]
+        if not base.exists():
             continue
-        folders.append({
-            "folder": item.name,
-            "display": tag_folder_display(item.name),
-        })
+        for item in base.iterdir():
+            if not item.is_dir() or not is_tag_folder(item.name):
+                continue
+            rec = by_folder.setdefault(item.name, {
+                "folder": item.name,
+                "display": tag_folder_display(item.name),
+                "source_count": 0,
+            })
+            rec["source_count"] += 1
+    folders = list(by_folder.values())
     folders.sort(key=lambda x: x["folder"].lower())
     return folders
 
@@ -458,8 +573,7 @@ def resolve_selected_date(requested_date=None):
     if requested_date:
         # 1) tag 文件夹直接放行（只要磁盘上有）
         if is_tag_folder(requested_date):
-            tag_dir = Path(base_download_dir) / requested_date
-            if tag_dir.exists() and tag_dir.is_dir():
+            if any((root["path"] / requested_date).is_dir() for root in get_library_roots()):
                 return requested_date, available_dates
         # 2) 日期：照旧校验 + 命中已有
         try:
@@ -479,27 +593,47 @@ def resolve_selected_date(requested_date=None):
 def build_local_image_library(selected_date=None):
     library = []
     resolved_date, _ = resolve_selected_date(selected_date)
-    current_day_dir = Path(base_download_dir) / resolved_date
-    viewer_files = [current_day_dir / "viewer_data.json"]
     known_paths = set()
-    seen_filenames = set()
+    seen_identity = set()
 
-    for viewer_file in viewer_files:
+    for root in get_library_roots():
+        current_day_dir = root["path"] / resolved_date
+        viewer_file = current_day_dir / "viewer_data.json"
+        if viewer_file.exists():
+            day_folder = viewer_file.parent.name
+            root_id = root["id"]
+            root_label = root["label"]
+            root_path = str(root["path"])
+        else:
+            day_folder = resolved_date
+            root_id = root["id"]
+            root_label = root["label"]
+            root_path = str(root["path"])
         if not viewer_file.exists():
-            continue
-        day_folder = viewer_file.parent.name
-        items = dedup_viewer_data(load_json(str(viewer_file), []))
+            items = []
+        else:
+            items = dedup_viewer_data(load_json(str(viewer_file), []))
         for item in reversed(items):
             filename = item.get("filename")
             web_url = item.get("web_url")
             if not filename:
                 continue
-            if filename in seen_filenames:
+            image_path = (current_day_dir / filename).resolve()
+            fallback_raw = item.get("local_path") or ""
+            if fallback_raw:
+                fallback_path = Path(fallback_raw)
+                if not fallback_path.is_absolute():
+                    fallback_path = (BASE_DIR / fallback_path).resolve()
+                if not image_path.exists() and fallback_path.exists():
+                    image_path = fallback_path.resolve()
+            post_url = item.get("post_url") or "#"
+            identity = post_url if post_url and post_url != "#" else str(image_path).lower()
+            if identity in seen_identity:
                 continue
-            seen_filenames.add(filename)
+            seen_identity.add(identity)
             if not web_url:
                 web_url = f"/images/{day_folder}/{filename}"
-            local_key = os.path.join(day_folder, filename).replace("\\", "/")
+            local_key = str(image_path).lower()
             known_paths.add(local_key)
             tags_dict = item.get("tags") or {}
             characters_str = tags_dict.get("tag_string_character", "")
@@ -522,16 +656,22 @@ def build_local_image_library(selected_date=None):
             library.append({
                 "artist": item.get("artist") or "未知",
                 "filename": filename,
-                "local_path": item.get("local_path") or os.path.join(base_download_dir, day_folder, filename),
-                "post_url": item.get("post_url") or "#",
+                "local_path": str(image_path),
+                "post_url": post_url,
                 "web_url": web_url,
                 "tags": tags_dict,
                 "characters": translated_chars,
                 "score": item.get("score", 0) or 0,
-                "fav_count": item.get("fav_count", 0) or 0
+                "fav_count": item.get("fav_count", 0) or 0,
+                "library_id": root_id,
+                "library_label": root_label,
+                "library_root": root_path,
+                "date": day_folder,
+                "source_dir": str(current_day_dir),
             })
 
-    if current_day_dir.exists():
+        if not current_day_dir.exists():
+            continue
         for image_path in sorted(current_day_dir.iterdir(), key=lambda p: p.name, reverse=True):
             if not image_path.is_file():
                 continue
@@ -541,7 +681,7 @@ def build_local_image_library(selected_date=None):
             # 跳过已有对应 zip 的 gif（属于已转换的动画），避免重复显示
             if suffix == ".gif" and image_path.with_suffix(".zip").exists():
                 continue
-            local_key = f"{current_day_dir.name}/{image_path.name}"
+            local_key = str(image_path.resolve()).lower()
             if local_key in known_paths:
                 continue
             library.append({
@@ -553,7 +693,12 @@ def build_local_image_library(selected_date=None):
                 "tags": {},
                 "characters": [],
                 "score": 0,
-                "fav_count": 0
+                "fav_count": 0,
+                "library_id": root_id,
+                "library_label": root_label,
+                "library_root": root_path,
+                "date": current_day_dir.name,
+                "source_dir": str(current_day_dir),
             })
 
     return library
@@ -668,7 +813,8 @@ class StartRequest(BaseModel):
     start_date: str = ""   # popular_range
     end_date: str = ""     # popular_range
     ids: list = []         # download_ids 模式可选：内联 IDs；非空则覆盖目标日期的 ids_data.json
-    tag_query: str = ""    # tags 模式：Danbooru 多 tag 查询串，如 "hatsune_miku rating:safe"
+    tag_query: str = ""    # tags 模式：多 tag 查询串，如 "hatsune_miku rating:safe"
+    tag_source: str = "danbooru"  # tags 模式：danbooru | gelbooru
     pages: list = []       # 定向重试：非空时只抓这些页码（覆盖 start_page~end_page 区间）
 
 class OpenLocalRequest(BaseModel):
@@ -684,6 +830,7 @@ class ConvertLocalZipRequest(BaseModel):
 class RefreshVisibleRequest(BaseModel):
     date: str
     filenames: list[str] = []
+    local_paths: list[str] = []
 
 
 class TranslateCharacterRequest(BaseModel):
@@ -719,6 +866,7 @@ class ImageFavoriteItem(BaseModel):
     local_path: str = ""
     post_url: str = ""
     web_url: str = ""
+    library_id: str = "default"
 
 
 class ImageFavoriteToggleRequest(BaseModel):
@@ -755,6 +903,7 @@ def _fetch_page_with_retry(fetch_fn, job, label, attempts=3, base_delay=3):
 def _process_post(post, job, do_download=True):
     """处理单个 post：过滤、提取画师、可选下载。返回 (ids, artist, saved_filename) 或 None。
     log.json 走全局 log_store；下载目录由 job.save_dir 决定。"""
+    source = post.get("_source") or getattr(job, "tag_source", "danbooru") or "danbooru"
     ids = str(post.get('id'))
     if not ids or ids in log_store:
         return None
@@ -779,7 +928,7 @@ def _process_post(post, job, do_download=True):
 
         # 文件已在 job.save_dir 时的早跳过：避免被 download_image 的"文件已存在"分支
         # 卡 sleep(1) + 刷屏。识别后只补 log_store，下一次同 ID 直接静默跳过。
-        peek_name = image_url.split('/')[-1].split('?')[0]
+        peek_name = post.get('image') or image_url.split('/')[-1].split('?')[0]
         if peek_name and os.path.exists(os.path.join(job.save_dir, peek_name)):
             saved_filename = peek_name
             log_store.record(ids, image_url)
@@ -790,9 +939,10 @@ def _process_post(post, job, do_download=True):
         if not job.is_running:
             return None
 
+        download_fn = gelbooru_api.download_image if source == "gelbooru" else danbooru_api.download_image
         try:
-            saved_filename = danbooru_api.download_image(image_url, job.save_dir, job.append_log, raise_on_transient=True)
-        except danbooru_api.TransientImageError as e:
+            saved_filename = download_fn(image_url, job.save_dir, job.append_log, raise_on_transient=True)
+        except (danbooru_api.TransientImageError, gelbooru_api.TransientImageError) as e:
             # 瞬时网络失败（已内部重试耗尽）：返回哨兵，让 grabber 把本页记入「失败页」供重试
             job.append_log(f"图片下载失败(网络)，ID {ids} 将计入失败页: {e}")
             return "__TRANSIENT__"
@@ -929,8 +1079,8 @@ def grabber_popular(job, page_num, target_date):
 
 
 # --- mode: tags ---
-def grabber_tags(job, page_num, tag_query):
-    """按 Danbooru tag 查询下载到 tag 文件夹。共享全局 log_store 避免和日期文件夹重复下载。"""
+def grabber_tags(job, page_num, tag_query, tag_source="danbooru"):
+    """按 tag 查询下载到 tag 文件夹。共享全局 log_store 避免和日期文件夹重复下载。"""
     page_need_update = {"1": [], "2": []}
     new_hot_artists = []
 
@@ -938,13 +1088,17 @@ def grabber_tags(job, page_num, tag_query):
     if not job.is_running:
         return [], page_need_update
 
-    job.append_log(f"[Tags] 正在获取 [{tag_query}] 第 {page_num} 页... (host={danbooru_api.get_host()})")
+    source = "gelbooru" if tag_source == "gelbooru" else "danbooru"
+    api = gelbooru_api if source == "gelbooru" else danbooru_api
+    source_label = "Gelbooru" if source == "gelbooru" else "Danbooru"
+
+    job.append_log(f"[Tags:{source_label}] 正在获取 [{tag_query}] 第 {page_num} 页... (host={api.get_host()})")
     posts = _fetch_page_with_retry(
-        lambda: danbooru_api.get_posts_by_tags(tag_query, page_num),
-        job, f"[Tags] [{tag_query}] 第 {page_num} 页"
+        lambda: api.get_posts_by_tags(tag_query, page_num),
+        job, f"[Tags:{source_label}] [{tag_query}] 第 {page_num} 页"
     )
     if posts is None:
-        job.append_log(f"[Tags] [{tag_query}] 第 {page_num} 页获取失败（已自动重试），已记入失败页可手动重试")
+        job.append_log(f"[Tags:{source_label}] [{tag_query}] 第 {page_num} 页获取失败（已自动重试），已记入失败页可手动重试")
         job.record_failed_page(page_num)
         return [], {"1": [], "2": []}
 
@@ -973,7 +1127,7 @@ def grabber_tags(job, page_num, tag_query):
     if page_had_transient:
         job.record_failed_page(page_num)
     job.append_log(
-        f"[Tags] [{tag_query}] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
+        f"[Tags:{source_label}] [{tag_query}] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
     _persist_global_data()
     job.flush_viewer_data()
@@ -1103,7 +1257,8 @@ def task_download_ids(job, inline_ids=None):
     job.append_log(f"[DownloadIDs] 完成，成功下载 {success_count} 张图片。")
 
 
-def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date, inline_ids, tag_query, pages=None):
+def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
+             inline_ids, tag_query, tag_source="danbooru", pages=None):
     """单个 job 的执行入口（在 job.thread 里跑）。根据 mode 分发到各 grabber。
     pages 非空时为「定向重试模式」：只抓这些页码，忽略 start_page~end_page 区间。"""
     pages = pages or []
@@ -1115,15 +1270,22 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
         if mode == "download_ids":
             task_download_ids(job, inline_ids)
         elif mode == "tags":
+            source = "gelbooru" if tag_source == "gelbooru" else "danbooru"
+            source_label = "Gelbooru" if source == "gelbooru" else "Danbooru"
             output = job.db.load_hot_drawer()
             nu_sets = job.db.load_need_update()
+            if pages:
+                job.append_log(f"开始抓取 [Tags:{source_label}]，定向重试页码: {pages}")
+            else:
+                job.append_log(f"开始抓取 [Tags:{source_label}]，从第 {start_page} 页到第 {end_page} 页")
+            job.append_log(f"当前过滤 Tags: {job.filter_tags}")
             for n in _page_seq(start_page, end_page):
                 if not job.is_running:
                     job.append_log("任务已被强制终止。")
                     break
                 job.play_event.wait()
-                job.append_log(f"--- 正在处理 tag [{tag_query}] 第 {n} 页 ---")
-                o, n_u_dict = grabber_tags(job, n, tag_query)
+                job.append_log(f"--- 正在处理 {source_label} tag [{tag_query}] 第 {n} 页 ---")
+                o, n_u_dict = grabber_tags(job, n, tag_query, source)
                 output = list(set(output + o) - job.db.all_drawer)
                 for k in ["1", "2"]:
                     nu_sets[k].update(n_u_dict[k])
@@ -1310,6 +1472,7 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
         }
 
     filter_tags = [t.strip() for t in req.tags.split(',') if t.strip()]
+    tag_source = "gelbooru" if (req.tag_source or "").lower() == "gelbooru" else "danbooru"
 
     # 不同 mode 落到不同的 target_folder：rank/collect_ids 跟随真今天；popular/download_ids
     # 跟随用户指定 target_date；popular_range 用 start_date 做起点，之后 job 自己用
@@ -1321,7 +1484,7 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
         if not folder_name:
             return {"ok": False, "msg": f"tag 查询串 [{req.tag_query}] 转文件夹名失败。"}
         target_folder = folder_name
-        label = f"tags · {req.tag_query}"
+        label = f"tags:{tag_source} · {req.tag_query}"
     elif req.mode == "popular":
         target_folder = req.target_date or _resolve_today()
         label = f"popular · {target_folder}"
@@ -1337,8 +1500,9 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
         target_folder = _resolve_today()
         label = f"{req.mode} · {target_folder}"
 
-    job = _make_job(target_folder, req.mode, filter_tags, label)
+    job = _make_job(target_folder, req.mode, filter_tags, label, tag_source=tag_source)
     job.tag_query = req.tag_query or ""
+    job.tag_source = tag_source
     job.is_running = True
     job.play_event.set()
     jobs.add(job)
@@ -1346,7 +1510,7 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
     job.thread = threading.Thread(
         target=_run_job,
         args=(job, req.start_page, req.end_page, req.mode, req.target_date,
-              req.start_date, req.end_date, req.ids, req.tag_query,
+              req.start_date, req.end_date, req.ids, req.tag_query, tag_source,
               [int(p) for p in (req.pages or [])]),
         daemon=True,
     )
@@ -1440,12 +1604,14 @@ def get_status(job_id: str = ""):
         "failed_pages": list(job.failed_pages),
         "mode": job.mode,
         "tag_query": job.tag_query,
+        "tag_source": job.tag_source,
         # 给前端将来扩展 "多任务 UI" 用的列表；目前只有 1 个（MAX_CONCURRENT=1）
         "jobs": [
             {
                 "job_id": j.job_id,
                 "target_folder": j.target_folder,
                 "mode": j.mode,
+                "tag_source": j.tag_source,
                 "label": j.label,
                 "is_running": j.is_running,
             }
@@ -1462,6 +1628,7 @@ def get_gallery_data():
         "selected_date": selected_date,
         "available_dates": available_dates,
         "available_tags": get_available_tag_folders(),
+        "library_roots": get_library_roots_payload(),
         # 这里返回真正的系统日历今天 —— 不能用模块全局 today_str。
         # today_str 会被 _ensure_today 在下载非今日日期 / tag 文件夹时改写成
         # 那个目标，导致前端"今天"按钮跳到正在下载的目录而不是真正的今天。
@@ -1477,6 +1644,7 @@ def get_gallery_data_by_date(date_str: str):
         "selected_date": selected_date,
         "available_dates": available_dates,
         "available_tags": get_available_tag_folders(),
+        "library_roots": get_library_roots_payload(),
         # 同上，使用系统日历今天而不是会被下载任务 hijack 的 today_str。
         "today": datetime.datetime.now().strftime("%Y-%m-%d"),
         "requested_date": date_str
@@ -1486,8 +1654,7 @@ def get_gallery_data_by_date(date_str: str):
 def open_local_file(req: OpenLocalRequest):
     try:
         target_path = Path(req.local_path).resolve()
-        base_path = Path(base_download_dir).resolve()
-        if not str(target_path).startswith(str(base_path)):
+        if not is_path_in_library_roots(target_path):
             return {"ok": False, "msg": "路径不在允许范围内"}
         if not target_path.exists():
             return {"ok": False, "msg": "文件不存在"}
@@ -1780,6 +1947,148 @@ def _translate_characters_str(chars_str: str):
     return out
 
 
+def _refresh_visible_by_paths(local_paths: list[str]):
+    """Refresh posts for explicit image paths and write each update beside its source file."""
+    targets = []
+    for raw in local_paths:
+        try:
+            image_path = Path(raw).resolve()
+        except Exception:
+            continue
+        if not image_path.exists() or not image_path.is_file():
+            continue
+        if not is_path_in_library_roots(image_path):
+            continue
+        targets.append(image_path)
+    if not targets:
+        return {"ok": False, "msg": "local_paths 为空或不在已接管图库内", "updates": []}
+
+    fn_to_pid_log = log_store.filename_to_id_map()
+    viewer_cache = {}
+    fetch_jobs = []
+    updates = []
+
+    for image_path in targets:
+        viewer_path = image_path.parent / "viewer_data.json"
+        key = str(viewer_path)
+        if key not in viewer_cache:
+            data = load_json(key, []) if viewer_path.exists() else []
+            viewer_cache[key] = data if isinstance(data, list) else []
+        data = viewer_cache[key]
+        post_id = None
+        for item in data:
+            if item.get("filename") == image_path.name:
+                post_id = _extract_post_id(item.get("post_url", ""))
+                if post_id:
+                    break
+        post_id = post_id or fn_to_pid_log.get(image_path.name)
+        fetch_jobs.append((image_path, post_id))
+
+    def _fetch(image_path, post_id):
+        if not post_id:
+            return image_path, post_id, None
+        try:
+            return image_path, post_id, danbooru_api.fetch_data_with_retry(int(post_id))
+        except Exception:
+            return image_path, post_id, None
+
+    fetched = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(_fetch, image_path, post_id) for image_path, post_id in fetch_jobs]
+        for fut in concurrent.futures.as_completed(futures):
+            fetched.append(fut.result())
+
+    changed_viewers = set()
+    for image_path, post_id, post in fetched:
+        filename = image_path.name
+        if not post_id:
+            updates.append({
+                "filename": filename,
+                "local_path": str(image_path),
+                "ok": False,
+                "msg": "无法反查 post_id",
+            })
+            continue
+        if not post:
+            updates.append({
+                "filename": filename,
+                "local_path": str(image_path),
+                "ok": False,
+                "msg": "拉取失败",
+            })
+            continue
+
+        new_score = post.get("score", 0) or 0
+        new_fav = post.get("fav_count", 0) or 0
+        tag_artist = post.get("tag_string_artist", "") or ""
+        artist_tokens = [s for s in tag_artist.split(" ")
+                         if s and not s.lower().endswith("(voice_actor)")]
+        artist = " ".join(artist_tokens) if artist_tokens else "未知"
+        chars_str = post.get("tag_string_character", "") or ""
+        post_url = danbooru_api.post_url(post_id)
+        tags_full = {
+            "tag_string_general": post.get("tag_string_general", ""),
+            "tag_string_character": chars_str,
+            "tag_string_copyright": post.get("tag_string_copyright", ""),
+            "tag_string_artist": tag_artist,
+            "tag_string_meta": post.get("tag_string_meta", ""),
+        }
+
+        viewer_path = image_path.parent / "viewer_data.json"
+        key = str(viewer_path)
+        data = viewer_cache.setdefault(key, [])
+        item = None
+        for existing in data:
+            if existing.get("filename") == filename:
+                item = existing
+                break
+        if item is None:
+            item = {
+                "filename": filename,
+                "web_url": f"/images/{image_path.parent.name}/{filename}",
+            }
+            data.append(item)
+
+        item["artist"] = artist
+        item["local_path"] = str(image_path)
+        item["post_url"] = post_url
+        item["score"] = new_score
+        item["fav_count"] = new_fav
+        merged_tags = item.get("tags") or {}
+        merged_tags.update(tags_full)
+        item["tags"] = merged_tags
+        changed_viewers.add(key)
+
+        updates.append({
+            "filename": filename,
+            "local_path": str(image_path),
+            "ok": True,
+            "post_id": str(post_id),
+            "post_url": post_url,
+            "score": new_score,
+            "fav_count": new_fav,
+            "artist": artist,
+            "characters": _translate_characters_str(chars_str),
+            "tags": tags_full,
+        })
+
+    for key in changed_viewers:
+        data = dedup_viewer_data(viewer_cache.get(key, []))
+        temp_path = f"{key}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
+            os.replace(temp_path, key)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+    return {"ok": True, "updates": updates}
+
+
 @app.post("/api/refresh_visible")
 def refresh_visible(req: RefreshVisibleRequest):
     """同步刷新一组 filename 的热度信息；对孤立文件用全局 log_store 反查 post_id 后回填。
@@ -1796,6 +2105,10 @@ def refresh_visible(req: RefreshVisibleRequest):
     - 没 job 在跑时走干净路径：new 一个 DanbooruData(date_str)，读盘 → 改 → 写盘。
       永远按 date_str 实例化，不再读模块级 db_data（那是个早就过时的 bug 根源）。"""
     date_str = req.date or _resolve_today()
+    local_paths = [p for p in (req.local_paths or []) if p]
+    if local_paths:
+        return _refresh_visible_by_paths(local_paths)
+
     filenames = [fn for fn in (req.filenames or []) if fn]
     if not filenames:
         return {"ok": False, "msg": "filenames 为空", "updates": []}
@@ -1975,9 +2288,8 @@ def api_import_translation(req: TranslationImportRequest):
 def api_untranslated_characters(date: str = ""):
     """聚合指定日期 viewer_data 里所有「翻译字典查不到」的角色 token。
     返回 {tags: [{tag, post_count, fallback_name}]}，按出现次数倒序。"""
-    date_str = date or _resolve_today()
-    dd = DanbooruData(target_date=date_str)
-    data = dd.load_viewer_data()
+    date_str, _ = resolve_selected_date(date or _resolve_today())
+    data = build_local_image_library(date_str)
 
     counter = {}
     for item in data:
@@ -2051,24 +2363,6 @@ def api_fetch_character_source(req: TranslateCharacterRequest):
     }
 
 
-@app.post("/api/translate_character")
-def api_translate_character(req: TranslateCharacterRequest):
-    """调用 openrouter 给出 has_chinese/chinese_name/source_hint/translated_description_zh。
-    返回的 entry 不主动写盘，等用户在 UI 上校对后点保存。
-    失败时附带 raw（LLM 原文）+ error，前端可以让用户手工修复 raw 后再次解析。"""
-    tag = (req.tag or "").strip()
-    if not tag:
-        return {"ok": False, "msg": "tag 为空", "entry": {}, "raw": "", "error": "tag 为空"}
-    source = translator.get_character_source(tag)
-    result = translator.call_rich_translation(tag, source)
-    return {
-        "ok": bool(result.get("ok")),
-        "entry": result.get("entry", {}),
-        "raw": result.get("raw", ""),
-        "error": result.get("error", ""),
-        "msg": result.get("error", "") or "ok",
-        "exists": source.get("exists", False),
-    }
 
 
 @app.post("/api/save_character_translation")
@@ -2240,8 +2534,20 @@ def api_character_favorites_set(req: CharacterFavoritesRequest):
 
 # ---------------- 图片收藏 ----------------
 
-def _image_fav_key(date: str, filename: str) -> str:
-    return f"{(date or '').strip()}/{(filename or '').strip()}"
+def _image_fav_key(date: str, filename: str, library_id: str = "default", local_path: str = "") -> str:
+    date = (date or "").strip()
+    filename = (filename or "").strip()
+    library_id = (library_id or "default").strip()
+    # Keep existing favorites compatible for the default library.
+    if library_id in ("", "default"):
+        return f"{date}/{filename}"
+    if local_path:
+        try:
+            path_key = str(Path(local_path).resolve()).replace("\\", "/")
+            return f"{library_id}:{path_key}"
+        except Exception:
+            pass
+    return f"{library_id}:{date}/{filename}"
 
 
 def _load_image_favorites() -> dict:
@@ -2283,7 +2589,7 @@ def api_image_favorites_toggle(req: ImageFavoriteToggleRequest):
     if not item.date or not item.filename:
         return {"ok": False, "msg": "date / filename 不能为空"}
     data = _load_image_favorites()
-    key = _image_fav_key(item.date, item.filename)
+    key = _image_fav_key(item.date, item.filename, item.library_id, item.local_path)
     if key in data:
         del data[key]
         favorited = False
@@ -2383,11 +2689,9 @@ def api_caption_prompt(req: CaptionPromptRequest):
         return {"ok": False, "msg": f"无效路径: {e}"}
     if not image_path.exists():
         return {"ok": False, "msg": "图片不存在"}
-    # 限制只看 hot_pic 下的图，避免任意路径泄露
-    try:
-        image_path.relative_to(Path(base_download_dir).resolve())
-    except ValueError:
-        return {"ok": False, "msg": "路径不在 hot_pic 目录下"}
+    # 限制只看已接管图库目录下的图，避免任意路径泄露
+    if not is_path_in_library_roots(image_path):
+        return {"ok": False, "msg": "路径不在已接管的图片目录下"}
 
     meta = _find_caption_meta(image_path)
     stage = req.stage

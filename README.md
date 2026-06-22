@@ -201,19 +201,76 @@ ffmpeg -version
 
 ## Electron 装不上 / 报 "Electron failed to install correctly"？
 
-`npm install` 会在 postinstall 阶段从 GitHub 下载约 285MB 的 Electron 本体，国内网络经常失败，导致 `npm run dev` / `start.bat` 报：
+`npm install` 会下载 Electron 本体。国内网络、半截缓存、杀毒软件拦截解压，都可能导致启动时报：
 
 ```text
 Error: Electron failed to install correctly, please delete node_modules/electron and try installing again
 ```
 
-`setup.bat` / `setup.sh` 已经在跑 `npm install` 前把下载源指向国内镜像（npmmirror），走一键脚本通常不会遇到。手动 `npm install` 的话，自己设一下镜像环境变量再装——**`set` / `export` 只在当前终端有效，务必和 `npm install` 在同一个窗口执行**：
+### 先用一键修复
+
+**Windows：**
+
+```text
+双击 repair-electron.bat
+```
+
+**macOS / Linux：**
+
+```bash
+bash repair-electron.sh
+```
+
+修复完成后重新运行 `start.bat` / `start.sh`。
+
+这个脚本会自动做这些事：
+
+- 设置 Electron 国内镜像：`https://npmmirror.com/mirrors/electron/`
+- 删除残缺的 `desktop-app/node_modules/electron`
+- 清理 Electron 下载缓存
+- 重新执行 `npm install`
+- 检查 `dist/electron.exe`（macOS / Linux 为对应可执行文件）和 `path.txt`
+- 如果 npm 安装后仍缺本体，自动下载对应版本 zip，并用系统工具手动解压
+- 把全过程写入 `logs/electron-repair.log`
+
+> Windows 如果反复修复失败，请检查杀毒软件的「隔离区 / 防护记录」，看 `electron.exe` 或 `.dll` 是否被拦截。可以把 `desktop-app\node_modules\electron` 加入白名单后再跑一次修复脚本。
+
+### 还是不行：一键收集 issue 信息
+
+**Windows：**
+
+```text
+双击 collect-debug-info.bat
+```
+
+**macOS / Linux：**
+
+```bash
+bash collect-debug-info.sh
+```
+
+它会生成：
+
+```text
+logs/debug-info.txt
+```
+
+发 issue 时请附上：
+
+- `logs/debug-info.txt`
+- `logs/electron-repair.log`（如果运行过修复脚本）
+- 报错截图或终端报错文本
+
+`collect-debug-info` 不会读取 `.env` 或 `env_config.json` 的内容，只记录它们是否存在。日志里可能包含本机路径，上传前可以先打开看一眼。
+
+### 高级用户：手动指定镜像
+
+如果你不用脚本，手动 `npm install` 时需要在同一个终端里设置镜像变量：
 
 **Windows（cmd）：**
 
 ```cmd
 cd desktop-app
-rmdir /s /q node_modules\electron
 set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
 npm install
 ```
@@ -222,68 +279,11 @@ npm install
 
 ```bash
 cd desktop-app
-rm -rf node_modules/electron
 export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
 npm install
 ```
 
-仍失败的话，多半是 `@electron/get` 缓存了半截的坏文件，清掉再装：
-
-```bash
-# Windows
-rmdir /s /q "%LOCALAPPDATA%\electron\Cache"
-# macOS / Linux
-rm -rf ~/.cache/electron ~/Library/Caches/electron
-```
-
-想用别的镜像或走默认源，改上面命令里的 `ELECTRON_MIRROR` 值即可（不设这个变量就是默认从 GitHub 下载）。
-
-### 镜像、缓存都弄了还报错？——多半是"下载成功但解压失败"
-
-这是最隐蔽的一种：Electron 本体其实**已经下载下来了**，但解压那一步（Electron 内部用的 `extract-zip`）在部分 Windows 环境会**静默崩溃**——进程不报错、也不写完成标记，常见诱因是杀毒软件实时扫描把正在解压出来的 `electron.exe` / `.dll` 拦截或隔离掉了。表现就是 `npm install` 看着没报错，`npm run dev` 却依旧 `Electron failed to install correctly`，而且 `node_modules\electron\dist\` 里几乎是空的。
-
-先花十秒判断卡在「下载」还是「解压」（在 `desktop-app` 目录下执行）：
-
-```cmd
-REM ① 看下载缓存里有没有完整的 zip（约 110~120MB 才算完整）
-dir "%LOCALAPPDATA%\electron\Cache" /s /b | findstr .zip
-
-REM ② 看本体有没有解压出来：应有 electron.exe，且 path.txt 应存在
-dir node_modules\electron\dist\electron.exe
-type node_modules\electron\path.txt
-```
-
-- zip **不存在 / 只有几 KB** → 是下载没成功，回到上面「设镜像 + 清缓存」重装即可。
-- zip **完整存在**，但 `dist\electron.exe` 或 `path.txt` 缺失 → 就是解压崩了，照下面手动解压。
-
-手动解压（绕开会崩的 `extract-zip`，改用 Windows 自带的 `tar`；整段在 `desktop-app` 目录下执行）：
-
-```cmd
-REM 0) 确认实际版本号（下面 URL 要用，注意可能不是 package.json 里写的 ^35.1.5）
-type node_modules\electron\package.json | findstr version
-
-REM 1) 手动下载对应版本（curl 是 Win10/11 自带；把 35.7.5 换成上一步看到的版本）
-curl -L -o electron.zip "https://registry.npmmirror.com/-/binary/electron/v35.7.5/electron-v35.7.5-win32-x64.zip"
-
-REM 2) 清掉残缺的 dist，重建空目录
-rmdir /s /q node_modules\electron\dist
-mkdir node_modules\electron\dist
-
-REM 3) 用系统自带 tar 解压（Win10/11 自带 bsdtar，支持 zip）
-tar -xf electron.zip -C node_modules\electron\dist
-
-REM 4) 写 path.txt 让 Electron 能定位到本体（用 node 写，避免 echo 带多余换行导致路径出错）
-node -e "require('fs').writeFileSync('node_modules/electron/path.txt','electron.exe')"
-
-REM 5) 清理并验证：能打印出版本号（如 v35.7.5）就成功了
-del electron.zip
-node_modules\electron\dist\electron.exe --version
-```
-
-最后一步打印出版本号，就说明本体已就位，回去 `npm run dev` 即可。
-
-> - 如果每次都卡在第 3 步之前的解压，先去杀毒软件的「隔离区 / 防护记录」看看 `electron.exe` 是不是被拦了，把 `desktop-app\node_modules\electron` 加进白名单再重试。
-> - macOS / Linux 一般不会遇到解压崩溃；真要手动解压，把第 3 步换成 `unzip electron.zip -d node_modules/electron/dist`，第 4 步的 `path.txt` 内容写成 `Electron.app/Contents/MacOS/Electron`（macOS）或 `electron`（Linux）。
+不设置 `ELECTRON_MIRROR` 时，Electron 默认从 GitHub 下载。
 
 ---
 
@@ -293,6 +293,8 @@ node_modules\electron\dist\electron.exe --version
 .
 ├── setup.bat / start.bat   # 一键安装 / 启动（Windows）
 ├── setup.sh  / start.sh    # 一键安装 / 启动（macOS / Linux）
+├── repair-electron.*       # Electron 安装失败时的一键修复脚本
+├── collect-debug-info.*    # 生成 issue 诊断信息到 logs/debug-info.txt
 ├── main.py                 # FastAPI 后端入口
 ├── translator.py           # 标签翻译核心
 ├── requirements.txt        # Python 依赖

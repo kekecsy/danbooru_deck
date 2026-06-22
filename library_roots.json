@@ -1,0 +1,9 @@
+{
+  "roots": [
+    {
+      "id": "hdd_archive",
+      "label": "blue archive",
+      "path": "D:/danbooru_hot"
+    }
+  ]
+}

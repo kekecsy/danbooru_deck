@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue';
 import GalleryCalendar from './GalleryCalendar.vue';
 
-const emit = defineEmits(['edit-image']);
+const emit = defineEmits(['edit-image', 'caption-image']);
 
 const savedHabitsStr = localStorage.getItem('crawlerHabits') || '{}';
 const habits = JSON.parse(savedHabitsStr);
@@ -70,7 +70,8 @@ const form = ref({
   startDate: '',
   endDate: '',
   idsText: '',
-  tagQuery: typeof habits.tagQuery === 'string' ? habits.tagQuery : ''
+  tagQuery: typeof habits.tagQuery === 'string' ? habits.tagQuery : '',
+  tagSource: habits.tagSource === 'gelbooru' ? 'gelbooru' : 'danbooru'
 });
 
 watch(() => form.value.mode, (newMode) => {
@@ -185,6 +186,10 @@ watch(() => form.value.tagQuery, (v) => {
   habits.tagQuery = typeof v === 'string' ? v : '';
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 });
+watch(() => form.value.tagSource, (v) => {
+  habits.tagSource = v === 'gelbooru' ? 'gelbooru' : 'danbooru';
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+});
 
 watch(form, (newForm) => {
   habits.mode = newForm.mode;
@@ -239,7 +244,7 @@ const task = ref({
 });
 // 自动重试后仍失败的页：后端 /api/status 透出 failed_pages（[{folder, page}]）。
 // 下载结束后界面弹「⚠ N 页失败 · 重试」横幅，一键定向重跑这些页，无需翻日志。
-const failedPages = ref({ list: [], mode: '', tagQuery: '', retrying: false });
+const failedPages = ref({ list: [], mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false });
 const viewer = ref({
   open: false,
   index: 0,
@@ -252,438 +257,7 @@ const viewer = ref({
 
 const viewerToolbarVisible = computed(() => viewer.value.toolbarPinned || viewer.value.toolbarHovered);
 
-// ---------------- Caption 悬浮窗口 ----------------
-const caption = ref({
-  open: false,
-  saving: false,
-  withArtist: habits.captionWithArtist === true,
-  mode: 'mark',          // 'mark' 标记模式（红，拖选标红） | 'edit' 输入模式（直接编辑文本框）
-  text: '',              // = caption_zh 中文散文（红框标注作用于此）
-  captionEn: '',         // 训练用英文分区模板 caption（只读展示）
-  verifiedTags: [],      // booru 风格已校验标签数组（可增删）
-  tagInput: '',          // verified_tags 添加框的输入
-  errors: [],            // [{start, end, text}]
-  meta: null,            // {artist, characters, copyright}
-  message: '',
-  imagePath: '',
-  loaded: false,
-  dirty: false,
-  pos: { x: 0, y: 0, initialized: false },
-  // 手动模式：API 不可用 / 不想用 API 时，把 3 阶段 pipeline 的每一轮提示词
-  // 复制到任意 chat LLM（Claude/ChatGPT/Gemini Web），在同一对话里连续粘贴 3
-  // 段，把每轮返回粘回到对应粘贴框；最后一轮的结构化 JSON 解析出中英 caption。
-  manual: {
-    open: true,            // 主入口，默认展开
-    promptBusy: false,
-    stage: 1,              // 1 | 2 | 3 | 'done'
-    metaUsed: null,        // 拉过 prompt 后置为 true/false
-    s1: { combined: '', pasted: '', parsed: null, parseError: '' },
-    s2: { user: '',     pasted: '', parsed: null, parseError: '' },
-    s3: { user: '',     pasted: '', parsed: null, parseError: '' }
-  }
-});
-const captionTextRef = ref(null);
-const captionDrag = ref({ active: false, dx: 0, dy: 0 });
 
-const PUNCT_RE = /[，。、；：！？,.;:!?…—]/u;
-
-function openCaptionWindow() {
-  const item = viewerItem.value;
-  if (!item?.localPath) return;
-  caption.value.imagePath = item.localPath;
-  caption.value.message = '';
-  caption.value.errors = [];
-  caption.value.text = '';
-  caption.value.captionEn = '';
-  caption.value.verifiedTags = [];
-  caption.value.tagInput = '';
-  caption.value.meta = null;
-  caption.value.loaded = false;
-  caption.value.dirty = false;
-  resetManualPipeline();
-  caption.value.manual.open = true;
-  caption.value.open = true;
-  if (!caption.value.pos.initialized) {
-    const panelWidth = 480;
-    caption.value.pos.x = Math.max(20, window.innerWidth - panelWidth - 32);
-    caption.value.pos.y = 80;
-    caption.value.pos.initialized = true;
-  }
-  loadExistingCaption();
-}
-
-function closeCaptionWindow() {
-  caption.value.open = false;
-}
-
-// 浮窗拖动：mousedown 在 header 上启动
-function onCaptionDragStart(e) {
-  // 忽略关闭按钮等子元素上的点击
-  if (e.target.closest('button')) return;
-  captionDrag.value.active = true;
-  captionDrag.value.dx = e.clientX - caption.value.pos.x;
-  captionDrag.value.dy = e.clientY - caption.value.pos.y;
-  window.addEventListener('mousemove', onCaptionDragMove);
-  window.addEventListener('mouseup', onCaptionDragEnd);
-  e.preventDefault();
-}
-function onCaptionDragMove(e) {
-  if (!captionDrag.value.active) return;
-  const maxX = window.innerWidth - 120;
-  const maxY = window.innerHeight - 60;
-  caption.value.pos.x = Math.max(-200, Math.min(maxX, e.clientX - captionDrag.value.dx));
-  caption.value.pos.y = Math.max(0, Math.min(maxY, e.clientY - captionDrag.value.dy));
-}
-function onCaptionDragEnd() {
-  captionDrag.value.active = false;
-  window.removeEventListener('mousemove', onCaptionDragMove);
-  window.removeEventListener('mouseup', onCaptionDragEnd);
-}
-
-async function loadExistingCaption() {
-  try {
-    const entry = await window.desktopAPI.caption.read(caption.value.imagePath);
-    if (entry) {
-      caption.value.text = entry.caption_zh || entry.caption || '';
-      caption.value.captionEn = entry.caption_en || '';
-      caption.value.verifiedTags = Array.isArray(entry.verified_tags) ? entry.verified_tags : [];
-      caption.value.errors = Array.isArray(entry.errors) ? entry.errors : [];
-      caption.value.meta = {
-        artist: entry.artist,
-        characters: entry.characters,
-        copyright: entry.copyright
-      };
-      caption.value.withArtist = !!entry.with_artist;
-      caption.value.loaded = true;
-      // 恢复 Pipeline 每一步内容（保存时写入 entry.pipeline）。按字段合并，
-      // 保留默认形状；prompt（combined/user）不存盘，需要时再点复制重新拉。
-      const p = entry.pipeline;
-      if (p && typeof p === 'object') {
-        const m = caption.value.manual;
-        if (p.stage !== undefined && p.stage !== null) m.stage = p.stage;
-        if (p.s1) m.s1 = { ...m.s1, ...p.s1 };
-        if (p.s2) m.s2 = { ...m.s2, ...p.s2 };
-        if (p.s3) m.s3 = { ...m.s3, ...p.s3 };
-      }
-    }
-  } catch (e) {
-    // 忽略
-  }
-}
-
-// 标点吸附：仅吸附尾部紧贴的标点，首部不再吸附
-function snapToPunctuation(text, start, end) {
-  while (end < text.length && PUNCT_RE.test(text[end])) end += 1;
-  return [start, end];
-}
-
-function markCurrentSelection() {
-  const el = captionTextRef.value;
-  if (!el) return;
-  const sel = window.getSelection();
-  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return;
-  const range = sel.getRangeAt(0);
-  if (!el.contains(range.startContainer) || !el.contains(range.endContainer)) return;
-  const preRange = document.createRange();
-  preRange.selectNodeContents(el);
-  preRange.setEnd(range.startContainer, range.startOffset);
-  const start0 = preRange.toString().length;
-  const end0 = start0 + range.toString().length;
-  const text = caption.value.text;
-  let [start, end] = snapToPunctuation(text, start0, end0);
-  if (start >= end) return;
-
-  // 标记模式：拖选标红，合并相邻 error。（输入模式走可编辑文本框，不触发本函数）
-  const next = [];
-  let merged = { start, end };
-  for (const e of caption.value.errors) {
-    if (e.end < merged.start || e.start > merged.end) {
-      next.push(e);
-    } else {
-      merged.start = Math.min(merged.start, e.start);
-      merged.end = Math.max(merged.end, e.end);
-    }
-  }
-  next.push({ start: merged.start, end: merged.end, text: text.slice(merged.start, merged.end) });
-  next.sort((a, b) => a.start - b.start);
-  caption.value.errors = next;
-  caption.value.dirty = true;
-  sel.removeAllRanges();
-}
-
-function removeErrorSpan(idx) {
-  caption.value.errors = caption.value.errors.filter((_, i) => i !== idx);
-  caption.value.dirty = true;
-}
-
-function clearAllErrors() {
-  caption.value.errors = [];
-  caption.value.dirty = true;
-}
-
-// ---- verified_tags 人工增删（tag 现在是发色/瞳色/锚点的唯一载体，人工可直接改） ----
-function normalizeTag(raw) {
-  return String(raw == null ? '' : raw).trim().toLowerCase().replace(/\s+/g, '_');
-}
-function addVerifiedTag(tag) {
-  const fromInput = tag == null;
-  const t = normalizeTag(fromInput ? caption.value.tagInput : tag);
-  if (!t) return;
-  if (!Array.isArray(caption.value.verifiedTags)) caption.value.verifiedTags = [];
-  if (!caption.value.verifiedTags.includes(t)) {
-    caption.value.verifiedTags.push(t);
-    caption.value.dirty = true;
-  }
-  if (fromInput) caption.value.tagInput = '';
-}
-function removeVerifiedTag(idx) {
-  caption.value.verifiedTags.splice(idx, 1);
-  caption.value.dirty = true;
-}
-// Stage 2 校验里模型存疑、danbooru 未标的高显著锚点（如误判的 cat_ears）；
-// 已在 verified_tags 里的过滤掉，剩下的作为「待人工确认」建议展示。
-const reviewAnchors = computed(() => {
-  const ra = caption.value.manual?.s2?.parsed?.review_anchors;
-  if (!Array.isArray(ra)) return [];
-  const have = new Set((caption.value.verifiedTags || []).map(t => String(t)));
-  return ra.filter(a => a && a.tag && !have.has(String(a.tag)));
-});
-
-// 渲染：errors（红）按 start 排序分段输出，错误段显示原文。
-// 仅标记模式用；输入模式直接走可编辑 textarea。
-const captionRenderSegments = computed(() => {
-  const text = caption.value.text || '';
-  const spans = caption.value.errors
-    .map((e, i) => ({ ...e, idx: i }))
-    .sort((a, b) => a.start - b.start);
-  const segs = [];
-  let cursor = 0;
-  for (const s of spans) {
-    if (s.start > cursor) segs.push({ type: 'text', text: text.slice(cursor, s.start) });
-    segs.push({ type: 'error', text: text.slice(s.start, s.end), idx: s.idx });
-    cursor = Math.max(cursor, s.end);
-  }
-  if (cursor < text.length) segs.push({ type: 'text', text: text.slice(cursor) });
-  return segs;
-});
-
-// 是否有可保存内容：最终文本，或任一 pipeline 步骤已填/已往后走。
-// 让「保存」按钮在只完成中间步骤时也可用，从而保存每一步的进度。
-const captionHasContent = computed(() => {
-  if ((caption.value.text || '').trim()) return true;
-  const m = caption.value.manual;
-  if (m.stage !== 1) return true; // 已进入 stage 2/3/done
-  return !!(m.s1.pasted.trim() || m.s2.pasted.trim() || m.s3.pasted.trim());
-});
-
-async function saveCaption() {
-  if (!caption.value.imagePath || caption.value.saving) return;
-  if (!window.desktopAPI?.caption?.save) {
-    caption.value.message = '保存失败：window.desktopAPI.caption.save 不存在。请完全关闭并重启 Electron（preload 改动需要重启进程，仅热重载渲染端不会更新）。';
-    return;
-  }
-  // JSON 深拷贝去掉 Vue reactive proxy，避免 IPC structuredClone 报「could not be cloned」
-  const m = caption.value.manual;
-  const entry = JSON.parse(JSON.stringify({
-    caption: caption.value.text,        // 顶层 caption = 中文散文（保画廊绿标语义/向后兼容）
-    caption_zh: caption.value.text,
-    caption_en: caption.value.captionEn || '',
-    verified_tags: Array.isArray(caption.value.verifiedTags) ? caption.value.verifiedTags : [],
-    with_artist: caption.value.withArtist,
-    artist: caption.value.meta?.artist || null,
-    characters: caption.value.meta?.characters || null,
-    copyright: caption.value.meta?.copyright || null,
-    errors: caption.value.errors,
-    // Pipeline 每一步内容：重开同一张图时恢复（loadExistingCaption），避免重做 stage
-    pipeline: { stage: m.stage, s1: m.s1, s2: m.s2, s3: m.s3 }
-  }));
-  const imagePath = String(caption.value.imagePath);
-  caption.value.saving = true;
-  caption.value.message = '保存中...';
-  const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('保存超时（IPC 无响应，可能需要重启 Electron）')), 8000));
-  try {
-    const result = await Promise.race([
-      window.desktopAPI.caption.save(imagePath, entry),
-      timeout
-    ]);
-    if (result?.ok) {
-      caption.value.message = `已保存到 ${result.path}`;
-      caption.value.dirty = false;
-      // 立即更新画廊标记（仅当有最终文本时；只存了中间步骤不算「已生成」）
-      const fname = caption.value.text.trim() ? caption.value.imagePath.split(/[\\/]/).pop() : '';
-      if (fname) {
-        const next = new Set(captionedSet.value);
-        next.add(fname);
-        captionedSet.value = next;
-      }
-    } else {
-      caption.value.message = `保存失败：${result?.error || '未知错误'}`;
-    }
-  } catch (e) {
-    caption.value.message = `保存失败：${e.message || e}`;
-  } finally {
-    caption.value.saving = false;
-  }
-}
-
-// ---------------- Caption 手动模式（3 阶段 Pipeline） ----------------
-// 用户在外部 chat LLM 同一对话里连续粘贴 stage 1/2/3 三段提示词，
-// 把每轮返回粘回到对应文本框；stage 3 现在返回结构化 JSON
-// {caption_en, caption_zh, verified_tags}，解析后中文段落即为 caption.text。
-
-function resetManualPipeline() {
-  const m = caption.value.manual;
-  m.stage = 1;
-  m.promptBusy = false;
-  m.metaUsed = null;
-  m.s1 = { combined: '', pasted: '', parsed: null, parseError: '' };
-  m.s2 = { user: '',     pasted: '', parsed: null, parseError: '' };
-  m.s3 = { user: '',     pasted: '', parsed: null, parseError: '' };
-}
-
-function stripCodeFences(text) {
-  if (!text) return '';
-  let s = String(text).trim();
-  // ```json ... ``` 或 ``` ... ```
-  const fence = /^```(?:json|JSON)?\s*([\s\S]*?)\s*```$/m;
-  const m = s.match(fence);
-  if (m) return m[1].trim();
-  // 没有围栏：尝试找第一个 { 到最后一个 }（兼容模型在前后加解释文字的情况）
-  const first = s.indexOf('{');
-  const last = s.lastIndexOf('}');
-  if (first >= 0 && last > first) {
-    return s.slice(first, last + 1);
-  }
-  return s;
-}
-
-async function fetchStagePrompt(stage) {
-  const m = caption.value.manual;
-  const payload = {
-    image_path: caption.value.imagePath,
-    with_artist: !!caption.value.withArtist,
-    stage,
-  };
-  if (stage === 3 && m.s2.parsed) {
-    payload.verify_json = JSON.stringify(m.s2.parsed);
-  }
-  const res = await fetch('http://127.0.0.1:8000/api/caption_prompt', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  if (!data.ok) throw new Error(data.msg || `获取 stage ${stage} 提示词失败`);
-  m.metaUsed = !!data.meta_used;
-  if (stage === 1) m.s1.combined = data.combined || '';
-  else if (stage === 2) m.s2.user = data.user || '';
-  else if (stage === 3) m.s3.user = data.user || '';
-  return data;
-}
-
-async function copyStagePrompt(stage) {
-  if (!caption.value.imagePath || caption.value.manual.promptBusy) return;
-  const m = caption.value.manual;
-  m.promptBusy = true;
-  caption.value.message = '';
-  try {
-    // withArtist 变更后，stage 3 prompt 需要重新拉；为简单起见每次都重拉。
-    const data = await fetchStagePrompt(stage);
-    const text = stage === 1 ? data.combined : data.user;
-    await navigator.clipboard.writeText(text || '');
-    const len = (text || '').length;
-    const metaNote = m.metaUsed ? '' : ' · 未找到 viewer_data 元数据，prompt 是空白版';
-    const stageLabel = stage === 1 ? 'Stage 1 (观察)'
-                     : stage === 2 ? 'Stage 2 (校验)'
-                     : 'Stage 3 (成文)';
-    showToast(`已复制 ${stageLabel} 提示词（${len} 字）${metaNote}`, 'success');
-  } catch (e) {
-    showToast(`复制失败：${e.message || e}`, 'error');
-  } finally {
-    m.promptBusy = false;
-  }
-}
-
-function parseStageJson(stage) {
-  const m = caption.value.manual;
-  const slot = stage === 1 ? m.s1 : m.s2;
-  const raw = (slot.pasted || '').trim();
-  if (!raw) {
-    slot.parseError = '粘贴框为空';
-    return;
-  }
-  try {
-    const stripped = stripCodeFences(raw);
-    const obj = JSON.parse(stripped);
-    if (!obj || typeof obj !== 'object') throw new Error('解析结果不是对象');
-    slot.parsed = obj;
-    slot.parseError = '';
-    m.stage = stage + 1;
-    caption.value.message = `Stage ${stage} 已解析，进入 Stage ${m.stage}。`;
-  } catch (e) {
-    slot.parsed = null;
-    slot.parseError = `JSON 解析失败：${e.message || e}`;
-  }
-}
-
-function applyFinalCaption() {
-  const m = caption.value.manual;
-  const raw = (m.s3.pasted || '').trim();
-  if (!raw) {
-    m.s3.parseError = '粘贴框为空';
-    return;
-  }
-  let parsed = null;
-  try {
-    const obj = JSON.parse(stripCodeFences(raw));
-    if (obj && typeof obj === 'object') parsed = obj;
-  } catch (e) {
-    parsed = null;
-  }
-  if (parsed) {
-    m.s3.parsed = parsed;
-    caption.value.text = (parsed.caption_zh || parsed.caption || '').trim();
-    caption.value.captionEn = (parsed.caption_en || '').trim();
-    caption.value.verifiedTags = Array.isArray(parsed.verified_tags) ? parsed.verified_tags : [];
-    m.s3.parseError = '';
-    caption.value.message = '已解析结构化 JSON（中英 caption + 标签），点「保存」落盘。';
-  } else {
-    // 容错：模型没按 JSON 输出时，把整段当中文散文
-    m.s3.parsed = null;
-    caption.value.text = raw;
-    caption.value.captionEn = '';
-    caption.value.verifiedTags = [];
-    m.s3.parseError = '⚠️ 未能解析为 JSON，已按纯中文文本应用（caption_en/标签为空）。';
-    caption.value.message = '已按纯文本应用（非 JSON），点「保存」落盘。';
-  }
-  caption.value.errors = [];
-  caption.value.loaded = true;
-  caption.value.dirty = true;
-  m.stage = 'done';
-}
-
-async function copyCaptionImage() {
-  if (!caption.value.imagePath) return;
-  if (!window.desktopAPI?.caption?.copyImage) {
-    showToast('当前 Electron preload 缺少 caption.copyImage，请重启程序', 'error');
-    return;
-  }
-  try {
-    const result = await window.desktopAPI.caption.copyImage(caption.value.imagePath);
-    if (result?.ok) {
-      showToast('已复制图片到剪贴板，去 LLM 对话框 Ctrl+V 粘贴', 'success');
-    } else {
-      showToast(result?.error || '复制图片失败', 'error');
-    }
-  } catch (e) {
-    showToast(`复制图片失败：${e.message || e}`, 'error');
-  }
-}
-
-watch(() => caption.value.withArtist, (v) => {
-  habits.captionWithArtist = v;
-  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
-});
 
 function toggleViewerFitMode() {
   viewer.value.fitMode = viewer.value.fitMode === 'fit' ? 'actual' : 'fit';
@@ -1341,7 +915,7 @@ async function loadGallery(date, silent = false, preserveView = false) {
   }
 }
 
-// 已生成 caption 的文件名集合（按当前日期目录）
+// 已生成 caption 的集合：多图库同日期下优先按 localPath 匹配，兼容旧的 filename 字符串。
 const captionedSet = ref(new Set());
 async function refreshCaptionedSet() {
   const date = gallery.value.selectedDate;
@@ -1350,14 +924,25 @@ async function refreshCaptionedSet() {
     return;
   }
   try {
-    const names = await window.desktopAPI.caption.listForDate(date);
-    captionedSet.value = new Set(Array.isArray(names) ? names : []);
+    const entries = await window.desktopAPI.caption.listForDate(date);
+    const set = new Set();
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (typeof entry === 'string') {
+        set.add(`name:${entry}`);
+      } else if (entry && entry.localPath) {
+        set.add(`path:${entry.localPath}`);
+        if (entry.filename) set.add(`name:${entry.filename}`);
+      }
+    }
+    captionedSet.value = set;
   } catch {
     captionedSet.value = new Set();
   }
 }
 function hasCaption(item) {
-  return !!item?.filename && captionedSet.value.has(item.filename);
+  if (!item) return false;
+  if (item.localPath && captionedSet.value.has(`path:${item.localPath}`)) return true;
+  return !!item.filename && captionedSet.value.has(`name:${item.filename}`);
 }
 
 async function syncStatus() {
@@ -1378,6 +963,7 @@ async function syncStatus() {
       if (status.failed_pages.length) {
         failedPages.value.mode = status.mode || failedPages.value.mode;
         failedPages.value.tagQuery = status.tag_query || '';
+        failedPages.value.tagSource = status.tag_source || failedPages.value.tagSource || 'danbooru';
       }
     }
 
@@ -1452,7 +1038,8 @@ async function startTask() {
       target_date: form.value.targetDate || '',
       start_date: form.value.startDate || '',
       end_date: form.value.endDate || '',
-      tag_query: form.value.tagQuery || ''
+      tag_query: form.value.tagQuery || '',
+      tag_source: form.value.tagSource || 'danbooru'
     };
     if (payload.mode === 'download_ids') {
       const ids = parsePastedIds(form.value.idsText);
@@ -1512,6 +1099,7 @@ async function retryFailedPages() {
   if (mode === 'tags' || isTagFolder) {
     payload.mode = 'tags';
     payload.tag_query = failedPages.value.tagQuery || '';
+    payload.tag_source = failedPages.value.tagSource || form.value.tagSource || 'danbooru';
     if (!payload.tag_query.trim()) {
       showToast('缺少 tag 查询串，无法重试该 tag 任务', 'error');
       return;
@@ -1576,7 +1164,7 @@ async function stopTask() {
 // 完成检测只读响应式 task.value.isRunning（由 1.2s 的 pollTimer/syncStatus 维护），
 // 绝不在这里自己调用 crawler.status()，否则会抢走 /api/status 的破坏性 drain、吞掉日志。
 let _queueIdSeq = 0;
-const taskQueue = ref([]);          // [{id, mode, startPage, endPage, tags, targetDate, startDate, endDate, tagQuery, idsText, label, status, error}]
+const taskQueue = ref([]);          // [{id, mode, startPage, endPage, tags, targetDate, startDate, endDate, tagQuery, tagSource, idsText, label, status, error}]
 const queueRunning = ref(false);    // 整个队列是否在跑
 const queueAbort = ref(false);      // 停止队列的中断旗标
 const queueIndex = ref(-1);         // 当前正在跑的项下标（-1 = 没在跑）
@@ -1600,7 +1188,7 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function queueItemLabel(it) {
   const name = MODE_NAMES[it.mode] || it.mode;
-  if (it.mode === 'tags') return `${name}「${it.tagQuery || ''}」 ${it.startPage}-${it.endPage}页`;
+  if (it.mode === 'tags') return `${name}[${it.tagSource === 'gelbooru' ? 'Gelbooru' : 'Danbooru'}]「${it.tagQuery || ''}」 ${it.startPage}-${it.endPage}页`;
   if (it.mode === 'download_ids') return `${name} ${dateTokenLabel(it.targetDate)} (${parsePastedIds(it.idsText || '').length}个ID)`;
   if (it.mode === 'popular') return `${name} ${dateTokenLabel(it.targetDate)} ${it.startPage}-${it.endPage}页`;
   if (it.mode === 'popular_range') return `${name} ${dateTokenLabel(it.startDate)}~${dateTokenLabel(it.endDate)}`;
@@ -1620,6 +1208,7 @@ function snapshotFormToItem() {
     startDate: tokenizeDate(f.startDate || ''),
     endDate: tokenizeDate(f.endDate || ''),
     tagQuery: f.tagQuery || '',
+    tagSource: f.tagSource || 'danbooru',
     idsText: f.idsText || '',
     status: 'pending',
     error: '',
@@ -1670,6 +1259,7 @@ function buildQueuePayload(it) {
     start_date: resolveDateToken(it.startDate || ''),
     end_date: resolveDateToken(it.endDate || ''),
     tag_query: it.tagQuery || '',
+    tag_source: it.tagSource || 'danbooru',
   };
   if (payload.mode === 'download_ids') {
     const ids = parsePastedIds(it.idsText || '');
@@ -1777,6 +1367,7 @@ function stripItemForSave(it) {
     startDate: it.startDate,
     endDate: it.endDate,
     tagQuery: it.tagQuery,
+    tagSource: it.tagSource || 'danbooru',
     idsText: it.idsText,
   };
 }
@@ -1808,6 +1399,7 @@ function loadCombo(combo) {
   if (queueRunning.value) return;
   taskQueue.value = (combo.tasks || []).map(t => {
     const it = { ...t, id: ++_queueIdSeq, status: 'pending', error: '' };
+    if (!it.tagSource) it.tagSource = 'danbooru';
     it.label = queueItemLabel(it);
     return it;
   });
@@ -1887,19 +1479,19 @@ async function startRefreshScores() {
     showToast('当前页没有图片', 'info');
     return;
   }
-  const filenames = pageItems.map(it => it.filename).filter(Boolean);
+  const localPaths = pageItems.map(it => it.localPath).filter(Boolean);
 
   refresh.value.isRunning = true;
   refresh.value.dateStr = date;
-  refresh.value.total = filenames.length;
+  refresh.value.total = localPaths.length;
   refresh.value.done = 0;
-  showToast(`正在刷新当前页 ${filenames.length} 张...`, 'info');
+  showToast(`正在刷新当前页 ${localPaths.length} 张...`, 'info');
 
   try {
     const res = await fetch('http://127.0.0.1:8000/api/refresh_visible', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, filenames })
+      body: JSON.stringify({ date, local_paths: localPaths })
     });
     const result = await res.json();
     if (!result.ok) {
@@ -1910,7 +1502,7 @@ async function startRefreshScores() {
     let failCount = 0;
     for (const u of result.updates || []) {
       if (!u.ok) { failCount += 1; continue; }
-      const target = gallery.value.images.find(img => img.filename === u.filename);
+      const target = gallery.value.images.find(img => (u.local_path && img.localPath === u.local_path) || img.filename === u.filename);
       if (target) {
         applyRefreshUpdate(target, u);
         okCount += 1;
@@ -2003,13 +1595,13 @@ async function startRefreshScoresRange() {
   const pageCount = end - start + 1;
   const ps = gallery.value.pageSize;
   const items = filteredLocalImages.value.slice((start - 1) * ps, end * ps);
-  const filenames = items.map(it => it.filename).filter(Boolean);
-  if (!filenames.length) { showToast('范围内没有图片', 'info'); return; }
+  const localPaths = items.map(it => it.localPath).filter(Boolean);
+  if (!localPaths.length) { showToast('范围内没有图片', 'info'); return; }
 
   closeRangeRefreshDialog();
   refresh.value.isRunning = true;
   refresh.value.dateStr = date;
-  refresh.value.total = filenames.length;
+  refresh.value.total = localPaths.length;
   refresh.value.done = 0;
 
   // 页数超过 5 时，按每 4 页一批切片，批间休息 40s 防止 Danbooru 风控
@@ -2023,23 +1615,23 @@ async function startRefreshScoresRange() {
     for (let p = start; p <= end; p += BATCH_PAGES) {
       const pEnd = Math.min(end, p + BATCH_PAGES - 1);
       const sliceItems = filteredLocalImages.value.slice((p - 1) * ps, pEnd * ps);
-      const bf = sliceItems.map(it => it.filename).filter(Boolean);
-      if (bf.length) batches.push({ pStart: p, pEnd, filenames: bf });
+      const bp = sliceItems.map(it => it.localPath).filter(Boolean);
+      if (bp.length) batches.push({ pStart: p, pEnd, localPaths: bp });
     }
   } else {
-    batches.push({ pStart: start, pEnd: end, filenames });
+    batches.push({ pStart: start, pEnd: end, localPaths });
   }
 
   let okCount = 0;
   let failCount = 0;
 
   async function runBatch(b, label) {
-    if (!b.filenames.length) return;
+    if (!b.localPaths.length) return;
     if (label) showToast(label, 'info');
     const res = await fetch('http://127.0.0.1:8000/api/refresh_visible', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, filenames: b.filenames }),
+      body: JSON.stringify({ date, local_paths: b.localPaths }),
     });
     const result = await res.json();
     if (!result.ok) {
@@ -2048,7 +1640,7 @@ async function startRefreshScoresRange() {
     }
     for (const u of result.updates || []) {
       if (!u.ok) { failCount += 1; continue; }
-      const target = gallery.value.images.find(img => img.filename === u.filename);
+      const target = gallery.value.images.find(img => (u.local_path && img.localPath === u.local_path) || img.filename === u.filename);
       if (target) { applyRefreshUpdate(target, u); okCount += 1; }
       refresh.value.done = okCount + failCount;
     }
@@ -2068,13 +1660,13 @@ async function startRefreshScoresRange() {
     if (throttled) {
       showToast(`共 ${pageCount} 页，将分 ${batches.length} 批刷新（每 ${BATCH_PAGES} 页一批，批间休息 ${REST_MS / 1000}s 防风控）`, 'info');
     } else {
-      showToast(`正在刷新第 ${start}-${end} 页共 ${filenames.length} 张...`, 'info');
+      showToast(`正在刷新第 ${start}-${end} 页共 ${localPaths.length} 张...`, 'info');
     }
     for (let bi = 0; bi < batches.length; bi += 1) {
       if (!refresh.value.isRunning) break;
       const b = batches[bi];
       const label = throttled
-        ? `批次 ${bi + 1}/${batches.length} · 第 ${b.pStart}-${b.pEnd} 页（${b.filenames.length} 张）`
+        ? `批次 ${bi + 1}/${batches.length} · 第 ${b.pStart}-${b.pEnd} 页（${b.localPaths.length} 张）`
         : '';
       await runBatch(b, label);
       if (throttled && bi < batches.length - 1 && refresh.value.isRunning) {
@@ -2171,7 +1763,7 @@ async function refreshSinglePost(item) {
     const res = await fetch('http://127.0.0.1:8000/api/refresh_visible', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, filenames: [item.filename] })
+      body: JSON.stringify({ date, local_paths: item.localPath ? [item.localPath] : [], filenames: [item.filename] })
     });
     const result = await res.json();
     if (!result.ok) return;
@@ -2587,7 +2179,10 @@ const favoritedCharacterSet = computed(() => {
 const favoritedImageKeySet = computed(() => new Set(favSnapshot.value.imageKeys || []));
 
 function imageFavKey(item) {
-  return `${gallery.value.selectedDate || ''}/${item?.filename || ''}`;
+  if (!item) return `${gallery.value.selectedDate || ''}/`;
+  const lib = item.libraryId || 'default';
+  if (lib && lib !== 'default' && item.localPath) return `${lib}:${item.localPath.replace(/\\/g, '/')}`;
+  return `${gallery.value.selectedDate || item.date || ''}/${item.filename || ''}`;
 }
 
 function isImageFavorited(item) {
@@ -2635,6 +2230,7 @@ async function toggleImageFavorite(item) {
     local_path: item.localPath || '',
     post_url: item.postUrl || '',
     web_url: item.web_url || item.webUrl || '',
+    library_id: item.libraryId || 'default',
   };
   try {
     const res = await fetch('http://127.0.0.1:8000/api/image_favorites/toggle', {
@@ -3025,7 +2621,7 @@ const modeDescription = computed(() => {
     case 'popular_range': return '设定起始与结束日期，批量抓取这段时间内所有的热门图片。';
     case 'collect_ids': return '网络状况不佳时的极速模式：仅拉取列表和元数据，不下载图片本体。';
     case 'download_ids': return '从已收集的 ID 列表中进行批量下载。';
-    case 'tags': return '按 tag 查询下载到tag文件夹。';
+    case 'tags': return `按 ${form.value.tagSource === 'gelbooru' ? 'Gelbooru' : 'Danbooru'} tag 查询下载到 tag 文件夹。`;
     default: return '选择模式后配置参数，点击启动开始执行。';
   }
 });
@@ -3167,6 +2763,13 @@ const tagFolderPreview = computed(() => {
         </label>
       </div>
       <label class="field-full" v-if="form.mode === 'tags'">
+        <span>Tag 来源</span>
+        <select v-model="form.tagSource">
+          <option value="danbooru">Danbooru</option>
+          <option value="gelbooru">Gelbooru</option>
+        </select>
+      </label>
+      <label class="field-full" v-if="form.mode === 'tags'">
         <span>
           Tag 查询串
         </span>
@@ -3177,7 +2780,7 @@ const tagFolderPreview = computed(() => {
           style="font-family: Consolas, monospace; font-size: 12.5px;"
         />
         <div class="muted compact-text" style="margin-top: 4px; line-height: 1.5;">
-          下载到独立文件夹 <strong style="color: var(--accent-deep); font-family: Consolas, monospace;">{{ tagFolderPreview || 'tag_...' }}</strong>
+          {{ form.tagSource === 'gelbooru' ? 'Gelbooru' : 'Danbooru' }} 下载到独立文件夹 <strong style="color: var(--accent-deep); font-family: Consolas, monospace;">{{ tagFolderPreview || 'tag_...' }}</strong>
         </div>
       </label>
       <label class="field-full">
@@ -3735,7 +3338,7 @@ const tagFolderPreview = computed(() => {
           >{{ viewerItem && isImageFavorited(viewerItem) ? '♥ 已收藏' : '♡ 收藏' }}</button>
           <button v-if="viewerItem?.filename?.toLowerCase().endsWith('.zip')" class="secondary" @click="convertGif(viewerItem)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
           <button
-            @click="openCaptionWindow"
+            @click="viewerItem && emit('caption-image', viewerItem)"
             :style="hasCaption(viewerItem)
               ? 'background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;'
               : 'background: linear-gradient(135deg, #8b5cf6, #6d28d9); border: none; color: white;'"
@@ -3820,237 +3423,6 @@ const tagFolderPreview = computed(() => {
           />
         </div>
       </div>
-    </div>
-
-    <!-- Caption 悬浮窗口（可拖动，不全屏遮罩，可同时看图） -->
-    <div
-      v-if="caption.open"
-      class="caption-panel floating"
-      :style="{ left: caption.pos.x + 'px', top: caption.pos.y + 'px' }"
-    >
-        <div class="caption-panel-header" @mousedown="onCaptionDragStart">
-          <h3>📝 图片描述 (Caption) <span class="caption-drag-hint">拖动标题栏移动窗口</span></h3>
-          <button class="ghost" @click="closeCaptionWindow" title="关闭">✕</button>
-        </div>
-        <!-- 可滚动主体（改动1）：标题栏留在外面当固定拖动把手，其余内容放进这里。 -->
-        <!-- 内容超高时本容器内部滚动，子项 flex-shrink:0 不再被压扁（修复 Stage 2/3 挤压）。 -->
-        <div class="caption-panel-scroll">
-        <div class="caption-panel-meta" v-if="caption.meta">
-          <span v-if="caption.meta.characters"><b>角色：</b>{{ caption.meta.characters }}</span>
-          <span v-if="caption.meta.copyright"><b>作品：</b>{{ caption.meta.copyright }}</span>
-          <span v-if="caption.withArtist && caption.meta.artist"><b>画师：</b>{{ caption.meta.artist }}</span>
-        </div>
-        <div class="caption-panel-controls">
-          <label class="caption-toggle">
-            <input type="checkbox" v-model="caption.withArtist" />
-            包含画师信息
-          </label>
-          <div class="caption-mode-switch" role="tablist">
-            <button :class="{ active: caption.mode === 'mark' }" @click="caption.mode = 'mark'" title="拖选标红错误段">🖍 标记模式</button>
-            <button :class="{ active: caption.mode === 'edit' }" @click="caption.mode = 'edit'" title="在下方文本框里直接编辑描述文本">✏️ 输入模式</button>
-          </div>
-          <div class="caption-panel-actions">
-            <button :disabled="!captionHasContent || caption.saving" @click="saveCaption" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">
-              {{ caption.saving ? '保存中...' : '💾 保存' }}
-            </button>
-          </div>
-        </div>
-        <!-- Pipeline 手动模式：主要入口。在外部 chat LLM 同一对话里连续粘贴 stage 1/2/3 -->
-        <div class="caption-manual pipeline-manual">
-          <div class="pipeline-header">
-            <span class="pipeline-title">🧭 Pipeline 手动模式 <span class="pipeline-badge">主入口</span></span>
-            <button class="ghost pipeline-reset" @click="resetManualPipeline" title="清空所有 stage 重新开始">↻ 重置</button>
-          </div>
-          <div class="pipeline-progress">
-            <span :class="['pipeline-dot', caption.manual.stage === 1 ? 'active' : (caption.manual.stage > 1 || caption.manual.stage === 'done' ? 'done' : '')]">①</span>
-            <span class="pipeline-dot-label">观察</span>
-            <span class="pipeline-dash">─</span>
-            <span :class="['pipeline-dot', caption.manual.stage === 2 ? 'active' : (caption.manual.stage > 2 || caption.manual.stage === 'done' ? 'done' : '')]">②</span>
-            <span class="pipeline-dot-label">校验</span>
-            <span class="pipeline-dash">─</span>
-            <span :class="['pipeline-dot', caption.manual.stage === 3 ? 'active' : (caption.manual.stage === 'done' ? 'done' : '')]">③</span>
-            <span class="pipeline-dot-label">成文</span>
-          </div>
-          <p class="pipeline-tip">
-            打开 Claude / ChatGPT / Gemini Web，<b>在同一个对话</b>里依次粘贴 3 段提示词；每轮把返回粘回对应文本框。
-          </p>
-
-          <!-- Stage 1: observe -->
-          <div :class="['pipeline-stage', caption.manual.stage === 1 ? 'active' : (caption.manual.stage > 1 || caption.manual.stage === 'done' ? 'done' : 'locked')]">
-            <div class="pipeline-stage-head">
-              <span class="pipeline-stage-title">① Stage 1 · 观察 (得到 JSON)</span>
-              <span v-if="caption.manual.stage > 1 || caption.manual.stage === 'done'" class="pipeline-stage-status done">✓ 已完成</span>
-              <span v-else-if="caption.manual.stage === 1" class="pipeline-stage-status active">当前</span>
-            </div>
-            <div v-if="caption.manual.stage === 1" class="pipeline-stage-body">
-              <div class="pipeline-stage-buttons">
-                <button class="secondary" :disabled="caption.manual.promptBusy" @click="copyStagePrompt(1)">
-                  {{ caption.manual.promptBusy ? '复制中...' : '📋 复制 Stage 1 提示词' }}
-                </button>
-                <button class="secondary" @click="copyCaptionImage">🖼️ 复制图片</button>
-              </div>
-              <p class="pipeline-stage-hint">在 LLM 新对话粘贴提示词 + 图片，把返回的 JSON 整段复制到下方：</p>
-              <textarea
-                v-model="caption.manual.s1.pasted"
-                rows="4"
-                placeholder='粘贴 Stage 1 返回的 JSON，例如：{"subjects_count": 1, ...}'
-                class="caption-manual-paste"
-              ></textarea>
-              <div v-if="caption.manual.s1.parseError" class="pipeline-error">⚠️ {{ caption.manual.s1.parseError }}</div>
-              <button
-                :disabled="!caption.manual.s1.pasted.trim()"
-                @click="parseStageJson(1)"
-                class="caption-manual-apply"
-              >解析并进入 Stage 2 →</button>
-            </div>
-            <div v-else-if="caption.manual.stage > 1 || caption.manual.stage === 'done'" class="pipeline-stage-summary">
-              已解析 {{ Object.keys(caption.manual.s1.parsed || {}).length }} 个字段
-            </div>
-          </div>
-
-          <!-- Stage 2: verify -->
-          <div :class="['pipeline-stage', caption.manual.stage === 2 ? 'active' : (caption.manual.stage > 2 || caption.manual.stage === 'done' ? 'done' : 'locked')]">
-            <div class="pipeline-stage-head">
-              <span class="pipeline-stage-title">② Stage 2 · 校验 (得到 JSON)</span>
-              <span v-if="caption.manual.stage > 2 || caption.manual.stage === 'done'" class="pipeline-stage-status done">✓ 已完成</span>
-              <span v-else-if="caption.manual.stage === 2" class="pipeline-stage-status active">当前</span>
-              <span v-else class="pipeline-stage-status locked">🔒 等待 Stage 1</span>
-            </div>
-            <div v-if="caption.manual.stage === 2" class="pipeline-stage-body">
-              <div class="pipeline-stage-buttons">
-                <button class="secondary" :disabled="caption.manual.promptBusy" @click="copyStagePrompt(2)">
-                  {{ caption.manual.promptBusy ? '复制中...' : '📋 复制 Stage 2 提示词' }}
-                </button>
-              </div>
-              <p class="pipeline-stage-hint">在<b>同一对话</b>粘贴上面这段，得到校验 JSON 后粘回下方（含 tag visible/absent 标注）：</p>
-              <textarea
-                v-model="caption.manual.s2.pasted"
-                rows="4"
-                placeholder='粘贴 Stage 2 返回的 JSON，例如：{"character_identification": {...}, "tag_evaluation": [...]}'
-                class="caption-manual-paste"
-              ></textarea>
-              <div v-if="caption.manual.s2.parseError" class="pipeline-error">⚠️ {{ caption.manual.s2.parseError }}</div>
-              <button
-                :disabled="!caption.manual.s2.pasted.trim()"
-                @click="parseStageJson(2)"
-                class="caption-manual-apply"
-              >解析并进入 Stage 3 →</button>
-            </div>
-            <div v-else-if="caption.manual.stage > 2 || caption.manual.stage === 'done'" class="pipeline-stage-summary">
-              已解析 · tag 评估 {{ (caption.manual.s2.parsed?.tag_evaluation || []).length }} 条 · 角色一致性 {{ caption.manual.s2.parsed?.character_identification?.consistent === false ? '❌ 不一致' : (caption.manual.s2.parsed?.character_identification?.consistent ? '✓ 一致' : '—') }}
-            </div>
-          </div>
-
-          <!-- Stage 3: compose（结构化 JSON） -->
-          <div :class="['pipeline-stage', caption.manual.stage === 3 ? 'active' : (caption.manual.stage === 'done' ? 'done' : 'locked')]">
-            <div class="pipeline-stage-head">
-              <span class="pipeline-stage-title">③ Stage 3 · 成文 (结构化 JSON：中英 caption + 标签)</span>
-              <span v-if="caption.manual.stage === 'done'" class="pipeline-stage-status done">✓ 已完成</span>
-              <span v-else-if="caption.manual.stage === 3" class="pipeline-stage-status active">当前</span>
-              <span v-else class="pipeline-stage-status locked">🔒 等待 Stage 2</span>
-            </div>
-            <div v-if="caption.manual.stage === 3" class="pipeline-stage-body">
-              <div class="pipeline-stage-buttons">
-                <button class="secondary" :disabled="caption.manual.promptBusy" @click="copyStagePrompt(3)">
-                  {{ caption.manual.promptBusy ? '复制中...' : '📋 复制 Stage 3 提示词' }}
-                </button>
-              </div>
-              <p class="pipeline-stage-hint">在同一对话粘贴这段，把返回的<b>结构化 JSON</b>（含 caption_en / caption_zh / verified_tags）粘到下方：</p>
-              <textarea
-                v-model="caption.manual.s3.pasted"
-                rows="6"
-                placeholder='粘贴 Stage 3 返回的 JSON，例如：{"caption_en": "[SUBJECT]\n1girl...", "caption_zh": "...", "verified_tags": [...]}'
-                class="caption-manual-paste"
-              ></textarea>
-              <div v-if="caption.manual.s3.parseError" class="pipeline-error">⚠️ {{ caption.manual.s3.parseError }}</div>
-              <button
-                :disabled="!caption.manual.s3.pasted.trim()"
-                @click="applyFinalCaption"
-                class="caption-manual-apply pipeline-finish"
-              >✓ 解析并应用</button>
-            </div>
-            <div v-else-if="caption.manual.stage === 'done'" class="pipeline-stage-summary">
-              已应用 · 中文 {{ (caption.text || '').length }} 字 · 英文 {{ caption.captionEn ? '✓' : '—' }} · 标签 {{ (caption.verifiedTags || []).length }} 个
-            </div>
-          </div>
-        </div>
-
-        <!-- 结构化产物：英文分区 caption（只读）+ 可增删的已校验标签 + 待确认锚点 -->
-        <div v-if="caption.loaded || caption.captionEn || (caption.verifiedTags && caption.verifiedTags.length) || reviewAnchors.length" class="caption-structured">
-          <div v-if="caption.captionEn" class="caption-structured-block">
-            <div class="caption-structured-label">caption_en（训练用，只读）</div>
-            <pre class="caption-structured-en">{{ caption.captionEn }}</pre>
-          </div>
-          <div class="caption-structured-block">
-            <div class="caption-structured-label">verified_tags（{{ (caption.verifiedTags || []).length }}）· 可增删</div>
-            <div class="caption-structured-tags">
-              <span v-for="(t, i) in caption.verifiedTags" :key="`vt-${i}`" class="caption-chip caption-chip-editable">
-                {{ t }}
-                <button class="caption-chip-x" @click="removeVerifiedTag(i)" title="删除此标签">×</button>
-              </span>
-              <span v-if="!caption.verifiedTags || !caption.verifiedTags.length" class="caption-tags-empty">（暂无标签）</span>
-            </div>
-            <div class="caption-tag-add">
-              <input
-                v-model="caption.tagInput"
-                @keyup.enter="addVerifiedTag()"
-                placeholder="添加 booru 标签，回车确认（如 blue_hair）"
-                class="caption-tag-input"
-              />
-              <button class="secondary" :disabled="!caption.tagInput.trim()" @click="addVerifiedTag()">＋ 添加</button>
-            </div>
-          </div>
-          <!-- 模型存疑、danbooru 未标的高显著锚点：人工确认后再加入 verified_tags -->
-          <div v-if="reviewAnchors.length" class="caption-structured-block">
-            <div class="caption-structured-label">⚠️ 待确认锚点（danbooru 未标，模型存疑——发型≈兽耳等易误判，确认真有再加入）</div>
-            <div class="caption-structured-tags">
-              <span v-for="(a, i) in reviewAnchors" :key="`ra-${i}`" class="caption-chip caption-chip-review" :title="a.reason || ''">
-                {{ a.tag }}
-                <button class="caption-chip-add" @click="addVerifiedTag(a.tag)" title="确认并加入 verified_tags">＋</button>
-              </span>
-            </div>
-          </div>
-        </div>
-        <div class="caption-hint" v-if="caption.text || caption.mode === 'edit'">
-          <template v-if="caption.mode === 'mark'">
-            <b>标记模式</b>：拖选错误片段 → 标红（尾部紧贴标点自动吸附）；点击红段撤销。
-          </template>
-          <template v-else>
-            <b>输入模式</b>：在下方文本框里直接编辑描述文本，改完点上方「💾 保存」。
-          </template>
-        </div>
-
-        <!-- 底部内容区（改动3）：输入模式=可直接编辑文本框；标记模式=红标渲染。 -->
-        <textarea
-          v-if="caption.mode === 'edit'"
-          v-model="caption.text"
-          @input="caption.dirty = true"
-          class="caption-text-edit"
-          placeholder="在此直接编辑描述文本，改完点上方「💾 保存」。"
-        ></textarea>
-        <div v-else-if="!caption.text" class="caption-empty">尚未生成。用上方 Pipeline 手动模式生成，或切到输入模式直接编写。</div>
-        <div v-else class="caption-text-area" ref="captionTextRef" @mouseup="markCurrentSelection">
-          <template v-for="(seg, i) in captionRenderSegments" :key="i">
-            <span v-if="seg.type === 'text'">{{ seg.text }}</span>
-            <span v-else class="caption-error" @click.stop="removeErrorSpan(seg.idx)" :title="`点击撤销标红：${seg.text}`">{{ seg.text }}</span>
-          </template>
-        </div>
-        <div v-if="caption.errors.length" class="caption-marks-summary">
-          <div class="caption-error-list">
-            <div class="caption-error-list-title">
-              <span>🔴 错误标记（{{ caption.errors.length }}）</span>
-              <button class="ghost" @click="clearAllErrors">全部清除</button>
-            </div>
-            <ol>
-              <li v-for="(e, i) in caption.errors" :key="`err-${i}`">
-                <span>{{ e.text }}</span>
-                <button class="ghost" @click="removeErrorSpan(i)" title="移除">✕</button>
-              </li>
-            </ol>
-          </div>
-        </div>
-        <div v-if="caption.message" class="caption-message">{{ caption.message }}</div>
-        </div><!-- /caption-panel-scroll -->
     </div>
 
     <div v-if="toast.show" class="toast-overlay" :class="toast.type">

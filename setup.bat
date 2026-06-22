@@ -139,7 +139,6 @@ echo [6/6] 生成配置文件 ...
 if not exist ".env" (
     > .env (
         echo google_api_key=
-        echo openrouter_api_key=
     )
     echo     OK -^> 已生成 .env，请填入你的 API key
 ) else (
@@ -162,8 +161,8 @@ echo   安装完成！双击 start.bat 启动桌面端。
 echo ============================================================
 echo.
 echo 备注：
-echo   * 请打开项目根目录的 .env，填入 openrouter_api_key 和 google_api_key
-echo     （留空也能用，但角色翻译等在线功能会失效）
+echo   * 请打开项目根目录的 .env，填入 google_api_key
+echo     （留空也能用，翻译等功能依赖本地词典离线运行）
 echo   * ZIP -^> GIF 转换需要 FFMPEG（可选）。需要时执行：
 echo       winget install Gyan.FFmpeg
 echo     或从 https://ffmpeg.org/download.html 下载并加入 PATH。

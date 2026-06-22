@@ -20,6 +20,52 @@ let crawlerStdout = [];
 let crawlerLastError = '';
 let thumbCacheDir = '';
 
+function loadLibraryRoots() {
+  const roots = [{ id: 'default', label: 'hot_pic', path: path.resolve(hotPicDir), isDefault: true }];
+  const configPath = path.join(repoRoot, 'library_roots.json');
+  if (!fs.existsSync(configPath)) return roots;
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  } catch {
+    return roots;
+  }
+  const entries = Array.isArray(raw) ? raw : (Array.isArray(raw?.roots) ? raw.roots : []);
+  const seenPaths = new Set(roots.map(r => path.resolve(r.path).toLowerCase()));
+  const seenIds = new Set(['default']);
+  entries.forEach((entry, index) => {
+    const rawPath = typeof entry === 'string' ? entry : (entry?.path || entry?.root || '');
+    if (!rawPath) return;
+    const resolved = path.isAbsolute(rawPath) ? path.resolve(rawPath) : path.resolve(repoRoot, rawPath);
+    const pathKey = resolved.toLowerCase();
+    if (seenPaths.has(pathKey)) return;
+    let id = String(typeof entry === 'object' ? (entry.id || '') : '').replace(/[^a-zA-Z0-9_-]+/g, '_').replace(/^_+|_+$/g, '') || `lib${index + 1}`;
+    const baseId = id;
+    let suffix = 2;
+    while (seenIds.has(id)) {
+      id = `${baseId}_${suffix}`;
+      suffix += 1;
+    }
+    seenPaths.add(pathKey);
+    seenIds.add(id);
+    roots.push({
+      id,
+      label: (typeof entry === 'object' && (entry.label || entry.name)) || path.basename(resolved) || id,
+      path: resolved,
+      isDefault: false
+    });
+  });
+  return roots;
+}
+
+function allowedLibraryRoots() {
+  return loadLibraryRoots().map(root => root.path);
+}
+
+function isWithinLibraryRoots(targetPath) {
+  return allowedLibraryRoots().some(root => isWithin(root, targetPath));
+}
+
 let localCustomDict = null;
 function loadLocalCustomDict() {
   const dictPath = path.join(repoRoot, 'custom_translation.json');
@@ -132,11 +178,14 @@ function toAbsolutePath(targetPath) {
 }
 
 function listDateFolders() {
-  if (!fs.existsSync(hotPicDir)) return [];
-  return fs.readdirSync(hotPicDir, { withFileTypes: true })
-    .filter(item => item.isDirectory() && isDateFolder(item.name))
-    .map(item => item.name)
-    .sort((a, b) => b.localeCompare(a));
+  const dates = new Set();
+  for (const root of loadLibraryRoots()) {
+    if (!fs.existsSync(root.path)) continue;
+    for (const item of fs.readdirSync(root.path, { withFileTypes: true })) {
+      if (item.isDirectory() && isDateFolder(item.name)) dates.add(item.name);
+    }
+  }
+  return Array.from(dates).sort((a, b) => b.localeCompare(a));
 }
 
 function resolveDate(requestedDate) {
@@ -171,12 +220,18 @@ async function buildGalleryByDate(requestedDate) {
         characters: item.characters || '',
         tags: item.tags || {},
         score: item.score || 0,
-        favCount: item.fav_count || 0
+        favCount: item.fav_count || 0,
+        libraryId: item.library_id || 'default',
+        libraryLabel: item.library_label || '',
+        libraryRoot: item.library_root || '',
+        sourceDir: item.source_dir || '',
+        date: item.date || data.selected_date
       }));
       return {
         selectedDate: data.selected_date,
         availableDates: data.available_dates || [],
         availableTags: Array.isArray(data.available_tags) ? data.available_tags : [],
+        libraryRoots: Array.isArray(data.library_roots) ? data.library_roots : [],
         today: data.today || getTodayString(),
         images
       };
@@ -187,56 +242,70 @@ async function buildGalleryByDate(requestedDate) {
 
   // Fallback: read directly from disk (no translation)
   const { selectedDate, availableDates, today } = resolveDate(requestedDate);
-  const dateDir = path.join(hotPicDir, selectedDate);
-  const viewerPath = path.join(dateDir, 'viewer_data.json');
   const knownFiles = new Set();
   const images = [];
-  const viewerData = safeReadJson(viewerPath, []);
+  const seenIdentity = new Set();
 
-  for (const item of [...viewerData].reverse()) {
-    const filename = item.filename;
-    if (!filename) continue;
-    // viewer_data.json 早期版本会在 popular_range 流程里追加重复条目，
-    // 此处按 filename 去重，避免画廊里同一张图显示两次
-    if (knownFiles.has(filename)) continue;
-    knownFiles.add(filename);
-    images.push({
-      artist: item.artist || '未知',
-      filename,
-      localPath: toAbsolutePath(item.local_path || path.join(dateDir, filename)),
-      postUrl: item.post_url || '',
-      characters: translateTags(item.tags?.tag_string_character || ''),
-      tags: item.tags || {},
-      score: item.score || 0,
-      favCount: item.fav_count || 0
-    });
-  }
+  for (const root of loadLibraryRoots()) {
+    const dateDir = path.join(root.path, selectedDate);
+    const viewerPath = path.join(dateDir, 'viewer_data.json');
+    const viewerData = safeReadJson(viewerPath, []);
 
-  if (fs.existsSync(dateDir)) {
-    const extraFiles = fs.readdirSync(dateDir)
-      .filter(name => /\.(jpg|jpeg|png|gif|webp|bmp|avif|zip|mp4|webm)$/i.test(name))
-      .sort((a, b) => b.localeCompare(a));
-
-    for (const filename of extraFiles) {
-      if (knownFiles.has(filename)) continue;
-
-      // Skip GIF if corresponding ZIP exists (converted animations)
-      if (filename.toLowerCase().endsWith('.gif')) {
-        const zipName = filename.slice(0, -4) + '.zip';
-        if (fs.existsSync(path.join(dateDir, zipName))) continue;
-      }
+    for (const item of [...viewerData].reverse()) {
+      const filename = item.filename;
+      if (!filename) continue;
+      const localPath = path.resolve(path.join(dateDir, filename));
+      const identity = item.post_url || localPath.toLowerCase();
+      if (seenIdentity.has(identity)) continue;
+      seenIdentity.add(identity);
+      knownFiles.add(localPath.toLowerCase());
       images.push({
-        artist: '未知',
+        artist: item.artist || '未知',
         filename,
-        localPath: toAbsolutePath(path.join(dateDir, filename)),
-        postUrl: '',
-        characters: translateTags(''),
-        tags: {}
+        localPath,
+        postUrl: item.post_url || '',
+        characters: translateTags(item.tags?.tag_string_character || ''),
+        tags: item.tags || {},
+        score: item.score || 0,
+        favCount: item.fav_count || 0,
+        libraryId: root.id,
+        libraryLabel: root.label,
+        libraryRoot: root.path,
+        sourceDir: dateDir,
+        date: selectedDate
       });
+    }
+
+    if (fs.existsSync(dateDir)) {
+      const extraFiles = fs.readdirSync(dateDir)
+        .filter(name => /\.(jpg|jpeg|png|gif|webp|bmp|avif|zip|mp4|webm)$/i.test(name))
+        .sort((a, b) => b.localeCompare(a));
+
+      for (const filename of extraFiles) {
+        const localPath = path.resolve(path.join(dateDir, filename));
+        if (knownFiles.has(localPath.toLowerCase())) continue;
+        if (filename.toLowerCase().endsWith('.gif')) {
+          const zipName = filename.slice(0, -4) + '.zip';
+          if (fs.existsSync(path.join(dateDir, zipName))) continue;
+        }
+        images.push({
+          artist: '未知',
+          filename,
+          localPath,
+          postUrl: '',
+          characters: translateTags(''),
+          tags: {},
+          libraryId: root.id,
+          libraryLabel: root.label,
+          libraryRoot: root.path,
+          sourceDir: dateDir,
+          date: selectedDate
+        });
+      }
     }
   }
 
-  return { selectedDate, availableDates, today, images };
+  return { selectedDate, availableDates, today, libraryRoots: loadLibraryRoots(), images };
 }
 
 function isWithin(baseDir, targetPath) {
@@ -422,7 +491,7 @@ ipcMain.handle('gallery:get-by-date', async (_event, date) => buildGalleryByDate
 
 ipcMain.handle('gallery:open-local-file', async (_event, localPath) => {
   const resolvedPath = toAbsolutePath(localPath);
-  if (!resolvedPath || !isWithin(hotPicDir, resolvedPath)) return { ok: false, message: '非法路径' };
+  if (!resolvedPath || !isWithinLibraryRoots(resolvedPath)) return { ok: false, message: '非法路径' };
   if (!fs.existsSync(resolvedPath)) return { ok: false, message: '文件不存在' };
   const result = await shell.openPath(resolvedPath);
   return { ok: result === '', message: result || '已尝试打开文件' };
@@ -541,7 +610,7 @@ ipcMain.handle('preset:list', async () => listPresetFiles());
 // ---------------- Caption (本地 caption.json 读写) ----------------
 function captionJsonPathFor(imagePath) {
   const resolved = toAbsolutePath(imagePath);
-  if (!resolved || !isWithin(hotPicDir, resolved)) return null;
+  if (!resolved || !isWithinLibraryRoots(resolved)) return null;
   return path.join(path.dirname(resolved), 'caption.json');
 }
 
@@ -574,41 +643,63 @@ ipcMain.handle('caption:save', async (_event, payload) => {
 // 把图片标成「已生成」（绿色角标语义保持 = 已有成文描述）。
 ipcMain.handle('caption:list-for-date', async (_event, date) => {
   if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
-  const captionPath = path.join(hotPicDir, date, 'caption.json');
-  if (!fs.existsSync(captionPath)) return [];
-  const store = safeReadJson(captionPath, {});
-  return Object.keys(store).filter(name => {
-    const entry = store[name];
-    return entry && typeof entry.caption === 'string' && entry.caption.trim();
-  });
+  const out = [];
+  for (const root of loadLibraryRoots()) {
+    const dateDir = path.join(root.path, date);
+    const captionPath = path.join(dateDir, 'caption.json');
+    if (!fs.existsSync(captionPath)) continue;
+    const store = safeReadJson(captionPath, {});
+    for (const name of Object.keys(store)) {
+      const entry = store[name];
+      if (entry && typeof entry.caption === 'string' && entry.caption.trim()) {
+        out.push({ filename: name, localPath: path.resolve(path.join(dateDir, name)), libraryId: root.id });
+      }
+    }
+  }
+  return out;
 });
 
 // Caption 手动模式：把当前图片复制到系统剪贴板，方便用户粘贴到任意 chat LLM
 // (Claude / ChatGPT / Gemini Web)。
 // nativeImage.createFromPath 支持 PNG/JPG/BMP/TIFF；GIF 取首帧；WebP/AVIF 看系统支持。
 // 不支持的格式（动图 zip / avif 在某些 Windows 上）返回 ok:false，由前端 fallback。
-ipcMain.handle('caption:copy-image', async (_event, imagePath) => {
+ipcMain.handle('caption:copy-image', async (_event, payload) => {
+  const imagePath = typeof payload === 'string' ? payload : payload?.imagePath;
+  const rawMaxEdge = typeof payload === 'object' ? Number(payload?.maxEdge) : 0;
+  const maxEdge = Number.isFinite(rawMaxEdge) && rawMaxEdge > 0 ? Math.round(rawMaxEdge) : 0;
   const resolved = toAbsolutePath(imagePath);
   if (!resolved || !fs.existsSync(resolved)) {
     return { ok: false, error: '文件不存在' };
   }
-  // 路径越权防护：只允许复制 hot_pic 下的图
-  if (!isWithin(hotPicDir, resolved)) {
+  // 路径越权防护：只允许复制已接管图库下的图
+  if (!isWithinLibraryRoots(resolved)) {
     return { ok: false, error: '非法路径' };
   }
   try {
-    const image = nativeImage.createFromPath(resolved);
+    let image = nativeImage.createFromPath(resolved);
     if (image.isEmpty()) {
       return {
         ok: false,
         error: '该图片格式无法转成剪贴板图像（可能是 GIF/WebP/AVIF），请直接把文件拖进 LLM 对话框'
       };
     }
+    const originalSize = image.getSize();
+    if (maxEdge > 0 && Math.max(originalSize.width, originalSize.height) > maxEdge) {
+      const opts = originalSize.width >= originalSize.height ? { width: maxEdge } : { height: maxEdge };
+      image = image.resize({ ...opts, quality: 'good' });
+    }
+    const copiedSize = image.getSize();
     clipboard.clear();
     clipboard.writeImage(image);
     // 再读回来校验真的写进去了（部分系统下 writeImage 静默失败）
     const written = clipboard.readImage();
-    return { ok: !written.isEmpty() };
+    return {
+      ok: !written.isEmpty(),
+      width: copiedSize.width,
+      height: copiedSize.height,
+      originalWidth: originalSize.width,
+      originalHeight: originalSize.height
+    };
   } catch (error) {
     return { ok: false, error: error.message };
   }
@@ -660,7 +751,7 @@ app.whenReady().then(() => {
   protocol.handle('local', (request) => {
     const url = request.url.replace(/^local:\/\//, '');
     const filePath = decodeURIComponent(url);
-    const allowedRoots = [hotPicDir, ...presetDirs, thumbCacheDir].filter(Boolean);
+    const allowedRoots = [...allowedLibraryRoots(), ...presetDirs, thumbCacheDir].filter(Boolean);
     if (!allowedRoots.some(root => isWithin(root, filePath))) {
       return new Response('Access denied', { status: 403 });
     }

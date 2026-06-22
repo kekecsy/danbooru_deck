@@ -3,6 +3,8 @@
 独立可用。OBSERVE/VERIFY/COMPOSE_SCHEMA 保留作为各阶段 JSON 产物的契约文档
 （手动模式由 prompt 引导外部 LLM 产出对应形状）。"""
 
+import json
+
 
 DANBOORU_SYSTEM_PROMPT = """你是一名专业的二次元插画描述与数据标注专家。你的任务是根据所提供的图像以及 Danbooru 风格的标签元数据，生成一段细致、流畅、自然的中文描述。
 
@@ -290,44 +292,68 @@ def build_compose_user_prompt(
     *,
     skip_verify_note: bool = False,
 ) -> str:
-    """第 3 轮：基于前两轮的事实产出结构化 JSON（中英 caption + 属性 + 标签）。
+    """第 3 轮：基于前两轮的事实产出结构化 JSON（训练文本 + 阅读描述 + tag 审计）。
 
     - verify_result: 第 2 轮的 JSON。若为 None 或缺失，按"未校验"提示模型谨慎使用 tags。
     - skip_verify_note: 仅当 stage 2 失败时为 True，提示成文时小心 tags 可能含图中未出现的元素。
 
     返回的 prompt 要求模型输出 COMPOSE_SCHEMA 形状的 JSON：
-      { caption_en, caption_zh, verified_tags }
+      { tag_caption, natural_caption_en, caption_zh, verified_tags, rejected_tags, uncertain_tags }
     """
     tags = (meta or {}).get("tags", {}) or {}
     char_id = (verify_result or {}).get("character_identification") or {}
     fallback_desc = char_id.get("fallback_description")
     consistent = char_id.get("consistent")
+    verified = verify_result.get("verified_tags") if isinstance(verify_result, dict) else None
+    if not isinstance(verified, list):
+        verified = []
+    tag_evaluation = verify_result.get("tag_evaluation") if isinstance(verify_result, dict) else None
+    if not isinstance(tag_evaluation, list):
+        tag_evaluation = []
+    rejected = [
+        {"tag": item.get("tag", ""), "reason": item.get("reason", "")}
+        for item in tag_evaluation
+        if isinstance(item, dict) and item.get("status") == "absent"
+    ]
+    uncertain = [
+        {"tag": item.get("tag", ""), "reason": item.get("reason", "")}
+        for item in tag_evaluation
+        if isinstance(item, dict) and item.get("status") == "uncertain"
+    ]
 
     lines = [
-        "这是第 3 轮：成文（结构化输出）。",
+        "这是第 3 轮：重新对齐并产出训练文本（结构化输出）。",
         "",
-        "请基于第 1 轮观察与第 2 轮校验，输出一个 JSON 对象，含 3 个字段：caption_en、caption_zh、verified_tags。",
+        "请基于第 1 轮观察与第 2 轮校验，像 Altogether 那样把图源元数据重新对齐到图像内容：保留已核验的有用标签，剔除不在图中的标签，再补成高信号训练文本。输出一个 JSON 对象，含 6 个字段：tag_caption、natural_caption_en、caption_zh、verified_tags、rejected_tags、uncertain_tags。",
         "",
-        "【caption_en】训练用英文 caption。**严格**按下面固定分区模板输出（保留方括号小标题，每区内是 booru 风格英文短语，逗号或换行分隔；该区无内容则留最贴切的最小描述，不要编造）：",
-        "[SUBJECT]",
-        "  人数与主体，如 1girl, solo",
-        "[APPEARANCE]",
-        "  发色/发型/瞳色取自 verified_tags（如 long_hair / blonde_hair / green_eyes，可自然展开为 long blonde hair / green eyes），再加表情与识别特征（如 animal ears）",
-        "[CLOTHES]",
-        "  来自 clothing_tags，如 white dress / black thighhighs",
-        "[POSE]",
-        "  姿态与视线，如 standing / looking at viewer",
-        "[BACKGROUND]",
-        "  环境道具光照，如 bedroom / window / sunlight",
-        "[STYLE]",
-        "  画风，如 anime illustration / cel shading",
+        "【tag_caption】训练用主文本：单行 booru 风格英文短语，逗号分隔，不要分区标题、不要 markdown、不要句子解释。优先包含：人数/主体、角色与作品（仅在校验一致时）、发色发型瞳色、服饰、姿态、视线、场景、道具、光影、画风。只使用 verified_tags 与第 1 轮明确观察到的事实；不要包含 highres/absurdres/commentary_request 等 meta 标签。",
+        "",
+        "【natural_caption_en】自然英文辅助描述：1 句，最多 2 句，直接描述画面中可见内容。它不是文学描写，不要夸张氛围，不要加入未核验身份。",
         "",
         "【caption_zh】阅读用中文散文段落：自然、细腻、连贯（不要逗号堆砌式标签流水账），一段为宜最多两段；行文顺序：主体与构图 → 角色身份与外貌 → 服饰与配件 → 背景与场景 → 氛围/光影/风格。",
         "",
         "【verified_tags】照搬第 2 轮的 verified_tags 数组（booru 风格、全小写下划线）；若第 2 轮缺失，则用第 1 轮明确观察到的标签自行汇总。",
         "",
-        "事实使用规则（同时约束 caption_en 与 caption_zh）：",
+        "【rejected_tags】从第 2 轮 tag_evaluation 里复制 status='absent' 的标签，数组元素形如 {\"tag\":\"...\",\"reason\":\"...\"}。不要把这些标签写入 tag_caption / natural_caption_en / caption_zh。",
+        "",
+        "【uncertain_tags】从第 2 轮 tag_evaluation 里复制 status='uncertain' 的标签，数组元素形如 {\"tag\":\"...\",\"reason\":\"...\"}。除非第 1 轮明确观察到，否则不要写入训练文本。",
+        "",
+        "事实使用规则（同时约束 tag_caption、natural_caption_en 与 caption_zh）：",
     ]
+
+    if verify_result:
+        summary = {
+            "verified_tags": verified,
+            "rejected_tags": rejected,
+            "uncertain_tags": uncertain,
+            "character_identification": char_id,
+        }
+        lines += [
+            "",
+            "第 2 轮校验摘要（用于本轮输出，若与你的对话上下文冲突，以这份摘要为准）：",
+            json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
+            "",
+        ]
 
     if skip_verify_note:
         lines.append("- ⚠️ 本次第 2 轮校验缺失：请只描写你在第 1 轮明确观察到的元素；对元数据中的 tags 持怀疑态度，凡是不能直接对应到第 1 轮观察的 tag 一律不要写入。")
@@ -340,14 +366,14 @@ def build_compose_user_prompt(
 
     if consistent is False and fallback_desc:
         lines.append(
-            f"- 角色识别校验为不一致：**不要使用元数据中的角色名**。caption_zh 用以下描述替代角色身份：「{fallback_desc}」；caption_en 的 [SUBJECT] 用通用描述（如 1girl）而非角色名。"
+            f"- 角色识别校验为不一致：**不要使用元数据中的角色名**。caption_zh 用以下描述替代角色身份：「{fallback_desc}」；tag_caption / natural_caption_en 用通用主体描述（如 1girl, solo）而非角色名。"
         )
     elif consistent is True:
         name = tags.get("tag_string_character") or ""
         series = tags.get("tag_string_copyright") or ""
         if name or series:
             lines.append(
-                f"- 角色识别校验通过：caption_zh 可自然融入角色名「{name}」与所属作品「{series}」（不要机械罗列）；caption_en 可在 [SUBJECT] 中加入角色名/作品标签。"
+                f"- 角色识别校验通过：caption_zh 可自然融入角色名「{name}」与所属作品「{series}」（不要机械罗列）；tag_caption 可加入角色名/作品标签。"
             )
 
     if include_artist:
@@ -365,9 +391,35 @@ def build_compose_user_prompt(
 COMPOSE_SCHEMA = {
     "type": "object",
     "properties": {
-        "caption_en": {"type": "string"},
+        "tag_caption": {"type": "string"},
+        "natural_caption_en": {"type": "string"},
         "caption_zh": {"type": "string"},
         "verified_tags": {"type": "array", "items": {"type": "string"}},
+        "rejected_tags": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["tag", "reason"],
+            },
+        },
+        "uncertain_tags": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "tag": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["tag", "reason"],
+            },
+        },
     },
-    "required": ["caption_en", "caption_zh", "verified_tags"],
+    "required": [
+        "tag_caption", "natural_caption_en", "caption_zh",
+        "verified_tags", "rejected_tags", "uncertain_tags",
+    ],
 }

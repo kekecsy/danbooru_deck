@@ -12,3 +12,5 @@ copyright.json
 magazine.json
 desktop-app/dist
 env_config.json
+logs/
+CLAUDE.md

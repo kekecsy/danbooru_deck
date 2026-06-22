@@ -1,34 +1,9 @@
 import json
-import os
-import time
 from typing import Dict, List, Optional
 import re
-from curl_cffi import requests
 from pathlib import Path
 
 BASE_DIR = Path(__file__).parent.resolve()
-
-
-def _load_env_file(path: Path) -> None:
-    """轻量级 .env 加载：KEY=VALUE 行写入 os.environ（已存在则跳过）。
-    避免引入 python-dotenv 这个额外依赖。注释（#）和空行忽略；不支持引号转义。"""
-    if not path.exists():
-        return
-    try:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, value = line.partition("=")
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-    except Exception as e:
-        print(f"Failed to load .env from {path}: {e}")
-
-
-_load_env_file(BASE_DIR / ".env")
 
 CUSTOM_JSON = BASE_DIR / "custom_translation.json"
 SEARCH_JSON = BASE_DIR / "character_chinese_search.json"
@@ -38,50 +13,6 @@ CHARACTER_SOURCE_JSON = BASE_DIR / "character.json"
 # 用户在 UI 里点「在线拉描述」从 Danbooru wiki 抓回来的条目落到这里。
 # 单独存一个增量文件，避免动 12MB 的 base，加载时合并到内存源。
 CHARACTER_SUPPLEMENT_JSON = BASE_DIR / "character_supplement.json"
-
-# API 配置：apikey 从 .env 读，不再硬编码
-apikey = os.getenv("openrouter_api_key", "")
-MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
-
-SYSTEM_PROMPT = """你是一个专业的角色翻译专家。
-用户会提供一个英文的角色标签（通常是罗马音或英文名）。
-你需要判断该角色对应的常用中文名，并返回 JSON 格式结果。
-格式要求：
-{"has_chinese": true, "chinese_name": "初音未来"}
-如果没有合适的中文名，则返回：
-{"has_chinese": false, "chinese_name": ""}
-请不要输出任何额外解释。"""
-
-RICH_SYSTEM_PROMPT = """你是一个专业的角色翻译与命名专家。
-
-用户会提供一个角色实体，包含：
-- 一个唯一标识符（ID）
-- 一个候选名称列表（other_names，可能含日文/中文/韩文/罗马音）
-- 一段英文角色描述（description，Danbooru wiki 原文）
-
-你的任务是：
-1. 判断该角色是否存在合适的中文名称
-2. 如果存在，从候选名称中选出最常用的中文名 chinese_name；不存在则置为空字符串
-3. 提取一个简短的来源或身份提示 source_hint（小写英文，例如 vocaloid / touhou / blue_archive / fate / kancolle 等）
-4. 把 description 概括翻译成中文 translated_description_zh，保留作品来源与角色定位
-
-只返回 JSON 对象，格式如下：
-{
-  "has_chinese": true,
-  "chinese_name": "初音未来",
-  "source_hint": "vocaloid",
-  "translated_description_zh": "VOCALOID 虚拟歌手角色。..."
-}
-
-如果该角色没有公认的中文名，请返回：
-{
-  "has_chinese": false,
-  "chinese_name": "",
-  "source_hint": "",
-  "translated_description_zh": ""
-}
-
-严禁输出任何额外解释或 Markdown 包裹符号。"""
 
 MANUAL_PROMPT_TEMPLATE = """你是一个专业的 ACG 角色翻译与命名专家。请按下面的规则给出 JSON。
 
@@ -148,38 +79,6 @@ class Translator:
             "chinese_name": chinese_name
         }
         self.save_custom_dict()
-
-    def call_api_for_translation(self, tag: str) -> str:
-        user_prompt = f"角色标签: {tag}\n请直接输出 JSON 对象。"
-        try:
-            headers = {
-                "Authorization": f"Bearer {apikey}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": MODEL,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "temperature": 0.1
-            }
-            response = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers=headers, impersonate="chrome120", timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                text = data["choices"][0]["message"]["content"].strip()
-                if text.startswith("```json"): text = text[7:]
-                if text.startswith("```"): text = text[3:]
-                if text.endswith("```"): text = text[:-3]
-                parsed = json.loads(text.strip())
-                chinese_name = parsed.get("chinese_name", "")
-                if parsed.get("has_chinese") and chinese_name:
-                    return chinese_name
-            else:
-                print(f"API HTTP {response.status_code}: {response.text}")
-        except Exception as e:
-            print(f"API translation failed for {tag}: {e}")
-        return ""
 
     def _lookup_dict(self, tag: str) -> dict:
         """Look up a tag in custom dict. Returns the entry dict or empty dict."""
@@ -263,28 +162,6 @@ class Translator:
 
         # No Chinese translation found — return a nicely formatted name
         return self._format_tag(tag)
-
-    def translate_with_api(self, tag: str) -> str:
-        """Translate with API fallback — use only when explicitly requested, not during page loads."""
-        tag = tag.strip()
-        if not tag:
-            return ""
-
-        # Try dictionaries with all variant strategies
-        for variant in self._get_tag_variants(tag):
-            entry = self._lookup_dict(variant)
-            if entry.get("has_chinese") and entry.get("chinese_name"):
-                return entry["chinese_name"]
-
-        # API fallback
-        chinese_name = self.call_api_for_translation(tag)
-        self.custom_dict[tag] = {
-            "has_chinese": bool(chinese_name),
-            "chinese_name": chinese_name
-        }
-        self.save_custom_dict()
-
-        return chinese_name if chinese_name else tag
 
     # ====================================================================
     # 增量翻译：character_chinese_search.json 流水线
@@ -414,95 +291,6 @@ class Translator:
             other_names=names,
             description=desc,
         )
-
-    def call_rich_translation(self, tag: str, source: Optional[dict] = None) -> dict:
-        """调 openrouter + RICH_SYSTEM_PROMPT。返回 dict：
-        - 成功: {"ok": True, "entry": {...}, "raw": "<原始 LLM 输出>", "error": ""}
-        - 失败: {"ok": False, "entry": {}, "raw": "<原始 LLM 输出，可能为空>", "error": "<可读错误>"}
-
-        raw 字段把 LLM 原文带出来，前端 JSON 解析失败时可以让用户手工修复后重新解析。"""
-        if not apikey:
-            return {"ok": False, "entry": {}, "raw": "",
-                    "error": "未在 .env 中配置 openrouter_api_key，请填写后重启后端"}
-
-        if source is None:
-            source = self.get_character_source(tag)
-        names = ", ".join((source.get("other_names") or [])[:20])
-        desc = self._clean_description(source.get("description", ""))
-        user_prompt = (
-            f"ID: {tag}\n"
-            f"候选名称: {names or '(无)'}\n"
-            f"角色描述: {desc or '(无)'}\n\n"
-            "请直接输出 JSON 对象。"
-        )
-
-        raw_text = ""
-        try:
-            headers = {
-                "Authorization": f"Bearer {apikey}",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "model": MODEL,
-                "messages": [
-                    {"role": "system", "content": RICH_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.1,
-            }
-            # 描述长 + 翻译输出长，10s 不够；放宽到 60s
-            response = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                json=payload,
-                headers=headers,
-                impersonate="chrome120",
-                timeout=60,
-            )
-            if response.status_code != 200:
-                snippet = response.text[:500] if hasattr(response, "text") else ""
-                err = f"HTTP {response.status_code}: {snippet}"
-                print(f"Rich API failed for {tag}: {err}")
-                return {"ok": False, "entry": {}, "raw": snippet, "error": err}
-
-            try:
-                raw_text = response.json()["choices"][0]["message"]["content"]
-            except (KeyError, IndexError, ValueError, TypeError) as e:
-                err = f"上游响应结构异常: {e}; body 前 500 字: {response.text[:500]}"
-                print(f"Rich API for {tag}: {err}")
-                return {"ok": False, "entry": {}, "raw": response.text[:2000], "error": err}
-
-            text = (raw_text or "").strip()
-            if text.startswith("```json"):
-                text = text[7:]
-            if text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-            # 兼容模型偶尔写出 \日 这种非法转义
-            cleaned = re.sub(r'\\([^"\\/bfnrtu])', r'\\\\\1', text)
-            try:
-                parsed = json.loads(cleaned)
-            except json.JSONDecodeError as e:
-                err = f"JSON 解析失败: {e}（可在下方文本框人工修复后重新解析）"
-                print(f"Rich translation parse fail for {tag}: {e}")
-                return {"ok": False, "entry": {}, "raw": raw_text, "error": err}
-
-            if not isinstance(parsed, dict):
-                return {"ok": False, "entry": {}, "raw": raw_text,
-                        "error": "返回的不是 JSON 对象，请人工修复"}
-
-            entry = {
-                "has_chinese": bool(parsed.get("has_chinese", False)),
-                "chinese_name": str(parsed.get("chinese_name", "") or "").strip(),
-                "source_hint": str(parsed.get("source_hint", "") or "").strip().lower(),
-                "translated_description_zh": str(parsed.get("translated_description_zh", "") or "").strip(),
-            }
-            return {"ok": True, "entry": entry, "raw": raw_text, "error": ""}
-        except Exception as e:
-            err = f"请求异常: {type(e).__name__}: {e}"
-            print(f"Rich translation failed for {tag}: {err}")
-            return {"ok": False, "entry": {}, "raw": raw_text, "error": err}
 
     @staticmethod
     def load_search_dict() -> dict:

@@ -14,6 +14,7 @@ const emit = defineEmits(['select']);
 const open = ref(false);
 const activeTab = ref('date');
 const tagSearch = ref('');
+const dateView = ref('days'); // days | months | years
 
 function isTagFolder(s) { return (s || '').startsWith('tag_'); }
 function tagFolderLabel(folder) {
@@ -29,6 +30,7 @@ const isTagSelected = computed(() => isTagFolder(props.selectedDate));
 watch(open, (v) => {
   if (v) {
     activeTab.value = isTagSelected.value ? 'tag' : 'date';
+    dateView.value = 'days';
     tagSearch.value = '';
   }
 });
@@ -124,6 +126,14 @@ function syncMonth() {
 watch(() => [props.selectedDate, props.today], syncMonth, { immediate: true });
 
 const availableSet = computed(() => new Set(props.availableDates));
+const availableYearSet = computed(() => {
+  const years = new Set();
+  for (const value of props.availableDates || []) {
+    const parsed = parseDate(value);
+    if (parsed) years.add(parsed.year);
+  }
+  return years;
+});
 const selectedIndex = computed(() =>
   isTagSelected.value ? -1 : props.availableDates.indexOf(props.selectedDate)
 );
@@ -168,6 +178,38 @@ const cells = computed(() => {
   });
 });
 
+const monthItems = computed(() => {
+  const labels = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
+  const selected = parseDate(props.selectedDate);
+  const today = parseDate(props.today);
+  return labels.map((label, idx) => {
+    const month = idx + 1;
+    const prefix = `${String(currentYear.value).padStart(4, '0')}-${String(month).padStart(2, '0')}-`;
+    return {
+      month,
+      label,
+      enabled: (props.availableDates || []).some(date => date.startsWith(prefix)),
+      selected: !!selected && selected.year === currentYear.value && selected.month === month,
+      today: !!today && today.year === currentYear.value && today.month === month
+    };
+  });
+});
+
+const yearBlockStart = computed(() => Math.floor((currentYear.value || new Date().getFullYear()) / 12) * 12);
+const yearItems = computed(() => {
+  const selected = parseDate(props.selectedDate);
+  const today = parseDate(props.today);
+  return Array.from({ length: 12 }, (_, i) => {
+    const year = yearBlockStart.value + i;
+    return {
+      year,
+      enabled: availableYearSet.value.has(year),
+      selected: !!selected && selected.year === year,
+      today: !!today && today.year === year
+    };
+  });
+});
+
 function prevMonth() {
   if (currentMonth.value === 1) {
     currentMonth.value = 12;
@@ -183,6 +225,42 @@ function nextMonth() {
   } else {
     currentMonth.value += 1;
   }
+}
+function prevYear() {
+  currentYear.value -= 1;
+}
+function nextYear() {
+  currentYear.value += 1;
+}
+function prevYearBlock() {
+  currentYear.value -= 12;
+}
+function nextYearBlock() {
+  currentYear.value += 12;
+}
+function toggleDateView() {
+  dateView.value = dateView.value === 'days' ? 'months' : (dateView.value === 'months' ? 'years' : 'days');
+}
+function pickMonth(month) {
+  currentMonth.value = month;
+  dateView.value = 'days';
+}
+function pickYear(year) {
+  currentYear.value = year;
+  dateView.value = 'months';
+}
+function jumpLatestDate() {
+  const latest = props.availableDates && props.availableDates[0];
+  if (!latest) return;
+  emit('select', latest);
+  open.value = false;
+}
+function jumpTodayMonth() {
+  const parsed = parseDate(props.today);
+  if (!parsed) return;
+  currentYear.value = parsed.year;
+  currentMonth.value = parsed.month;
+  dateView.value = 'days';
 }
 
 function pickDate(date) {
@@ -242,24 +320,80 @@ function pickTag(folder) {
       </div>
 
       <div v-if="activeTab === 'date'">
-        <div class="calendar-header">
-          <button class="small-square" @click="prevMonth">‹</button>
-          <strong>{{ currentYear }}-{{ String(currentMonth).padStart(2, '0') }}</strong>
-          <button class="small-square" @click="nextMonth">›</button>
+        <div class="calendar-header calendar-header-redesigned">
+          <button class="small-square" title="上一年" @click="prevYear">«</button>
+          <button class="small-square" title="上一月" @click="prevMonth">‹</button>
+          <button class="date-heading-btn" title="切换年/月选择" @click="toggleDateView">
+            <strong v-if="dateView === 'days'">{{ currentYear }}-{{ String(currentMonth).padStart(2, '0') }}</strong>
+            <strong v-else-if="dateView === 'months'">{{ currentYear }}</strong>
+            <strong v-else>{{ yearBlockStart }}-{{ yearBlockStart + 11 }}</strong>
+          </button>
+          <button class="small-square" title="下一月" @click="nextMonth">›</button>
+          <button class="small-square" title="下一年" @click="nextYear">»</button>
         </div>
-        <div class="calendar-week">
-          <span v-for="item in ['一','二','三','四','五','六','日']" :key="item">{{ item }}</span>
+        <div class="date-quickbar">
+          <button class="date-quick" :disabled="!props.availableDates.length" @click="jumpLatestDate">最新</button>
+          <button class="date-quick" :disabled="!props.today" @click="jumpTodayMonth">今年今月</button>
+          <button class="date-quick" @click="dateView = 'years'">选年份</button>
+          <button class="date-quick" @click="dateView = 'months'">选月份</button>
         </div>
-        <div class="calendar-grid">
+
+        <template v-if="dateView === 'days'">
+          <div class="calendar-week">
+            <span v-for="item in ['一','二','三','四','五','六','日']" :key="item">{{ item }}</span>
+          </div>
+          <div class="calendar-grid">
+            <button
+              v-for="cell in cells"
+              :key="cell.date"
+              class="day-cell"
+              :class="{ disabled: !cell.enabled, selected: cell.selected, other: cell.otherMonth, today: cell.today }"
+              :title="cell.enabled ? `查看 ${cell.date}` : `${cell.date} 没有图片`"
+              :disabled="!cell.enabled"
+              @click="pickDate(cell.date)"
+            >{{ cell.day }}</button>
+          </div>
+        </template>
+
+        <div v-else-if="dateView === 'months'" class="month-grid">
           <button
-            v-for="cell in cells"
-            :key="cell.date"
-            class="day-cell"
-            :class="{ disabled: !cell.enabled, selected: cell.selected, other: cell.otherMonth, today: cell.today }"
-            :title="cell.enabled ? `查看 ${cell.date}` : `${cell.date} 没有图片`"
-            :disabled="!cell.enabled"
-            @click="pickDate(cell.date)"
-          >{{ cell.day }}</button>
+            v-for="m in monthItems"
+            :key="m.month"
+            class="month-cell"
+            :class="{ disabled: !m.enabled, selected: m.selected, today: m.today }"
+            :disabled="!m.enabled"
+            :title="m.enabled ? `查看 ${currentYear} 年 ${m.label}` : `${currentYear} 年 ${m.label} 没有图片`"
+            @click="pickMonth(m.month)"
+          >{{ m.label }}</button>
+        </div>
+
+        <div v-else class="year-picker">
+          <div class="year-picker-nav">
+            <button class="small-square" title="上一组年份" @click="prevYearBlock">‹</button>
+            <span>{{ yearBlockStart }}-{{ yearBlockStart + 11 }}</span>
+            <button class="small-square" title="下一组年份" @click="nextYearBlock">›</button>
+          </div>
+          <div class="year-grid">
+            <button
+              v-for="y in yearItems"
+              :key="y.year"
+              class="year-cell"
+              :class="{ disabled: !y.enabled, selected: y.selected, today: y.today }"
+              :disabled="!y.enabled"
+              :title="y.enabled ? `查看 ${y.year} 年` : `${y.year} 年没有图片`"
+              @click="pickYear(y.year)"
+            >{{ y.year }}</button>
+          </div>
+        </div>
+        <div class="year-strip" v-if="dateView !== 'years'">
+          <button
+            v-for="y in yearItems"
+            :key="`strip-${y.year}`"
+            class="year-strip-btn"
+            :class="{ active: y.year === currentYear, disabled: !y.enabled }"
+            :disabled="!y.enabled"
+            @click="currentYear = y.year"
+          >{{ y.year }}</button>
         </div>
       </div>
 
@@ -340,6 +474,145 @@ function pickTag(folder) {
   background: linear-gradient(135deg, #faecd9, #f5dbb8);
   border-color: rgba(74, 53, 25, 0.35);
   font-weight: 600;
+}
+
+.calendar-header-redesigned {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+.calendar-header-redesigned .small-square {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  padding: 0;
+  flex: 0 0 26px;
+  line-height: 1;
+}
+.date-heading-btn {
+  flex: 1 1 auto;
+  min-width: 104px;
+  height: 28px;
+  border: 1px solid rgba(74, 53, 25, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 252, 246, 0.86);
+  color: var(--accent-deep);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.date-heading-btn:hover {
+  background: rgba(243, 223, 212, 0.8);
+}
+.date-quickbar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 8px 0 10px;
+}
+.date-quick {
+  height: 26px;
+  min-width: 0;
+  padding: 0 6px;
+  border: 1px solid rgba(74, 53, 25, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 252, 246, 0.78);
+  color: var(--muted, #846a55);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.date-quick:hover:not(:disabled) {
+  background: rgba(243, 223, 212, 0.75);
+  color: var(--accent-deep);
+}
+.date-quick:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.month-grid,
+.year-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+.month-cell,
+.year-cell {
+  height: 34px;
+  border: 1px solid rgba(74, 53, 25, 0.16);
+  border-radius: 7px;
+  background: rgba(255, 252, 246, 0.86);
+  color: var(--ink, #2d2417);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+.month-cell:hover:not(:disabled),
+.year-cell:hover:not(:disabled) {
+  background: rgba(243, 223, 212, 0.8);
+}
+.month-cell.selected,
+.year-cell.selected {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  border-color: transparent;
+  color: #fff;
+  font-weight: 700;
+}
+.month-cell.today:not(.selected),
+.year-cell.today:not(.selected) {
+  border-color: rgba(80, 130, 92, 0.55);
+  color: #2d7a3e;
+  font-weight: 700;
+}
+.month-cell.disabled,
+.year-cell.disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+}
+.year-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.year-picker-nav {
+  display: grid;
+  grid-template-columns: 28px 1fr 28px;
+  align-items: center;
+  gap: 8px;
+  color: var(--accent-deep);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
+}
+.year-strip {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 4px;
+  margin-top: 10px;
+}
+.year-strip-btn {
+  height: 24px;
+  min-width: 0;
+  padding: 0 4px;
+  border: 1px solid rgba(74, 53, 25, 0.12);
+  border-radius: 6px;
+  background: rgba(255, 252, 246, 0.72);
+  color: var(--muted, #846a55);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.year-strip-btn.active {
+  background: var(--accent-deep);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 700;
+}
+.year-strip-btn.disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
 }
 
 /* tab 切换条：在 .calendar-panel 顶端，分日期 / 标签 */
