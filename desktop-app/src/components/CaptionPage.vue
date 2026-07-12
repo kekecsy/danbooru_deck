@@ -613,7 +613,7 @@ watch(() => props.sourceItem, (item) => { if (item) initFromSource(item); });
       <div class="caption-nav">
         <button class="secondary" :disabled="currentIndex <= 0" @click="goToPrev">◀ 上一张</button>
         <span class="nav-info">{{ imageList.length ? currentIndex + 1 : 0 }} / {{ imageList.length }}</span>
-        <button class="secondary" :disabled="currentIndex >= imageList.length - 1" @click="goToNext">下一张 ▶</button>
+        <button class="secondary" :disabled="currentIndex >= imageList.length - 1" @click="goToNext">下一张</button>
       </div>
       <div class="caption-header-right">
         <span v-if="message" class="caption-msg">{{ message }}</span>
@@ -679,7 +679,7 @@ watch(() => props.sourceItem, (item) => { if (item) initFromSource(item); });
               </div>
               <!-- Step 1a: copy prompt & paste -->
               <div v-if="manual.stage === 1 && !manual.s1.parsed" class="stage-body">
-                <button class="secondary" :disabled="manual.promptBusy" @click="copyStagePrompt(1)">📋 复制 Stage 1 提示词</button>
+                <button class="secondary" :disabled="manual.promptBusy" @click="copyStagePrompt(1)">复制 Stage 1 提示词</button>
                 <button class="secondary" :disabled="!imagePath" @click="copyCaptionImage()">🖼️ 复制图片</button>
                 <textarea v-model="manual.s1.pasted" placeholder="粘贴 LLM 返回的 JSON..." rows="3"></textarea>
                 <div v-if="manual.s1.parseError" class="pipeline-error">⚠️ {{ manual.s1.parseError }}</div>
@@ -773,7 +773,7 @@ watch(() => props.sourceItem, (item) => { if (item) initFromSource(item); });
               </div>
               <!-- Step 2a: copy prompt & paste -->
               <div v-if="manual.stage === 2 && !manual.s2.parsed" class="stage-body">
-                <button class="secondary" :disabled="manual.promptBusy" @click="copyStagePrompt(2)">📋 复制 Stage 2 提示词</button>
+                <button class="secondary" :disabled="manual.promptBusy" @click="copyStagePrompt(2)">复制 Stage 2 提示词</button>
                 <textarea v-model="manual.s2.pasted" placeholder="粘贴 LLM 返回的 JSON..." rows="4"></textarea>
                 <div v-if="manual.s2.parseError" class="pipeline-error">⚠️ {{ manual.s2.parseError }}</div>
                 <button :disabled="!manual.s2.pasted.trim()" @click="parseStageJson(2)" class="primary">✓ 解析 JSON，进入审查</button>
@@ -860,7 +860,7 @@ watch(() => props.sourceItem, (item) => { if (item) initFromSource(item); });
                 <span v-else-if="manual.stage === 3" class="stage-status active">当前</span>
               </div>
               <div v-if="manual.stage === 3" class="stage-body">
-                <button class="secondary" :disabled="manual.promptBusy" @click="copyStagePrompt(3)">📋 复制 Stage 3 提示词</button>
+                <button class="secondary" :disabled="manual.promptBusy" @click="copyStagePrompt(3)">复制 Stage 3 提示词</button>
                 <p class="stage-hint">在同一对话粘贴，返回的 JSON（含 tag_caption / natural_caption_en / caption_zh / verified_tags / tag 审计）粘到下方：</p>
                 <textarea v-model="manual.s3.pasted" placeholder='粘贴 Stage 3 返回的 JSON...' rows="4"></textarea>
                 <div v-if="manual.s3.parseError" class="pipeline-error">⚠️ {{ manual.s3.parseError }}</div>
@@ -946,7 +946,7 @@ watch(() => props.sourceItem, (item) => { if (item) initFromSource(item); });
             </div>
             <div class="error-actions">
               <button class="secondary" @click="clearErrors">清空</button>
-              <button class="primary" :disabled="!errors.length || !errors.some(e => e.type)" @click="copyCorrectionPrompt">📋 构建修正提示词</button>
+              <button class="primary" :disabled="!errors.length || !errors.some(e => e.type)" @click="copyCorrectionPrompt">构建修正提示词</button>
             </div>
           </div>
         </div>

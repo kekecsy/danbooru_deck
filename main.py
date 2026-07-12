@@ -339,6 +339,8 @@ class DownloadJob:
     tag_query: str = ""                                   # tags 模式：供「重试失败页」重建请求
     tag_source: str = "danbooru"                          # tags 模式：danbooru / gelbooru
     failed_pages: list = field(default_factory=list)      # [{"folder":..., "page":...}]，自动重试后仍失败的页
+    outcome: str = "pending"                              # pending / running / completed / completed_with_failures / stopped / error
+    error_message: str = ""                               # 仅记录任务自身的致命异常，不混用服务 stderr
 
     def __post_init__(self):
         if not self.play_event.is_set():
@@ -448,7 +450,10 @@ class JobRegistry:
 
     def list_active(self):
         with self._lock:
-            return [j for j in self._jobs.values() if j.is_running]
+            return [
+                j for j in self._jobs.values()
+                if j.is_running or (j.thread is not None and j.thread.is_alive())
+            ]
 
     def can_start(self):
         return len(self.list_active()) < self.MAX_CONCURRENT
@@ -457,7 +462,10 @@ class JobRegistry:
         """优先返回正在跑的 job；若都没活跃，回退到最近 started_at 的（保留 30 秒，
         让前端 syncStatus 能拉到最后一批 new_logs / new_images / "任务完成" 提示）。"""
         with self._lock:
-            active = [j for j in self._jobs.values() if j.is_running]
+            active = [
+                j for j in self._jobs.values()
+                if j.is_running or (j.thread is not None and j.thread.is_alive())
+            ]
             if active:
                 return active[0]
             all_jobs = list(self._jobs.values())
@@ -525,6 +533,54 @@ def _make_job(target_folder, mode, filter_tags, label=None, tag_source="danbooru
     )
     job.sent_image_count = len(viewer_data)
     return job
+
+
+GALLERY_MEDIA_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif",
+    ".zip", ".mp4", ".webm", ".mov", ".mkv", ".avi",
+}
+
+
+def count_gallery_media_files(folder: Path) -> int:
+    if not folder.exists() or not folder.is_dir():
+        return 0
+    count = 0
+    for media_path in folder.iterdir():
+        if not media_path.is_file():
+            continue
+        suffix = media_path.suffix.lower()
+        if suffix not in GALLERY_MEDIA_EXTENSIONS:
+            continue
+        if suffix == ".gif" and media_path.with_suffix(".zip").exists():
+            continue
+        count += 1
+    return count
+
+
+def get_available_date_folder_details():
+    date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    folders = {}
+    for root in get_library_roots():
+        base = root["path"]
+        if not base.exists():
+            continue
+        for item in base.iterdir():
+            if not item.is_dir() or not date_pattern.match(item.name):
+                continue
+            try:
+                datetime.datetime.strptime(item.name, "%Y-%m-%d")
+            except ValueError:
+                continue
+            rec = folders.setdefault(item.name, {
+                "date": item.name,
+                "image_count": 0,
+                "source_count": 0,
+                "has_images": False,
+            })
+            rec["source_count"] += 1
+            rec["image_count"] += count_gallery_media_files(item)
+            rec["has_images"] = rec["image_count"] > 0
+    return sorted(folders.values(), key=lambda x: x["date"], reverse=True)
 
 
 def get_available_date_folders():
@@ -1404,10 +1460,15 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
                     job.db.save_need_update(nu_sets)
 
     except Exception as e:
+        if job.outcome != "stopped":
+            job.outcome = "error"
+            job.error_message = str(e)
         job.write_snapshot()
         job.append_log(f"抓取任务异常中断，已写入临时快照: {e}")
     finally:
         job.is_running = False
+        if job.outcome == "running":
+            job.outcome = "completed_with_failures" if job.failed_pages else "completed"
         job.append_log("所有页面处理完毕或已结束。")
         # 任务结束后保留 30 秒让前端拉走最后一批 new_logs/new_images，再从注册表里清掉。
         # registry 里 is_running=False 不算占用 MAX_CONCURRENT 槽位，所以不影响立刻起下一个 job。
@@ -1504,6 +1565,8 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
     job.tag_query = req.tag_query or ""
     job.tag_source = tag_source
     job.is_running = True
+    job.outcome = "running"
+    job.error_message = ""
     job.play_event.set()
     jobs.add(job)
 
@@ -1558,6 +1621,7 @@ def stop_scraper(job_id: str = ""):
     job = _resolve_job(job_id)
     if not job:
         return {"msg": "没有任务"}
+    job.outcome = "stopped"
     job.is_running = False
     job.play_event.set()
     job.write_snapshot()
@@ -1574,11 +1638,15 @@ def get_status(job_id: str = ""):
     if job is None:
         return {
             "is_running": False,
+            "is_stopping": False,
             "is_paused": False,
             "target_folder": "",
             "new_logs": [],
             "new_images": [],
             "failed_pages": [],
+            "job_id": "",
+            "outcome": "idle",
+            "error_message": "",
             "jobs": [],
         }
 
@@ -1592,9 +1660,14 @@ def get_status(job_id: str = ""):
             new_images = job.viewer_data[job.sent_image_count:current_count]
             job.sent_image_count = current_count
 
+    thread_alive = bool(job.thread is not None and job.thread.is_alive())
     return {
+        "job_id": job.job_id,
         "is_running": job.is_running,
+        "is_stopping": not job.is_running and thread_alive,
         "is_paused": job.is_paused,
+        "outcome": job.outcome,
+        "error_message": job.error_message,
         # 当前下载实际写入的子目录名（日期 "YYYY-MM-DD" 或 tag 文件夹 "tag_xxx"）。
         # 前端用这个匹配 selectedDate 决定 new_images 该不该追加进当前画廊。
         "target_folder": job.target_folder,
@@ -1627,6 +1700,7 @@ def get_gallery_data():
         "local_images": build_local_image_library(selected_date),
         "selected_date": selected_date,
         "available_dates": available_dates,
+        "available_date_folders": get_available_date_folder_details(),
         "available_tags": get_available_tag_folders(),
         "library_roots": get_library_roots_payload(),
         # 这里返回真正的系统日历今天 —— 不能用模块全局 today_str。
@@ -1643,6 +1717,7 @@ def get_gallery_data_by_date(date_str: str):
         "local_images": build_local_image_library(selected_date),
         "selected_date": selected_date,
         "available_dates": available_dates,
+        "available_date_folders": get_available_date_folder_details(),
         "available_tags": get_available_tag_folders(),
         "library_roots": get_library_roots_payload(),
         # 同上，使用系统日历今天而不是会被下载任务 hijack 的 today_str。
@@ -2319,6 +2394,15 @@ def api_character_source(tag: str):
     tag 在 URL 路径上需 URL-encode（前端用 encodeURIComponent）。"""
     source = translator.get_character_source(tag)
     manual_prompt = translator.build_manual_prompt(tag, source)
+    translation = translator.get_translation_entry(tag)
+    if translation.get("matched_key"):
+        manual_prompt += (
+            "\n\n【当前字典记录（请重点检查同名角色、作品归属和皮肤差异）】"
+            f"\nmatched_key: {translation.get('matched_key', '')}"
+            f"\nchinese_name: {translation.get('chinese_name', '')}"
+            f"\nsource_hint: {translation.get('source_hint', '')}"
+            f"\ntranslated_description_zh: {translation.get('translated_description_zh', '')}"
+        )
     return {
         "tag": tag,
         "exists": source.get("exists", False),
@@ -2327,7 +2411,14 @@ def api_character_source(tag: str):
         "other_names": source.get("other_names", []),
         "fallback_name": translator._format_tag(tag),
         "manual_prompt": manual_prompt,
+        "translation": translation,
     }
+
+
+@app.get("/api/character_translations")
+def api_character_translations(q: str = "", limit: int = 100):
+    """搜索用户可编辑的角色翻译字典；用于同名皮肤和同作品批量排查。"""
+    return {"ok": True, "query": q, "items": translator.search_translation_entries(q, limit)}
 
 
 @app.post("/api/fetch_character_source")
@@ -2375,7 +2466,9 @@ def api_save_character_translation(req: SaveCharacterTranslationRequest):
             "source_hint": req.source_hint,
             "translated_description_zh": req.translated_description_zh,
         })
-        return {"ok": True, "msg": "已保存到 character_chinese_search.json"}
+        # 手动修正应立即生效，不再要求用户额外点一次“导入到画廊”。
+        translator.import_search_to_custom()
+        return {"ok": True, "msg": "已保存并同步到画廊字典"}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 

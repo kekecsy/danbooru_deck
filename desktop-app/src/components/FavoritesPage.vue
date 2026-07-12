@@ -745,7 +745,7 @@ onMounted(loadFavorites);
             >×</button>
           </span>
           <button class="secondary" @click="loadImageFavorites" :disabled="loading" style="white-space: nowrap;">
-            {{ loading ? '加载中...' : '🔄 刷新' }}
+            {{ loading ? '加载中...' : '刷新' }}
           </button>
         </div>
       </div>
@@ -902,13 +902,13 @@ onMounted(loadFavorites);
             class="secondary"
             @click="toggleViewerFitMode"
             :title="viewer.fitMode === 'fit' ? '当前：适应窗口，点击切换为原始大小' : '当前：原始大小，点击切换为适应窗口'"
-          >{{ viewer.fitMode === 'fit' ? '⛶ 原始大小' : '▣ 适应窗口' }}</button>
+          >{{ viewer.fitMode === 'fit' ? '原始大小' : '适应窗口' }}</button>
           <button
             class="secondary"
             :class="{ 'pin-active': viewer.toolbarPinned }"
             @click="toggleViewerToolbarPin"
             :title="viewer.toolbarPinned ? '已固定信息栏，点击取消固定（恢复鼠标悬浮显示）' : '固定信息栏（默认悬浮显示）'"
-          >{{ viewer.toolbarPinned ? '📌 已固定' : '📌 固定' }}</button>
+          >{{ viewer.toolbarPinned ? '已固定' : '固定' }}</button>
           <button
             class="ghost"
             @click="viewerItem && removeImageFavorite(viewerItem)"

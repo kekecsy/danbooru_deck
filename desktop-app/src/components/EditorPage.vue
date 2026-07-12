@@ -44,6 +44,7 @@ const editor = reactive({
   draft: null,
   fillMode: 'mosaic',
   opacity: 1,
+  mosaicBlockSize: Number.isFinite(editorHabits.mosaicBlockSize) ? editorHabits.mosaicBlockSize : 18,
   stripeText: '该信息已被管理员撤回',
   stripeFontFamily: typeof editorHabits.stripeFontFamily === 'string' && editorHabits.stripeFontFamily
     ? editorHabits.stripeFontFamily
@@ -51,6 +52,7 @@ const editor = reactive({
   stripeFontSize: Number.isFinite(editorHabits.stripeFontSize) && editorHabits.stripeFontSize > 0
     ? editorHabits.stripeFontSize
     : 26,
+  stripeAutoFit: editorHabits.stripeAutoFit !== false,
   stripeOrientation: editorHabits.stripeOrientation === 'vertical' ? 'vertical' : 'horizontal',
   imageDataUrl: null,
   imageOverlayName: '',
@@ -73,10 +75,12 @@ watch(() => editor.outputMaxEdge, (v) => {
   catch { /* localStorage 异常时静默 */ }
 });
 
-watch(() => [editor.stripeFontSize, editor.stripeFontFamily, editor.stripeOrientation], ([size, family, orientation]) => {
+watch(() => [editor.stripeFontSize, editor.stripeFontFamily, editor.stripeOrientation, editor.stripeAutoFit, editor.mosaicBlockSize], ([size, family, orientation, autoFit, mosaicBlockSize]) => {
   if (Number.isFinite(size) && size > 0) editorHabits.stripeFontSize = Math.round(size);
   if (typeof family === 'string' && family) editorHabits.stripeFontFamily = family;
   editorHabits.stripeOrientation = orientation === 'vertical' ? 'vertical' : 'horizontal';
+  editorHabits.stripeAutoFit = autoFit !== false;
+  if (Number.isFinite(mosaicBlockSize) && mosaicBlockSize > 0) editorHabits.mosaicBlockSize = Math.round(mosaicBlockSize);
   try { localStorage.setItem(STORAGE_KEY_EDITOR_HABITS, JSON.stringify(editorHabits)); }
   catch { /* localStorage 异常时静默 */ }
 });
@@ -86,6 +90,7 @@ function selectedLayer() {
 }
 
 function normalizeCharacters(value) {
+  if (Array.isArray(value)) return value.filter(Boolean).join(', ');
   return String(value || '').split(' ').filter(Boolean).join(', ');
 }
 
@@ -104,9 +109,11 @@ function normalizeLayer(layer) {
 function applyControlsToLayer(layer) {
   layer.fillMode = editor.fillMode;
   layer.opacity = editor.opacity;
+  layer.mosaicBlockSize = editor.mosaicBlockSize;
   layer.stripeText = editor.stripeText;
   layer.stripeFontFamily = editor.stripeFontFamily;
   layer.stripeFontSize = editor.stripeFontSize;
+  layer.stripeAutoFit = editor.stripeAutoFit;
   layer.stripeOrientation = editor.stripeOrientation;
   layer.imageDataUrl = editor.imageDataUrl;
   layer.imageOverlayName = editor.imageOverlayName;
@@ -170,9 +177,11 @@ function syncFromLayer(layer) {
   if (!layer) return;
   editor.fillMode = layer.fillMode;
   editor.opacity = layer.opacity;
+  editor.mosaicBlockSize = layer.mosaicBlockSize || 18;
   editor.stripeText = layer.stripeText;
   editor.stripeFontFamily = layer.stripeFontFamily;
   editor.stripeFontSize = layer.stripeFontSize;
+  editor.stripeAutoFit = layer.stripeAutoFit !== false;
   editor.stripeOrientation = layer.stripeOrientation;
   editor.imageDataUrl = layer.imageDataUrl || null;
   editor.imageOverlayName = layer.imageOverlayName || '';
@@ -196,9 +205,11 @@ function addLayer(rect) {
     height: rect.height,
     fillMode: editor.fillMode,
     opacity: editor.opacity,
+    mosaicBlockSize: editor.mosaicBlockSize,
     stripeText: editor.stripeText,
     stripeFontFamily: editor.stripeFontFamily,
     stripeFontSize: editor.stripeFontSize,
+    stripeAutoFit: editor.stripeAutoFit,
     stripeOrientation: editor.stripeOrientation,
     imageDataUrl: editor.imageDataUrl,
     imageOverlayName: editor.imageOverlayName,
@@ -211,16 +222,50 @@ function addLayer(rect) {
 }
 
 function drawMosaic(ctx, layer, scale) {
-  const block = Math.max(3, 15 * scale);
+  if (!editor.image) return;
+  const sourceBlock = Math.max(3, Number(layer.mosaicBlockSize) || 18);
+  const sampleWidth = Math.max(1, Math.ceil(layer.width / sourceBlock));
+  const sampleHeight = Math.max(1, Math.ceil(layer.height / sourceBlock));
+  const pixelCanvas = document.createElement('canvas');
+  pixelCanvas.width = sampleWidth;
+  pixelCanvas.height = sampleHeight;
+  const pixelCtx = pixelCanvas.getContext('2d');
+  pixelCtx.imageSmoothingEnabled = true;
+  pixelCtx.drawImage(
+    editor.image,
+    layer.x, layer.y, layer.width, layer.height,
+    0, 0, sampleWidth, sampleHeight
+  );
   ctx.save();
   ctx.globalAlpha = layer.opacity;
-  for (let y = 0; y < layer.height * scale; y += block) {
-    for (let x = 0; x < layer.width * scale; x += block) {
-      ctx.fillStyle = (((Math.floor(x / block) + Math.floor(y / block)) % 2) === 0) ? 'rgb(180,180,180)' : 'rgb(120,120,120)';
-      ctx.fillRect(layer.x * scale + x, layer.y * scale + y, block, block);
-    }
-  }
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(
+    pixelCanvas,
+    0, 0, sampleWidth, sampleHeight,
+    layer.x * scale, layer.y * scale, layer.width * scale, layer.height * scale
+  );
   ctx.restore();
+}
+
+function fittedStripeFontSize(ctx, layer, scale) {
+  const manualSize = Math.max(6, Number(layer.stripeFontSize) || 26) * scale;
+  if (layer.stripeAutoFit === false) return manualSize;
+  const text = String(layer.stripeText || '').trim() || ' ';
+  const w = layer.width * scale;
+  const h = layer.height * scale;
+  if (layer.stripeOrientation === 'vertical') {
+    const count = Math.max(1, Array.from(text).length);
+    return Math.max(1 * scale, Math.min(w * 0.68, h / (count * 1.12)));
+  }
+  let low = 1 * scale;
+  let high = Math.max(low, h * 0.72);
+  for (let i = 0; i < 12; i += 1) {
+    const mid = (low + high) / 2;
+    ctx.font = `900 ${mid}px "${layer.stripeFontFamily}"`;
+    if (ctx.measureText(text).width <= w * 0.88) low = mid;
+    else high = mid;
+  }
+  return low;
 }
 
 function drawStripe(ctx, layer, scale) {
@@ -233,26 +278,24 @@ function drawStripe(ctx, layer, scale) {
 
   // Removed background box for watermark style
 
-  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-  // 不再用 Math.max 兜底，保证预览 ↔ 导出严格按 scale 等比；
-  // 否则缩小到 scale*fontSize < 12 时预览会偷偷把字体撑大到 12，
-  // 而导出永远 scale=1（不触发下限）→ 视觉上"字 vs 图"比例对不上。
-  ctx.font = `900 ${layer.stripeFontSize * scale}px "${layer.stripeFontFamily}"`;
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.92)';
+  const fontSize = fittedStripeFontSize(ctx, layer, scale);
+  ctx.font = `900 ${fontSize}px "${layer.stripeFontFamily}"`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
 
   ctx.shadowColor = 'rgba(0, 0, 0, 0.6)';
-  ctx.shadowBlur = 4 * scale;
-  ctx.shadowOffsetX = 2 * scale;
-  ctx.shadowOffsetY = 2 * scale;
+  ctx.shadowBlur = Math.max(2, fontSize * 0.12);
+  ctx.shadowOffsetX = Math.max(1, fontSize * 0.05);
+  ctx.shadowOffsetY = Math.max(1, fontSize * 0.05);
 
   ctx.strokeStyle = 'rgba(0, 0, 0, 0.6)';
-  ctx.lineWidth = 3 * scale;
+  ctx.lineWidth = Math.max(1.5, fontSize * 0.1);
   ctx.lineJoin = 'round';
 
   if (layer.stripeOrientation === 'vertical') {
     const chars = Array.from(layer.stripeText || '');
-    const line = layer.stripeFontSize * scale * 1.1;
+    const line = fontSize * 1.1;
     const start = y + h / 2 - (chars.length * line) / 2 + line / 2;
     chars.forEach((char, index) => {
       ctx.strokeText(char, x + w / 2, start + index * line);
@@ -452,6 +495,9 @@ function onEditorKeyDown(event) {
       event.preventDefault();
       deleteSelected();
     }
+  } else if (event.key === 'Escape' && editor.selectedId != null) {
+    editor.selectedId = null;
+    render();
   }
 }
 
@@ -514,13 +560,13 @@ async function loadImageFromDataUrl(dataUrl, meta = {}) {
   editor.imageName = meta.filename || 'image.png';
   editor.sourceMeta.artist = meta.artist || '';
   editor.sourceMeta.characters = meta.characters || '';
-  editor.sourceMeta.postUrl = meta.postUrl || '';
+  editor.sourceMeta.postUrl = meta.postUrl || meta.post_url || '';
   editor.layers = [];
   editor.selectedId = null;
   editor.nextId = 1;
   if (editor.sourceMeta.artist) editor.stripeText = editor.sourceMeta.artist;
   await nextTick();
-  actualSize();
+  fitToWindow();
 }
 
 async function loadImageFromPath(filePath, meta = {}) {
@@ -663,6 +709,11 @@ function useCharactersText() {
   editor.stripeText = text;
 }
 
+function usePostUrlText() {
+  if (!editor.sourceMeta.postUrl) return;
+  editor.stripeText = editor.sourceMeta.postUrl;
+}
+
 function onMouseDown(event) {
   if (!editor.image) return;
   const point = canvasPoint(event);
@@ -777,9 +828,11 @@ watch(() => props.sourceItem, async (item) => {
 watch(() => [
   editor.fillMode,
   editor.opacity,
+  editor.mosaicBlockSize,
   editor.stripeText,
   editor.stripeFontFamily,
   editor.stripeFontSize,
+  editor.stripeAutoFit,
   editor.stripeOrientation,
   editor.revealColor,
   editor.revealOpacity
@@ -855,7 +908,7 @@ onBeforeUnmount(() => {
           :class="{ 'is-active': panelPinned }"
           @click="panelPinned = !panelPinned"
           :title="panelPinned ? '已固定（常驻不透明），点击取消固定' : '固定面板（默认半透明，悬浮变清晰）'"
-        >{{ panelPinned ? '📌 已固定' : '📌 固定' }}</button>
+        >{{ panelPinned ? '已固定' : '固定' }}</button>
         <button class="ghost" @click="panelCollapsed = true" title="收起面板，让画布全幅显示">收起 ›</button>
       </div>
 
@@ -886,14 +939,20 @@ onBeforeUnmount(() => {
           >
             链接
           </a>
+          <button class="ghost" :disabled="!editor.sourceMeta.postUrl" @click="usePostUrlText">填入文字</button>
         </div>
       </section>
+
+      <div class="editor-workflow-hint" :class="{ active: editor.selectedId != null }">
+        <strong>{{ editor.selectedId != null ? `正在编辑第 ${editor.selectedId} 个码块` : '拖拽图片空白处创建码块' }}</strong>
+        <span>拖动码块可移动，拖动四角可缩放；Delete 删除，Esc 取消选中，Ctrl+Z 撤销。</span>
+      </div>
 
       <label class="field-full">
         <span>打码方式</span>
         <select v-model="editor.fillMode">
-          <option value="mosaic">默认马赛克</option>
-          <option value="stripe">文本水印 (无背景)</option>
+          <option value="mosaic">真实像素马赛克</option>
+          <option value="stripe">自适应文本水印</option>
           <option value="image">贴图填充</option>
           <option value="reveal">显示遮罩</option>
         </select>
@@ -902,6 +961,11 @@ onBeforeUnmount(() => {
       <label class="field-full">
         <span>透明度 {{ Math.round(editor.opacity * 100) }}%</span>
         <input v-model.number="editor.opacity" type="range" min="0.1" max="1" step="0.05" />
+      </label>
+
+      <label v-if="editor.fillMode === 'mosaic'" class="field-full">
+        <span>马赛克强度 {{ editor.mosaicBlockSize }}px</span>
+        <input v-model.number="editor.mosaicBlockSize" type="range" min="6" max="64" step="2" />
       </label>
 
       <template v-if="editor.fillMode === 'stripe'">
@@ -930,9 +994,13 @@ onBeforeUnmount(() => {
             </select>
           </label>
         </div>
+        <label class="editor-check-row">
+          <input v-model="editor.stripeAutoFit" type="checkbox" />
+          <span>字号随码块大小和文字长度自动适配</span>
+        </label>
         <label class="field-full">
-          <span>字号</span>
-          <input v-model.number="editor.stripeFontSize" type="number" min="8" max="96" />
+          <span>{{ editor.stripeAutoFit ? '手动字号（关闭自动适配后生效）' : '字号' }}</span>
+          <input v-model.number="editor.stripeFontSize" type="number" min="8" max="240" :disabled="editor.stripeAutoFit" />
         </label>
       </template>
 

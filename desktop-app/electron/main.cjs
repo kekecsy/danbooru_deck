@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard, nativeImage, protocol, net } = require('electron');
+const { app, BrowserWindow, Menu, ipcMain, dialog, shell, clipboard, nativeImage, protocol, net, screen } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
 const { pathToFileURL } = require('node:url');
@@ -13,12 +13,54 @@ const presetDirs = [
   path.join(repoRoot, 'mosaic_qt', 'present')
 ];
 const crawlerApiBase = 'http://127.0.0.1:8000';
+const DEFAULT_WINDOW_STATE = { width: 1540, height: 980, isMaximized: true };
+const MIN_WINDOW_WIDTH = 1240;
+const MIN_WINDOW_HEIGHT = 760;
 
 let crawlerProcess = null;
 let crawlerStartPromise = null;
 let crawlerStdout = [];
 let crawlerLastError = '';
 let thumbCacheDir = '';
+
+function windowStatePath() {
+  return path.join(app.getPath('userData'), 'window-state.json');
+}
+
+function clampWindowSize(value, min, max, fallback) {
+  const candidate = Number.isFinite(value) ? value : fallback;
+  return Math.max(min, Math.min(Math.round(candidate), max));
+}
+
+function loadWindowState() {
+  const state = { ...DEFAULT_WINDOW_STATE };
+  try {
+    const raw = JSON.parse(fs.readFileSync(windowStatePath(), 'utf-8'));
+    const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+    state.width = clampWindowSize(raw?.width, MIN_WINDOW_WIDTH, Math.max(MIN_WINDOW_WIDTH, width), DEFAULT_WINDOW_STATE.width);
+    state.height = clampWindowSize(raw?.height, MIN_WINDOW_HEIGHT, Math.max(MIN_WINDOW_HEIGHT, height), DEFAULT_WINDOW_STATE.height);
+    state.isMaximized = !!raw?.isMaximized;
+  } catch {
+    // First launch or invalid state file: keep the historical default size and maximized startup.
+  }
+  return state;
+}
+
+function saveWindowState(win) {
+  if (!win || win.isDestroyed()) return;
+  try {
+    const bounds = typeof win.getNormalBounds === 'function' ? win.getNormalBounds() : win.getBounds();
+    const state = {
+      width: Math.max(MIN_WINDOW_WIDTH, Math.round(bounds.width)),
+      height: Math.max(MIN_WINDOW_HEIGHT, Math.round(bounds.height)),
+      isMaximized: win.isMaximized()
+    };
+    fs.mkdirSync(path.dirname(windowStatePath()), { recursive: true });
+    fs.writeFileSync(windowStatePath(), `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+  } catch {
+    // Window state persistence is best-effort; failing here should not block app shutdown.
+  }
+}
 
 function loadLibraryRoots() {
   const roots = [{ id: 'default', label: 'hot_pic', path: path.resolve(hotPicDir), isDefault: true }];
@@ -67,13 +109,19 @@ function isWithinLibraryRoots(targetPath) {
 }
 
 let localCustomDict = null;
+let localCustomDictMtime = 0;
 function loadLocalCustomDict() {
   const dictPath = path.join(repoRoot, 'custom_translation.json');
-  if (!localCustomDict && fs.existsSync(dictPath)) {
+  if (fs.existsSync(dictPath)) {
     try {
-      localCustomDict = JSON.parse(fs.readFileSync(dictPath, 'utf-8'));
+      const mtime = fs.statSync(dictPath).mtimeMs;
+      if (!localCustomDict || mtime !== localCustomDictMtime) {
+        localCustomDict = JSON.parse(fs.readFileSync(dictPath, 'utf-8'));
+        localCustomDictMtime = mtime;
+      }
     } catch (e) {
       localCustomDict = {};
+      localCustomDictMtime = 0;
     }
   }
   return localCustomDict || {};
@@ -97,11 +145,12 @@ function translateTags(tagString) {
 }
 
 function createWindow() {
+  const windowState = loadWindowState();
   const win = new BrowserWindow({
-    width: 1540,
-    height: 980,
-    minWidth: 1240,
-    minHeight: 760,
+    width: windowState.width,
+    height: windowState.height,
+    minWidth: MIN_WINDOW_WIDTH,
+    minHeight: MIN_WINDOW_HEIGHT,
     backgroundColor: '#f3ede2',
     autoHideMenuBar: true,
     webPreferences: {
@@ -116,15 +165,16 @@ function createWindow() {
     }
   });
   win.setMenuBarVisibility(false);
-  // 默认最大化：填满屏幕工作区，保留标题栏/任务栏，可正常还原。
-  // 上面的 width/height 作为用户点「还原」后的窗口尺寸。
-  win.maximize();
+  if (windowState.isMaximized) win.maximize();
 
   // 关闭拦截：右上角 × / Alt+F4 / 系统菜单 关闭时弹出异步确认对话框，
   // 避免后台抓图任务被误关打断。用户确认后再真正关闭。
   let confirmingClose = false;
   win.on('close', (event) => {
-    if (win.__forceClose) return;
+    if (win.__forceClose) {
+      saveWindowState(win);
+      return;
+    }
     event.preventDefault();
     if (confirmingClose) return;
     confirmingClose = true;
@@ -159,6 +209,22 @@ function isDateFolder(name) {
   return /^\d{4}-\d{2}-\d{2}$/.test(name);
 }
 
+const GALLERY_MEDIA_EXT_RE = /\.(jpg|jpeg|png|gif|webp|bmp|avif|zip|mp4|webm|mov|mkv|avi)$/i;
+
+function countGalleryMediaFiles(dirPath) {
+  if (!fs.existsSync(dirPath)) return 0;
+  let count = 0;
+  for (const item of fs.readdirSync(dirPath, { withFileTypes: true })) {
+    if (!item.isFile() || !GALLERY_MEDIA_EXT_RE.test(item.name)) continue;
+    if (item.name.toLowerCase().endsWith('.gif')) {
+      const zipName = item.name.slice(0, -4) + '.zip';
+      if (fs.existsSync(path.join(dirPath, zipName))) continue;
+    }
+    count += 1;
+  }
+  return count;
+}
+
 function getTodayString() {
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -177,27 +243,66 @@ function toAbsolutePath(targetPath) {
   return path.isAbsolute(targetPath) ? path.normalize(targetPath) : path.resolve(repoRoot, targetPath);
 }
 
-function listDateFolders() {
-  const dates = new Set();
+function listDateFolderDetails() {
+  const byDate = new Map();
   for (const root of loadLibraryRoots()) {
     if (!fs.existsSync(root.path)) continue;
     for (const item of fs.readdirSync(root.path, { withFileTypes: true })) {
-      if (item.isDirectory() && isDateFolder(item.name)) dates.add(item.name);
+      if (!item.isDirectory() || !isDateFolder(item.name)) continue;
+      const rec = byDate.get(item.name) || {
+        date: item.name,
+        imageCount: 0,
+        sourceCount: 0,
+        hasImages: false
+      };
+      rec.sourceCount += 1;
+      rec.imageCount += countGalleryMediaFiles(path.join(root.path, item.name));
+      rec.hasImages = rec.imageCount > 0;
+      byDate.set(item.name, rec);
     }
   }
-  return Array.from(dates).sort((a, b) => b.localeCompare(a));
+  return Array.from(byDate.values()).sort((a, b) => b.date.localeCompare(a.date));
+}
+
+function listDateFolders() {
+  return listDateFolderDetails().map(item => item.date);
+}
+
+function normalizeDateFolderDetails(rawDetails, fallbackDates = []) {
+  const seen = new Set();
+  const details = [];
+  for (const item of Array.isArray(rawDetails) ? rawDetails : []) {
+    const date = item?.date || item?.folder;
+    if (!isDateFolder(date) || seen.has(date)) continue;
+    const imageCount = Number(item.imageCount ?? item.image_count ?? item.count ?? 0);
+    const sourceCount = Number(item.sourceCount ?? item.source_count ?? 1);
+    seen.add(date);
+    details.push({
+      date,
+      imageCount: Number.isFinite(imageCount) ? imageCount : 0,
+      sourceCount: Number.isFinite(sourceCount) ? sourceCount : 1,
+      hasImages: Boolean(item.hasImages ?? item.has_images ?? imageCount > 0)
+    });
+  }
+  for (const date of fallbackDates || []) {
+    if (!isDateFolder(date) || seen.has(date)) continue;
+    seen.add(date);
+    details.push({ date, imageCount: null, sourceCount: 1, hasImages: true });
+  }
+  return details.sort((a, b) => b.date.localeCompare(a.date));
 }
 
 function resolveDate(requestedDate) {
-  const availableDates = listDateFolders();
+  const dateFolders = listDateFolderDetails();
+  const availableDates = dateFolders.map(item => item.date);
   const today = getTodayString();
   if (requestedDate && availableDates.includes(requestedDate)) {
-    return { selectedDate: requestedDate, availableDates, today };
+    return { selectedDate: requestedDate, availableDates, dateFolders, today };
   }
   if (availableDates.includes(today)) {
-    return { selectedDate: today, availableDates, today };
+    return { selectedDate: today, availableDates, dateFolders, today };
   }
-  return { selectedDate: availableDates[0] || today, availableDates, today };
+  return { selectedDate: availableDates[0] || today, availableDates, dateFolders, today };
 }
 
 async function buildGalleryByDate(requestedDate) {
@@ -230,6 +335,7 @@ async function buildGalleryByDate(requestedDate) {
       return {
         selectedDate: data.selected_date,
         availableDates: data.available_dates || [],
+        availableDateFolders: normalizeDateFolderDetails(data.available_date_folders, data.available_dates || []),
         availableTags: Array.isArray(data.available_tags) ? data.available_tags : [],
         libraryRoots: Array.isArray(data.library_roots) ? data.library_roots : [],
         today: data.today || getTodayString(),
@@ -241,7 +347,7 @@ async function buildGalleryByDate(requestedDate) {
   }
 
   // Fallback: read directly from disk (no translation)
-  const { selectedDate, availableDates, today } = resolveDate(requestedDate);
+  const { selectedDate, availableDates, dateFolders, today } = resolveDate(requestedDate);
   const knownFiles = new Set();
   const images = [];
   const seenIdentity = new Set();
@@ -305,7 +411,7 @@ async function buildGalleryByDate(requestedDate) {
     }
   }
 
-  return { selectedDate, availableDates, today, libraryRoots: loadLibraryRoots(), images };
+  return { selectedDate, availableDates, availableDateFolders: dateFolders, today, libraryRoots: loadLibraryRoots(), images };
 }
 
 function isWithin(baseDir, targetPath) {
@@ -703,6 +809,80 @@ ipcMain.handle('caption:copy-image', async (_event, payload) => {
   } catch (error) {
     return { ok: false, error: error.message };
   }
+});
+
+// ---------------- Pose (本地 pose.json 读写) ----------------
+const POSE_SCHEMA = 'anime_pose_v1';
+
+function poseJsonPathFor(imagePath) {
+  const resolved = toAbsolutePath(imagePath);
+  if (!resolved || !isWithinLibraryRoots(resolved)) return null;
+  return path.join(path.dirname(resolved), 'pose.json');
+}
+
+function normalizePoseStore(raw) {
+  if (raw && typeof raw === 'object' && raw.images && typeof raw.images === 'object') {
+    return {
+      schema: raw.schema || POSE_SCHEMA,
+      images: raw.images
+    };
+  }
+  if (raw && typeof raw === 'object') {
+    return {
+      schema: POSE_SCHEMA,
+      images: raw
+    };
+  }
+  return { schema: POSE_SCHEMA, images: {} };
+}
+
+ipcMain.handle('pose:read', async (_event, imagePath) => {
+  const posePath = poseJsonPathFor(imagePath);
+  if (!posePath || !fs.existsSync(posePath)) return null;
+  const filename = path.basename(toAbsolutePath(imagePath));
+  const store = normalizePoseStore(safeReadJson(posePath, null));
+  return store.images[filename] || null;
+});
+
+ipcMain.handle('pose:save', async (_event, payload) => {
+  const { imagePath, entry } = payload || {};
+  const posePath = poseJsonPathFor(imagePath);
+  if (!posePath) return { ok: false, error: '非法路径' };
+  const filename = path.basename(toAbsolutePath(imagePath));
+  const existing = fs.existsSync(posePath) ? safeReadJson(posePath, null) : null;
+  const store = normalizePoseStore(existing);
+  store.schema = store.schema || POSE_SCHEMA;
+  store.images[filename] = {
+    ...(entry && typeof entry === 'object' ? entry : {}),
+    updated_at: new Date().toISOString()
+  };
+  try {
+    fs.writeFileSync(posePath, JSON.stringify(store, null, 2), 'utf-8');
+    return { ok: true, path: posePath, filename };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+});
+
+ipcMain.handle('pose:list-for-date', async (_event, date) => {
+  if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return [];
+  const out = [];
+  for (const root of loadLibraryRoots()) {
+    const dateDir = path.join(root.path, date);
+    const posePath = path.join(dateDir, 'pose.json');
+    if (!fs.existsSync(posePath)) continue;
+    const store = normalizePoseStore(safeReadJson(posePath, null));
+    for (const [filename, annotation] of Object.entries(store.images || {})) {
+      out.push({
+        filename,
+        localPath: path.resolve(path.join(dateDir, filename)),
+        libraryId: root.id,
+        libraryLabel: root.label,
+        annotation
+      });
+    }
+  }
+  return out;
 });
 
 ipcMain.handle('crawler:ensure-service', async () => ensureCrawlerService());

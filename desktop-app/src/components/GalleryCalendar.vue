@@ -3,6 +3,7 @@ import { computed, ref, watch, onMounted } from 'vue';
 
 const props = defineProps({
   availableDates: { type: Array, default: () => [] },
+  dateFolders: { type: Array, default: () => [] },
   // Tag 文件夹列表，结构 [{folder, display}]；后端 /api/gallery_data 已返。
   availableTags: { type: Array, default: () => [] },
   selectedDate: { type: String, default: '' },
@@ -37,7 +38,7 @@ watch(open, (v) => {
 
 const triggerLabel = computed(() => {
   if (!props.selectedDate) return '选择日期或标签';
-  if (isTagSelected.value) return `🏷 ${tagFolderLabel(props.selectedDate)}`;
+  if (isTagSelected.value) return tagFolderLabel(props.selectedDate);
   return props.selectedDate;
 });
 
@@ -108,10 +109,51 @@ function parseDate(value) {
 function formatDate(year, month, day) {
   return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
+
+function toFiniteCount(value, fallback = 0) {
+  const count = Number(value);
+  return Number.isFinite(count) && count >= 0 ? count : fallback;
+}
+
+const dateFolderRecords = computed(() => {
+  const records = new Map();
+  for (const item of props.dateFolders || []) {
+    const date = item?.date || item?.folder;
+    if (!parseDate(date)) continue;
+    const hasCount = item.imageCount != null || item.image_count != null || item.count != null;
+    const imageCount = hasCount ? toFiniteCount(item.imageCount ?? item.image_count ?? item.count) : null;
+    records.set(date, {
+      date,
+      imageCount,
+      sourceCount: toFiniteCount(item.sourceCount ?? item.source_count, 1),
+      hasImages: hasCount ? imageCount > 0 : Boolean(item.hasImages ?? item.has_images ?? true),
+      countKnown: hasCount
+    });
+  }
+  for (const value of props.availableDates || []) {
+    if (!parseDate(value) || records.has(value)) continue;
+    records.set(value, {
+      date: value,
+      imageCount: null,
+      sourceCount: 1,
+      hasImages: true,
+      countKnown: false
+    });
+  }
+  return Array.from(records.values()).sort((a, b) => b.date.localeCompare(a.date));
+});
+
+const sortedAvailableDates = computed(() => dateFolderRecords.value.map(item => item.date));
+const dateFolderMap = computed(() => {
+  const out = new Map();
+  for (const item of dateFolderRecords.value) out.set(item.date, item);
+  return out;
+});
+
 function syncMonth() {
   // tag 模式下：日历定位到 today 或最新可用日期
   const referenceDate = isTagSelected.value
-    ? (isTagFolder(props.today) ? (props.availableDates[0] || '') : props.today)
+    ? (isTagFolder(props.today) ? (sortedAvailableDates.value[0] || '') : props.today)
     : (props.selectedDate || props.today);
   const parsed = parseDate(referenceDate);
   if (parsed) {
@@ -123,19 +165,19 @@ function syncMonth() {
   currentYear.value = now.getFullYear();
   currentMonth.value = now.getMonth() + 1;
 }
-watch(() => [props.selectedDate, props.today], syncMonth, { immediate: true });
+watch(() => [props.selectedDate, props.today, sortedAvailableDates.value.join('|')], syncMonth, { immediate: true });
 
-const availableSet = computed(() => new Set(props.availableDates));
+const availableSet = computed(() => new Set(sortedAvailableDates.value));
 const availableYearSet = computed(() => {
   const years = new Set();
-  for (const value of props.availableDates || []) {
-    const parsed = parseDate(value);
+  for (const item of dateFolderRecords.value) {
+    const parsed = parseDate(item.date);
     if (parsed) years.add(parsed.year);
   }
   return years;
 });
 const selectedIndex = computed(() =>
-  isTagSelected.value ? -1 : props.availableDates.indexOf(props.selectedDate)
+  isTagSelected.value ? -1 : sortedAvailableDates.value.indexOf(props.selectedDate)
 );
 const canJumpToday = computed(() =>
   !!props.today &&
@@ -168,10 +210,14 @@ const cells = computed(() => {
   }
   return result.map(item => {
     const date = formatDate(item.year, item.month, item.day);
+    const folder = dateFolderMap.value.get(date) || null;
     return {
       ...item,
       date,
-      enabled: availableSet.value.has(date),
+      enabled: !!folder,
+      hasImages: !!folder?.hasImages,
+      countKnown: !!folder?.countKnown,
+      imageCount: folder?.imageCount ?? null,
       selected: !isTagSelected.value && date === props.selectedDate,
       today: !isTagFolder(props.today) && date === props.today
     };
@@ -185,10 +231,16 @@ const monthItems = computed(() => {
   return labels.map((label, idx) => {
     const month = idx + 1;
     const prefix = `${String(currentYear.value).padStart(4, '0')}-${String(month).padStart(2, '0')}-`;
+    const folders = dateFolderRecords.value.filter(item => item.date.startsWith(prefix));
+    const imageCount = folders.reduce((sum, item) => sum + (item.imageCount || 0), 0);
     return {
       month,
       label,
-      enabled: (props.availableDates || []).some(date => date.startsWith(prefix)),
+      enabled: folders.length > 0,
+      folderCount: folders.length,
+      imageCount,
+      hasImages: folders.some(item => item.hasImages),
+      countKnown: folders.some(item => item.countKnown),
       selected: !!selected && selected.year === currentYear.value && selected.month === month,
       today: !!today && today.year === currentYear.value && today.month === month
     };
@@ -201,14 +253,41 @@ const yearItems = computed(() => {
   const today = parseDate(props.today);
   return Array.from({ length: 12 }, (_, i) => {
     const year = yearBlockStart.value + i;
+    const prefix = `${String(year).padStart(4, '0')}-`;
+    const folders = dateFolderRecords.value.filter(item => item.date.startsWith(prefix));
+    const imageCount = folders.reduce((sum, item) => sum + (item.imageCount || 0), 0);
     return {
       year,
-      enabled: availableYearSet.value.has(year),
+      enabled: folders.length > 0,
+      folderCount: folders.length,
+      imageCount,
+      hasImages: folders.some(item => item.hasImages),
+      countKnown: folders.some(item => item.countKnown),
       selected: !!selected && selected.year === year,
       today: !!today && today.year === year
     };
   });
 });
+
+function imageCountLabel(count) {
+  if (count == null) return '';
+  if (count > 999) return '999+';
+  return String(count);
+}
+
+function dateCellTitle(cell) {
+  if (!cell.enabled) return `${cell.date} 没有日期文件夹`;
+  if (!cell.countKnown) return `查看 ${cell.date}`;
+  return cell.hasImages ? `${cell.date} · ${cell.imageCount} 张图片` : `${cell.date} · 文件夹为空`;
+}
+
+function periodTitle(label, item) {
+  if (!item.enabled) return `${label} 没有日期文件夹`;
+  if (!item.countKnown) return `查看 ${label}`;
+  return item.hasImages
+    ? `${label} · ${item.folderCount} 个日期 · ${item.imageCount} 张图片`
+    : `${label} · ${item.folderCount} 个日期 · 文件夹为空`;
+}
 
 function prevMonth() {
   if (currentMonth.value === 1) {
@@ -250,7 +329,7 @@ function pickYear(year) {
   dateView.value = 'months';
 }
 function jumpLatestDate() {
-  const latest = props.availableDates && props.availableDates[0];
+  const latest = sortedAvailableDates.value[0];
   if (!latest) return;
   emit('select', latest);
   open.value = false;
@@ -280,8 +359,8 @@ function pickTag(folder) {
     <div class="calendar-toolbar">
       <button
         class="small-btn"
-        :disabled="selectedIndex < 0 || selectedIndex >= props.availableDates.length - 1"
-        @click="$emit('select', props.availableDates[selectedIndex + 1])"
+        :disabled="selectedIndex < 0 || selectedIndex >= sortedAvailableDates.length - 1"
+        @click="$emit('select', sortedAvailableDates[selectedIndex + 1])"
       >上一天</button>
       <button
         class="calendar-trigger"
@@ -295,7 +374,7 @@ function pickTag(folder) {
       <button
         class="small-btn"
         :disabled="selectedIndex <= 0"
-        @click="$emit('select', props.availableDates[selectedIndex - 1])"
+        @click="$emit('select', sortedAvailableDates[selectedIndex - 1])"
       >下一天</button>
       <button
         class="today-btn"
@@ -311,12 +390,12 @@ function pickTag(folder) {
           class="selector-tab"
           :class="{ active: activeTab === 'date' }"
           @click="activeTab = 'date'"
-        >📅 日期 <span class="selector-tab-badge">{{ props.availableDates.length }}</span></button>
+        >日期 <span class="selector-tab-badge">{{ sortedAvailableDates.length }}</span></button>
         <button
           class="selector-tab"
           :class="{ active: activeTab === 'tag' }"
           @click="activeTab = 'tag'"
-        >🏷 标签 <span class="selector-tab-badge">{{ allTagItems.length }}</span></button>
+        >标签 <span class="selector-tab-badge">{{ allTagItems.length }}</span></button>
       </div>
 
       <div v-if="activeTab === 'date'">
@@ -332,7 +411,7 @@ function pickTag(folder) {
           <button class="small-square" title="下一年" @click="nextYear">»</button>
         </div>
         <div class="date-quickbar">
-          <button class="date-quick" :disabled="!props.availableDates.length" @click="jumpLatestDate">最新</button>
+          <button class="date-quick" :disabled="!sortedAvailableDates.length" @click="jumpLatestDate">最新</button>
           <button class="date-quick" :disabled="!props.today" @click="jumpTodayMonth">今年今月</button>
           <button class="date-quick" @click="dateView = 'years'">选年份</button>
           <button class="date-quick" @click="dateView = 'months'">选月份</button>
@@ -347,11 +426,13 @@ function pickTag(folder) {
               v-for="cell in cells"
               :key="cell.date"
               class="day-cell"
-              :class="{ disabled: !cell.enabled, selected: cell.selected, other: cell.otherMonth, today: cell.today }"
-              :title="cell.enabled ? `查看 ${cell.date}` : `${cell.date} 没有图片`"
+              :class="{ disabled: !cell.enabled, selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.enabled, 'has-images': cell.hasImages, 'empty-folder': cell.enabled && cell.countKnown && !cell.hasImages }"
+              :title="dateCellTitle(cell)"
               :disabled="!cell.enabled"
               @click="pickDate(cell.date)"
-            >{{ cell.day }}</button>
+            >
+              <span>{{ cell.day }}</span>
+            </button>
           </div>
         </template>
 
@@ -360,11 +441,14 @@ function pickTag(folder) {
             v-for="m in monthItems"
             :key="m.month"
             class="month-cell"
-            :class="{ disabled: !m.enabled, selected: m.selected, today: m.today }"
+            :class="{ disabled: !m.enabled, selected: m.selected, today: m.today, 'has-images': m.hasImages, 'empty-folder': m.enabled && m.countKnown && !m.hasImages }"
             :disabled="!m.enabled"
-            :title="m.enabled ? `查看 ${currentYear} 年 ${m.label}` : `${currentYear} 年 ${m.label} 没有图片`"
+            :title="periodTitle(`${currentYear} 年 ${m.label}`, m)"
             @click="pickMonth(m.month)"
-          >{{ m.label }}</button>
+          >
+            <span>{{ m.label }}</span>
+            <small v-if="m.countKnown">{{ imageCountLabel(m.imageCount) }}图</small>
+          </button>
         </div>
 
         <div v-else class="year-picker">
@@ -378,11 +462,14 @@ function pickTag(folder) {
               v-for="y in yearItems"
               :key="y.year"
               class="year-cell"
-              :class="{ disabled: !y.enabled, selected: y.selected, today: y.today }"
+              :class="{ disabled: !y.enabled, selected: y.selected, today: y.today, 'has-images': y.hasImages, 'empty-folder': y.enabled && y.countKnown && !y.hasImages }"
               :disabled="!y.enabled"
-              :title="y.enabled ? `查看 ${y.year} 年` : `${y.year} 年没有图片`"
+              :title="periodTitle(`${y.year} 年`, y)"
               @click="pickYear(y.year)"
-            >{{ y.year }}</button>
+            >
+              <span>{{ y.year }}</span>
+              <small v-if="y.countKnown">{{ imageCountLabel(y.imageCount) }}图</small>
+            </button>
           </div>
         </div>
         <div class="year-strip" v-if="dateView !== 'years'">
@@ -532,6 +619,23 @@ function pickTag(folder) {
   cursor: not-allowed;
 }
 
+.day-cell {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+.day-cell.has-images:not(.selected) {
+  background: rgba(77, 139, 87, 0.18);
+  color: #276136;
+  box-shadow: inset 0 0 0 1px rgba(77, 139, 87, 0.36);
+  font-weight: 700;
+}
+.day-cell.empty-folder:not(.selected) {
+  background: rgba(230, 224, 214, 0.58);
+  color: #a99684;
+  box-shadow: none;
+}
+
 .month-grid,
 .year-grid {
   display: grid;
@@ -541,6 +645,7 @@ function pickTag(folder) {
 .month-cell,
 .year-cell {
   height: 34px;
+  min-width: 0;
   border: 1px solid rgba(74, 53, 25, 0.16);
   border-radius: 7px;
   background: rgba(255, 252, 246, 0.86);
@@ -548,6 +653,36 @@ function pickTag(folder) {
   font-family: inherit;
   font-size: 13px;
   cursor: pointer;
+  display: grid;
+  place-items: center;
+  gap: 1px;
+}
+.month-cell small,
+.year-cell small {
+  font-size: 9px;
+  line-height: 1;
+  color: var(--muted, #846a55);
+}
+.month-cell.has-images small,
+.year-cell.has-images small {
+  color: #2d7a3e;
+}
+.month-cell.empty-folder small,
+.year-cell.empty-folder small {
+  color: #9a6610;
+}
+.month-cell.has-images:not(.selected),
+.year-cell.has-images:not(.selected) {
+  background: rgba(77, 139, 87, 0.16);
+  border-color: rgba(77, 139, 87, 0.46);
+  color: #276136;
+  font-weight: 700;
+}
+.month-cell.empty-folder:not(.selected),
+.year-cell.empty-folder:not(.selected) {
+  background: rgba(230, 224, 214, 0.58);
+  border-color: rgba(74, 53, 25, 0.1);
+  color: #a99684;
 }
 .month-cell:hover:not(:disabled),
 .year-cell:hover:not(:disabled) {
@@ -559,6 +694,10 @@ function pickTag(folder) {
   border-color: transparent;
   color: #fff;
   font-weight: 700;
+}
+.month-cell.selected small,
+.year-cell.selected small {
+  color: rgba(255, 255, 255, 0.82);
 }
 .month-cell.today:not(.selected),
 .year-cell.today:not(.selected) {

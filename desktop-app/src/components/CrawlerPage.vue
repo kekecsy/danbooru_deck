@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue';
 import GalleryCalendar from './GalleryCalendar.vue';
+import TaskDatePicker from './TaskDatePicker.vue';
 
 const emit = defineEmits(['edit-image', 'caption-image']);
 
@@ -101,8 +102,8 @@ function yesterdayString() {
   d.setDate(d.getDate() - 1);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
-// 队列 / 组合里把日期存成相对令牌，跑时再解析成「当时的」昨天/今天 ——
-// 这样同一个常用组合每天跑都对应新的昨天，而不是被钉死在某个旧日期。
+// 队列里把日期存成相对令牌，跑时再解析成「当时的」昨天/今天 ——
+// 这样同一个队列项每天跑都对应新的昨天，而不是被钉死在某个旧日期。
 function resolveDateToken(v) {
   if (v === '@yesterday') return yesterdayString();
   if (v === '@today') return todayString();
@@ -202,6 +203,7 @@ watch(form, (newForm) => {
 const gallery = ref({
   selectedDate: '',
   availableDates: [],
+  availableDateFolders: [],
   // 标签文件夹：[{folder: "tag_xxx", display: "xxx"}] —— 与日期文件夹并行，由后端扫描 hot_pic 提供
   availableTags: [],
   today: '',
@@ -220,6 +222,7 @@ const gallery = ref({
   refreshOnView: habits.refreshOnView ?? false,
   page: 1
 });
+const showGalleryPanel = ref(habits.showGalleryPanel !== false);
 
 watch(() => [gallery.value.sortBy, gallery.value.hotThreshold, gallery.value.cardSize, gallery.value.thumbSize, gallery.value.refreshOnView], () => {
   habits.sortBy = gallery.value.sortBy;
@@ -230,9 +233,18 @@ watch(() => [gallery.value.sortBy, gallery.value.hotThreshold, gallery.value.car
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 });
 
+watch(showGalleryPanel, (value) => {
+  habits.showGalleryPanel = value;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+});
+
 const task = ref({
   isRunning: false,
+  isStopping: false,
   isPaused: false,
+  jobId: '',
+  outcome: 'idle',
+  errorMessage: '',
   logs: ['桌面端已启动。'],
   totalLogCount: 1,
   backendError: '',
@@ -244,7 +256,12 @@ const task = ref({
 });
 // 自动重试后仍失败的页：后端 /api/status 透出 failed_pages（[{folder, page}]）。
 // 下载结束后界面弹「⚠ N 页失败 · 重试」横幅，一键定向重跑这些页，无需翻日志。
-const failedPages = ref({ list: [], mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false });
+const failedPages = ref({
+  list: [], mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false,
+  signature: '', sourceQueueItemId: null
+});
+const queuedFailureReports = ref([]);
+const dismissedFailureSignatures = new Set();
 const viewer = ref({
   open: false,
   index: 0,
@@ -256,6 +273,7 @@ const viewer = ref({
 });
 
 const viewerToolbarVisible = computed(() => viewer.value.toolbarPinned || viewer.value.toolbarHovered);
+const viewerToolbarRef = ref(null);
 
 
 
@@ -274,7 +292,8 @@ function toggleViewerToolbarPin() {
 
 function onViewerMouseMove(event) {
   if (viewer.value.toolbarPinned) return;
-  viewer.value.toolbarHovered = event.clientY < 160;
+  const toolbarBottom = viewerToolbarRef.value?.getBoundingClientRect?.().bottom || 160;
+  viewer.value.toolbarHovered = event.clientY <= Math.max(160, toolbarBottom + 18);
 }
 
 // ---------------- 多选/分享 ----------------
@@ -562,6 +581,9 @@ function showToast(msg, type = 'info') {
 }
 
 const loadingGallery = ref(false);
+const galleryPendingDate = ref('');
+let galleryLoadSequence = 0;
+let committedGalleryDate = '';
 let pollTimer = null;
 const logBodyRef = ref(null);
 
@@ -848,11 +870,39 @@ function generateFormatPlaceholder(ext) {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
+function itemExtension(item) {
+  return (item?.filename || '').split('.').pop().toLowerCase();
+}
+
+function isVideoItem(item) {
+  return VIDEO_EXTS.includes(itemExtension(item));
+}
+
+function videoCardUrl(item) {
+  const folder = item?.date || gallery.value.selectedDate;
+  if (!folder || !item?.filename) return '';
+  return `http://127.0.0.1:8000/images/${encodeURIComponent(folder)}/${encodeURIComponent(item.filename)}`;
+}
+
+function prepareVideoThumbnail(event) {
+  const video = event.currentTarget;
+  if (!video) return;
+  try {
+    video.muted = true;
+    video.currentTime = Math.min(0.12, Math.max(0, (video.duration || 0) / 20));
+  } catch { /* 某些编码不允许 metadata 阶段 seek，保持首帧即可 */ }
+}
+
 async function hydrateThumbs(items) {
   await Promise.all(items.map(async item => {
     if (item.thumbUrl) return;
     
     const ext = (item.filename || '').split('.').pop().toLowerCase();
+
+    if (VIDEO_EXTS.includes(ext)) {
+      item.thumbUrl = '';
+      return;
+    }
     
     if (ext === 'zip' && item.localPath) {
       const gifPath = item.localPath.replace(/\.zip$/i, '.gif');
@@ -883,9 +933,15 @@ async function hydrateThumbs(items) {
 }
 
 async function loadGallery(date, silent = false, preserveView = false) {
+  const requestedDate = date || gallery.value.selectedDate;
+  const requestSequence = ++galleryLoadSequence;
+  const previousCommittedDate = committedGalleryDate || gallery.value.selectedDate;
+  if (requestedDate) gallery.value.selectedDate = requestedDate; // 乐观更新，让连续点“上一天/下一天”能自然推进
+  galleryPendingDate.value = requestedDate;
   if (!silent) loadingGallery.value = true;
   try {
-    const data = await window.desktopAPI.gallery.getByDate(date || gallery.value.selectedDate);
+    const data = await window.desktopAPI.gallery.getByDate(requestedDate);
+    if (requestSequence !== galleryLoadSequence) return; // 快速切换时丢弃乱序返回，避免日期回跳
     const normalizedImages = data.images.map(item => ({
       ...item,
       thumbUrl: '',
@@ -894,7 +950,9 @@ async function loadGallery(date, silent = false, preserveView = false) {
       characterTokens: Array.isArray(item.characters) ? item.characters : splitTags(item.characters)
     }));
     gallery.value.selectedDate = data.selectedDate;
-    gallery.value.availableDates = data.availableDates;
+    committedGalleryDate = data.selectedDate;
+    gallery.value.availableDates = Array.isArray(data.availableDates) ? data.availableDates : [];
+    gallery.value.availableDateFolders = Array.isArray(data.availableDateFolders) ? data.availableDateFolders : [];
     // tag 文件夹由 IPC/后端透传，IPC fallback 没有此字段时给空数组兜底
     gallery.value.availableTags = Array.isArray(data.availableTags) ? data.availableTags : [];
     gallery.value.today = data.today;
@@ -909,16 +967,48 @@ async function loadGallery(date, silent = false, preserveView = false) {
       rebuildSortSnapshot();
     }
     await hydrateThumbs(pagedLocalImages.value);
-    refreshCaptionedSet();
+    if (requestSequence === galleryLoadSequence) refreshCaptionedSet(data.selectedDate);
+  } catch (error) {
+    if (requestSequence === galleryLoadSequence) {
+      gallery.value.selectedDate = previousCommittedDate;
+      showToast(`切换图库失败：${error.message}`, 'error');
+      appendLog(`切换图库失败: ${error.message}`);
+    }
   } finally {
-    if (!silent) loadingGallery.value = false;
+    if (requestSequence === galleryLoadSequence) {
+      galleryPendingDate.value = '';
+      if (!silent) loadingGallery.value = false;
+    }
   }
+}
+
+async function refreshGalleryIndex(date = gallery.value.selectedDate) {
+  try {
+    const data = await window.desktopAPI.gallery.getByDate(date || gallery.value.selectedDate);
+    gallery.value.availableDates = Array.isArray(data.availableDates) ? data.availableDates : [];
+    gallery.value.availableDateFolders = Array.isArray(data.availableDateFolders) ? data.availableDateFolders : [];
+    gallery.value.availableTags = Array.isArray(data.availableTags) ? data.availableTags : [];
+    gallery.value.today = data.today || gallery.value.today;
+  } catch (error) {
+    appendLog(`日期列表刷新失败: ${error.message}`);
+  }
+}
+
+function hasGalleryIndexFolder(folder) {
+  if (!folder) return true;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(folder)) {
+    return gallery.value.availableDates.includes(folder);
+  }
+  if (folder.startsWith('tag_')) {
+    return gallery.value.availableTags.some(item => item?.folder === folder);
+  }
+  return true;
 }
 
 // 已生成 caption 的集合：多图库同日期下优先按 localPath 匹配，兼容旧的 filename 字符串。
 const captionedSet = ref(new Set());
-async function refreshCaptionedSet() {
-  const date = gallery.value.selectedDate;
+async function refreshCaptionedSet(requestedDate = gallery.value.selectedDate) {
+  const date = requestedDate;
   if (!date || !window.desktopAPI?.caption?.listForDate) {
     captionedSet.value = new Set();
     return;
@@ -934,9 +1024,9 @@ async function refreshCaptionedSet() {
         if (entry.filename) set.add(`name:${entry.filename}`);
       }
     }
-    captionedSet.value = set;
+    if (gallery.value.selectedDate === date) captionedSet.value = set;
   } catch {
-    captionedSet.value = new Set();
+    if (gallery.value.selectedDate === date) captionedSet.value = new Set();
   }
 }
 function hasCaption(item) {
@@ -945,27 +1035,94 @@ function hasCaption(item) {
   return !!item.filename && captionedSet.value.has(`name:${item.filename}`);
 }
 
+function failureReportSignature(report) {
+  const pages = (report.list || [])
+    .map(item => `${item.folder || ''}:${Number(item.page) || 0}`)
+    .sort()
+    .join('|');
+  return [report.jobId || '', report.mode || '', report.tagSource || '', report.tagQuery || '', pages].join('::');
+}
+
+function showNextFailureReport() {
+  const next = queuedFailureReports.value.shift();
+  if (next) failedPages.value = { ...next, retrying: false };
+}
+
+function enqueueFailureReport(report, currentQueueItem) {
+  report.signature = failureReportSignature(report);
+  if (!report.signature || dismissedFailureSignatures.has(report.signature)) return;
+  if (currentQueueItem) {
+    const reports = currentQueueItem.failureReports || [];
+    if (!reports.some(item => item.signature === report.signature)) reports.push(report);
+    currentQueueItem.failureReports = reports;
+  }
+  if (failedPages.value.signature === report.signature) {
+    failedPages.value = { ...failedPages.value, ...report, retrying: failedPages.value.retrying };
+    return;
+  }
+  if (queuedFailureReports.value.some(item => item.signature === report.signature)) return;
+  if (failedPages.value.list.length) queuedFailureReports.value.push(report);
+  else failedPages.value = report;
+}
+
+function captureFailureReport(status) {
+  if (status.is_running || status.is_stopping || !Array.isArray(status.failed_pages) || !status.failed_pages.length) return;
+  const currentQueueItem = queueRunning.value && queueIndex.value >= 0
+    ? taskQueue.value[queueIndex.value]
+    : null;
+  const byFolder = new Map();
+  for (const item of status.failed_pages) {
+    const folder = item?.folder || '';
+    if (!byFolder.has(folder)) byFolder.set(folder, []);
+    byFolder.get(folder).push({ ...item });
+  }
+  for (const list of byFolder.values()) enqueueFailureReport({
+    list,
+    jobId: status.job_id || '',
+    mode: status.mode || '',
+    tagQuery: status.tag_query || '',
+    tagSource: status.tag_source || 'danbooru',
+    retrying: false,
+    signature: '',
+    sourceQueueItemId: currentQueueItem?.id ?? null,
+  }, currentQueueItem);
+}
+
+let statusSyncInFlight = null;
 async function syncStatus() {
+  if (statusSyncInFlight) return statusSyncInFlight;
+  statusSyncInFlight = syncStatusOnce();
+  try {
+    return await statusSyncInFlight;
+  } finally {
+    statusSyncInFlight = null;
+  }
+}
+
+async function syncStatusOnce() {
   try {
     const status = await window.desktopAPI.crawler.status();
-    const wasRunning = task.value.isRunning;
+    const wasActive = task.value.isRunning || task.value.isStopping;
     
     task.value.isRunning = !!status.is_running;
+    task.value.isStopping = !!status.is_stopping;
     task.value.isPaused = !!status.is_paused;
+    task.value.jobId = status.job_id || '';
+    task.value.outcome = status.outcome || (status.is_running ? 'running' : 'idle');
+    task.value.errorMessage = status.error_message || '';
     task.value.backendError = status.backendError || '';
 
     mergeBackendLogs(status.backendLogs);
     (status.new_logs || []).forEach(appendLog);
 
-    // 失败页：实时同步后端记录（不在重试发起后被旧 job 的残留覆盖——重试发起时已清空）
-    if (Array.isArray(status.failed_pages)) {
-      failedPages.value.list = status.failed_pages;
-      if (status.failed_pages.length) {
-        failedPages.value.mode = status.mode || failedPages.value.mode;
-        failedPages.value.tagQuery = status.tag_query || '';
-        failedPages.value.tagSource = status.tag_source || failedPages.value.tagSource || 'danbooru';
-      }
+    const targetFolder = status.target_folder || '';
+    if (targetFolder && !hasGalleryIndexFolder(targetFolder)) {
+      await refreshGalleryIndex(gallery.value.selectedDate);
     }
+
+    // 失败页属于已经完成的具体任务，不能被下一个队列项的空状态覆盖。
+    // 同一份报告关闭后也不能被后端 30 秒保留窗口反复弹回。
+    captureFailureReport(status);
 
     if (status.new_images?.length) {
       // 后端返回的 new_images 是模块全局 daily_viewer_data 的增量切片 —— tag 下载期间
@@ -997,9 +1154,13 @@ async function syncStatus() {
       }
     }
 
-    if (wasRunning && !task.value.isRunning) {
-      if (status.backendError || task.value.backendError) {
+    if (wasActive && !task.value.isRunning && !task.value.isStopping) {
+      if (status.outcome === 'error' || status.error_message) {
         showToast("抓取任务异常停止！", "error");
+      } else if (status.outcome === 'stopped') {
+        showToast("抓取任务已停止", "info");
+      } else if (status.outcome === 'completed_with_failures') {
+        showToast("任务完成，但有页面需要重试", "warning");
       } else {
         showToast("抓取任务已完成！", "success");
       }
@@ -1007,9 +1168,11 @@ async function syncStatus() {
       // B 的盘上数据没变，reload 只会白白跳回第 1 页 + 重排，还会打断 B 正在进行的刷新。
       // 复用上面 new_images 同款 target_folder 门控；preserveView=true 让同日期 reload
       // 也保持当前页与排序快照（新图落末尾，等用户主动「重新排序」）。
-      const finishedFolder = status.target_folder || '';
+      const finishedFolder = targetFolder;
       if (finishedFolder && finishedFolder === gallery.value.selectedDate) {
         await loadGallery(gallery.value.selectedDate, false, true);
+      } else {
+        await refreshGalleryIndex(gallery.value.selectedDate);
       }
     }
   } catch (error) {
@@ -1029,6 +1192,10 @@ async function ensureService() {
 }
 
 async function startTask() {
+  if (queueRunning.value) {
+    showToast('顺序队列运行中，请先停止队列', 'info');
+    return;
+  }
   try {
     const payload = {
       start_page: Number(form.value.startPage) || 1,
@@ -1057,6 +1224,11 @@ async function startTask() {
       pushRecentPage(payload.mode, 'end', payload.end_page);
     }
     const result = await window.desktopAPI.crawler.start(payload);
+    if (result?.ok === false) {
+      showToast(result.msg || '启动失败', 'error');
+      appendLog(result.msg || '启动失败');
+      return;
+    }
     appendLog(result.msg || '已发送启动抓图请求。');
     await syncStatus();
   } catch (error) {
@@ -1069,12 +1241,13 @@ async function startTask() {
 // 拼 payload 并带 pages 定向重跑。因后端 MAX_CONCURRENT=1，多组时先跑第一组，
 // 剩余组在该 job 结束后横幅会再次出现（仅 popular_range 多日期才会出现多组）。
 async function retryFailedPages() {
-  if (failedPages.value.retrying || task.value.isRunning) {
+  if (failedPages.value.retrying || task.value.isRunning || task.value.isStopping) {
     showToast('请等待当前任务结束后再重试', 'info');
     return;
   }
   const list = failedPages.value.list || [];
   if (!list.length) return;
+  const retrySignature = failedPages.value.signature;
 
   // 按 folder 分组
   const byFolder = new Map();
@@ -1112,21 +1285,31 @@ async function retryFailedPages() {
   failedPages.value.retrying = true;
   try {
     const result = await window.desktopAPI.crawler.start(payload);
+    if (result?.ok === false) {
+      appendLog(`重试失败: ${result.msg || '启动失败'}`);
+      showToast(result.msg || '重试发起失败', 'error');
+      return;
+    }
     appendLog(result.msg || `已发起重试 ${uniqPages.length} 页：${uniqPages.join(', ')}`);
     showToast(`正在重试 ${uniqPages.length} 页`, 'info');
-    // 清空当前横幅；重试 job 会记录自己的 failed_pages，syncStatus 会重新填充
-    failedPages.value.list = [];
+    // 移除的是本次已处理的报告；其他队列项的失败报告继续排队，不会被刷新掉。
+    if (failedPages.value.signature === retrySignature) {
+      failedPages.value = { list: [], mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false, signature: '', sourceQueueItemId: null };
+      showNextFailureReport();
+    }
     await syncStatus();
   } catch (error) {
     appendLog(`重试失败: ${error.message}`);
     showToast('重试发起失败: ' + error.message, 'error');
   } finally {
-    failedPages.value.retrying = false;
+    if (failedPages.value.signature === retrySignature) failedPages.value.retrying = false;
   }
 }
 
 function dismissFailedPages() {
-  failedPages.value.list = [];
+  if (failedPages.value.signature) dismissedFailureSignatures.add(failedPages.value.signature);
+  failedPages.value = { list: [], mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false, signature: '', sourceQueueItemId: null };
+  showNextFailureReport();
 }
 
 async function pauseTask() {
@@ -1159,7 +1342,7 @@ async function stopTask() {
   }
 }
 
-// ================= 多任务队列 + 常用组合（习惯） =================
+// ================= 顺序任务队列 =================
 // 后端 MAX_CONCURRENT=1：队列在前端顺序驱动，逐个 start → 等完成 → 下一个。
 // 完成检测只读响应式 task.value.isRunning（由 1.2s 的 pollTimer/syncStatus 维护），
 // 绝不在这里自己调用 crawler.status()，否则会抢走 /api/status 的破坏性 drain、吞掉日志。
@@ -1167,8 +1350,8 @@ let _queueIdSeq = 0;
 const taskQueue = ref([]);          // [{id, mode, startPage, endPage, tags, targetDate, startDate, endDate, tagQuery, tagSource, idsText, label, status, error}]
 const queueRunning = ref(false);    // 整个队列是否在跑
 const queueAbort = ref(false);      // 停止队列的中断旗标
+const queueSkipItemId = ref(null);  // 仅跳过当前项；与停止整个队列严格分开
 const queueIndex = ref(-1);         // 当前正在跑的项下标（-1 = 没在跑）
-const taskCombos = ref(Array.isArray(habits.taskCombos) ? habits.taskCombos : []);
 // 多任务队列面板折叠态：默认折叠省左栏空间，记住用户偏好
 const queuePanelOpen = ref(habits.queuePanelOpen ?? false);
 function toggleQueuePanel() {
@@ -1176,8 +1359,9 @@ function toggleQueuePanel() {
   habits.queuePanelOpen = queuePanelOpen.value;
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 }
-// 存为常用组合时的命名草稿（Electron 渲染进程不支持 window.prompt，改用应用内输入框）
-const comboDraft = ref({ open: false, name: '' });
+const pendingQueueCount = computed(() =>
+  taskQueue.value.filter(item => item.status === 'pending').length
+);
 
 const MODE_NAMES = {
   rank: '排行榜', popular: '日期热门', popular_range: '日期范围',
@@ -1195,7 +1379,7 @@ function queueItemLabel(it) {
   return `${name} ${it.startPage}-${it.endPage}页`;
 }
 
-// 快照当前表单为一个队列项（日期转相对令牌，便于常用组合每天复用）
+// 快照当前表单为一个队列项（日期转相对令牌，便于今天/昨天按运行时解析）
 function snapshotFormToItem() {
   const f = form.value;
   return {
@@ -1212,11 +1396,11 @@ function snapshotFormToItem() {
     idsText: f.idsText || '',
     status: 'pending',
     error: '',
+    failureReports: [],
   };
 }
 
 function addCurrentToQueue() {
-  if (queueRunning.value) return;
   const f = form.value;
   // 与 startTask 一致的最小校验
   if (f.mode === 'tags' && !(f.tagQuery || '').trim()) {
@@ -1234,18 +1418,39 @@ function addCurrentToQueue() {
 }
 
 function removeQueueItem(i) {
-  if (queueRunning.value) return;
+  const item = taskQueue.value[i];
+  if (!item) return;
+  if (item.status === 'running') {
+    showToast('正在运行的任务不能删除，请先停止队列', 'info');
+    return;
+  }
   taskQueue.value.splice(i, 1);
+  if (queueRunning.value && i < queueIndex.value) queueIndex.value -= 1;
 }
 function moveQueueItem(i, dir) {
-  if (queueRunning.value) return;
+  if (!canMoveQueueItem(i, dir)) return;
   const j = i + dir;
-  if (j < 0 || j >= taskQueue.value.length) return;
   const arr = taskQueue.value;
   [arr[i], arr[j]] = [arr[j], arr[i]];
+  if (queueRunning.value) {
+    if (i === queueIndex.value) queueIndex.value = j;
+    else if (j === queueIndex.value) queueIndex.value = i;
+  }
+}
+function canMoveQueueItem(i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= taskQueue.value.length) return false;
+  const a = taskQueue.value[i];
+  const b = taskQueue.value[j];
+  if (!a || !b) return false;
+  return a.status !== 'running' && b.status !== 'running';
 }
 function clearQueue() {
-  if (queueRunning.value) return;
+  if (queueRunning.value) {
+    taskQueue.value = taskQueue.value.filter(item => item.status === 'running');
+    queueIndex.value = taskQueue.value.length ? 0 : -1;
+    return;
+  }
   taskQueue.value = [];
 }
 
@@ -1278,12 +1483,12 @@ function buildQueuePayload(it) {
 async function waitForTaskIdle() {
   // 1) 确认任务起来了（后端 start 已同步置 is_running；兜极快完成的任务，最多等 ~4s）
   const t0 = Date.now();
-  while (!task.value.isRunning && (Date.now() - t0) < 4000) {
+  while (!task.value.isRunning && !task.value.isStopping && (Date.now() - t0) < 4000) {
     if (queueAbort.value) return;
     await sleep(300);
   }
   // 2) 等它结束
-  while (task.value.isRunning) {
+  while (task.value.isRunning || task.value.isStopping) {
     if (queueAbort.value) return;
     await sleep(500);
   }
@@ -1291,14 +1496,16 @@ async function waitForTaskIdle() {
 
 async function runQueue() {
   if (queueRunning.value) return;
-  if (!taskQueue.value.length) { showToast('队列为空', 'info'); return; }
-  if (task.value.isRunning) { showToast('已有任务在跑，先停止再运行队列', 'error'); return; }
+  if (!pendingQueueCount.value) { showToast('队列没有待执行任务', 'info'); return; }
+  if (task.value.isRunning || task.value.isStopping) { showToast('已有任务在运行或收尾，请稍候', 'error'); return; }
   queueRunning.value = true;
   queueAbort.value = false;
-  taskQueue.value.forEach(it => { it.status = 'pending'; it.error = ''; });
-  let okCount = 0, failCount = 0;
+  queueSkipItemId.value = null;
+  let okCount = 0, warningCount = 0, failCount = 0, skippedCount = 0;
   try {
-    for (let i = 0; i < taskQueue.value.length; i++) {
+    while (!queueAbort.value) {
+      const i = taskQueue.value.findIndex(item => item.status === 'pending');
+      if (i < 0) break;
       if (queueAbort.value) break;
       const item = taskQueue.value[i];
       const n = taskQueue.value.length;
@@ -1320,10 +1527,21 @@ async function runQueue() {
         await syncStatus();        // 置 isRunning=true
         await waitForTaskIdle();   // 等到 isRunning=false
         if (queueAbort.value) { item.status = 'pending'; break; }
-        if (task.value.backendError) {
+        if (queueSkipItemId.value === item.id) {
+          item.status = 'skipped';
+          item.error = '用户跳过';
+          queueSkipItemId.value = null;
+          skippedCount += 1;
+          appendLog(`[队列 ${i + 1}/${n}] 已跳过：${item.label}`);
+        } else if (task.value.outcome === 'error' || task.value.errorMessage) {
           item.status = 'error';
-          item.error = task.value.backendError;
+          item.error = task.value.errorMessage || '任务异常中断';
           failCount += 1;
+        } else if (item.failureReports?.length) {
+          item.status = 'warning';
+          const failedPageCount = item.failureReports.reduce((sum, report) => sum + report.list.length, 0);
+          item.error = `${failedPageCount} 页等待重试`;
+          warningCount += 1;
         } else {
           item.status = 'done';
           okCount += 1;
@@ -1340,92 +1558,35 @@ async function runQueue() {
     queueRunning.value = false;
     queueIndex.value = -1;
   }
-  if (queueAbort.value) showToast(`队列已停止（完成 ${okCount}，失败 ${failCount}）`, 'info');
-  else showToast(`队列完成：成功 ${okCount}，失败 ${failCount}`, failCount ? 'warning' : 'success');
+  if (queueAbort.value) {
+    showToast(`队列已停止（完成 ${okCount}，待重试 ${warningCount}，失败 ${failCount}）`, 'info');
+  } else {
+    showToast(
+      `队列完成：成功 ${okCount}，待重试 ${warningCount}，跳过 ${skippedCount}，失败 ${failCount}`,
+      failCount || warningCount ? 'warning' : 'success'
+    );
+  }
 }
 
 async function stopQueue() {
   if (!queueRunning.value) return;
   queueAbort.value = true;
-  if (task.value.isRunning) await stopTask();
+  queueSkipItemId.value = null;
   showToast('正在停止队列...', 'info');
+  if (task.value.isRunning) await stopTask();
 }
 
-// ---- 常用组合（习惯）：持久化在 localStorage.crawlerHabits.taskCombos ----
-function persistCombos() {
-  habits.taskCombos = taskCombos.value.map(c => ({ name: c.name, tasks: c.tasks }));
-  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+async function skipCurrentQueueItem() {
+  if (!queueRunning.value || queueIndex.value < 0) return;
+  const item = taskQueue.value[queueIndex.value];
+  if (!item || item.status !== 'running' || !task.value.isRunning || task.value.isStopping || queueSkipItemId.value === item.id) return;
+  queueSkipItemId.value = item.id;
+  showToast('正在跳过当前项，队列随后继续...', 'info');
+  if (task.value.isRunning) await stopTask();
 }
-function stripItemForSave(it) {
-  // 只存可复现字段（保留日期相对令牌），不存 id/label/status
-  return {
-    mode: it.mode,
-    startPage: it.startPage,
-    endPage: it.endPage,
-    tags: it.tags,
-    targetDate: it.targetDate,
-    startDate: it.startDate,
-    endDate: it.endDate,
-    tagQuery: it.tagQuery,
-    tagSource: it.tagSource || 'danbooru',
-    idsText: it.idsText,
-  };
-}
-function saveQueueAsCombo() {
-  if (queueRunning.value) return;
-  if (!taskQueue.value.length) { showToast('队列为空，无法保存', 'info'); return; }
-  // Electron 不支持 window.prompt，打开应用内输入框取名
-  comboDraft.value.name = '晨间例行';
-  comboDraft.value.open = true;
-  nextTick(() => {
-    const el = document.getElementById('combo-name-input');
-    if (el) { el.focus(); el.select(); }
-  });
-}
-function confirmSaveCombo() {
-  const name = (comboDraft.value.name || '').trim();
-  if (!name) { showToast('请输入组合名字', 'error'); return; }
-  if (!taskQueue.value.length) { comboDraft.value.open = false; return; }
-  const combo = { name, tasks: taskQueue.value.map(stripItemForSave) };
-  const idx = taskCombos.value.findIndex(c => c.name === name);
-  if (idx >= 0) taskCombos.value.splice(idx, 1, combo);
-  else taskCombos.value.push(combo);
-  persistCombos();
-  comboDraft.value.open = false;
-  showToast(`已保存常用组合「${name}」`, 'success');
-}
-function cancelSaveCombo() { comboDraft.value.open = false; }
-function loadCombo(combo) {
-  if (queueRunning.value) return;
-  taskQueue.value = (combo.tasks || []).map(t => {
-    const it = { ...t, id: ++_queueIdSeq, status: 'pending', error: '' };
-    if (!it.tagSource) it.tagSource = 'danbooru';
-    it.label = queueItemLabel(it);
-    return it;
-  });
-}
-async function runCombo(combo) {
-  if (queueRunning.value || task.value.isRunning) {
-    showToast('已有任务/队列在跑，先停止再运行组合', 'error');
-    return;
-  }
-  loadCombo(combo);
-  await nextTick();
-  await runQueue();
-}
-function deleteCombo(name) {
-  if (queueRunning.value) return;
-  const idx = taskCombos.value.findIndex(c => c.name === name);
-  if (idx >= 0) {
-    taskCombos.value.splice(idx, 1);
-    persistCombos();
-  }
-}
-function comboTooltip(combo) {
-  return (combo.tasks || []).map((t, i) => `${i + 1}. ${queueItemLabel({ ...t })}`).join('\n');
-}
+
 function queueStatusIcon(it) {
-  return { pending: '○', running: '⏳', done: '✓', error: '⚠' }[it.status] || '○';
+  return { pending: '○', running: '⏳', done: '✓', warning: '↻', skipped: '⏭', error: '⚠' }[it.status] || '○';
 }
 
 async function openLocal(item) {
@@ -1736,6 +1897,7 @@ function toggleTranslateMenu() {
 function onTranslateChoice(action) {
   translateMenu.value.open = false;
   if (action === 'character') openTranslationModal();
+  else if (action === 'dictionary') openCharacterDictionary();
   else if (action === 'import') importTranslationFile();
 }
 function onDocClickForTranslateMenu(e) {
@@ -1789,6 +1951,8 @@ const translationModal = ref({
   list: [],          // [{tag, post_count, fallback_name}]
   search: '',
   importing: false,
+  mode: 'untranslated', // untranslated | dictionary
+  targetTag: '',
 });
 
 const translateDetail = ref({
@@ -1797,10 +1961,7 @@ const translateDetail = ref({
   fallbackName: '',
   source: { description: '', other_names: [], exists: false },
   manualPrompt: '',
-  mode: 'api',       // 'api' | 'manual'
-  apiBusy: false,
-  apiError: '',
-  apiRaw: '',        // API 失败时原文，灌入 pasteText 让用户修
+  matchedTranslationKey: '',
   pasteText: '',
   parseError: '',
   saving: false,
@@ -1819,7 +1980,9 @@ const filteredUntranslated = computed(() => {
   if (!keyword) return translationModal.value.list;
   return translationModal.value.list.filter(item =>
     item.tag.toLowerCase().includes(keyword) ||
-    (item.fallback_name || '').toLowerCase().includes(keyword)
+    (item.fallback_name || '').toLowerCase().includes(keyword) ||
+    (item.chinese_name || '').toLowerCase().includes(keyword) ||
+    (item.source_hint || '').toLowerCase().includes(keyword)
   );
 });
 
@@ -1829,6 +1992,8 @@ async function openTranslationModal() {
     return;
   }
   translationModal.value.open = true;
+  translationModal.value.mode = 'untranslated';
+  translationModal.value.targetTag = '';
   translationModal.value.loading = true;
   translationModal.value.search = '';
   try {
@@ -1843,6 +2008,47 @@ async function openTranslationModal() {
   }
 }
 
+function rawCharacterTag(item, index) {
+  const raw = item?.tags?.tag_string_character || '';
+  return raw.split(' ').filter(Boolean)[index] || '';
+}
+
+async function searchCharacterDictionary(query = translationModal.value.search) {
+  translationModal.value.loading = true;
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/character_translations?q=${encodeURIComponent(query || '')}&limit=200`);
+    const data = await res.json();
+    translationModal.value.list = data.items || [];
+  } catch (err) {
+    showToast('搜索角色字典失败: ' + err.message, 'error');
+    translationModal.value.list = [];
+  } finally {
+    translationModal.value.loading = false;
+  }
+}
+
+async function openCharacterDictionary(rawTag = '') {
+  const tag = String(rawTag || '').trim();
+  translationModal.value.open = true;
+  translationModal.value.mode = 'dictionary';
+  translationModal.value.targetTag = tag;
+  // 去掉皮肤/作品括号后搜索，可一次看到同名角色和多皮肤条目。
+  translationModal.value.search = tag ? tag.replace(/_\([^)]*\)/g, '').replace(/_+$/, '') : '';
+  if (viewer.value.open) closeViewer();
+  await searchCharacterDictionary();
+}
+
+function onCharacterContextMenu(event, item, index) {
+  event.preventDefault();
+  event.stopPropagation();
+  const rawTag = rawCharacterTag(item, index);
+  if (!rawTag) {
+    showToast('找不到该角色对应的原始 tag', 'warning');
+    return;
+  }
+  openCharacterDictionary(rawTag);
+}
+
 function closeTranslationModal() {
   translationModal.value.open = false;
 }
@@ -1852,10 +2058,7 @@ function resetTranslateDetail() {
   translateDetail.value.fallbackName = '';
   translateDetail.value.source = { description: '', other_names: [], exists: false };
   translateDetail.value.manualPrompt = '';
-  translateDetail.value.mode = 'api';
-  translateDetail.value.apiBusy = false;
-  translateDetail.value.apiError = '';
-  translateDetail.value.apiRaw = '';
+  translateDetail.value.matchedTranslationKey = '';
   translateDetail.value.pasteText = '';
   translateDetail.value.parseError = '';
   translateDetail.value.saving = false;
@@ -1884,6 +2087,14 @@ async function openTranslateDetail(item) {
     };
     translateDetail.value.manualPrompt = data.manual_prompt || '';
     if (data.fallback_name) translateDetail.value.fallbackName = data.fallback_name;
+    const entry = data.translation || {};
+    translateDetail.value.matchedTranslationKey = entry.matched_key || '';
+    translateDetail.value.form = {
+      has_chinese: !!entry.has_chinese,
+      chinese_name: entry.chinese_name || '',
+      source_hint: entry.source_hint || '',
+      translated_description_zh: entry.translated_description_zh || '',
+    };
   } catch (err) {
     showToast('加载角色描述失败: ' + err.message, 'error');
   }
@@ -1894,7 +2105,8 @@ function closeTranslateDetail() {
 }
 
 async function fetchCharacterSource() {
-  // 当 character.json 里没有该 tag 时，调用 Danbooru wiki API 在线拉描述
+  // 强制调用 Danbooru Wiki 重新拉取描述。即使本地已有记录也允许刷新，
+  // 用于修正 character.json / supplement 中长期未更新的信息。
   translateDetail.value.fetchBusy = true;
   translateDetail.value.fetchMsg = '';
   try {
@@ -1915,54 +2127,13 @@ async function fetchCharacterSource() {
       exists: true,
     };
     translateDetail.value.manualPrompt = data.manual_prompt || '';
-    showToast('已从 Danbooru wiki 拉到描述', 'success');
+    translateDetail.value.fetchMsg = 'Wiki 信息已更新';
+    showToast('已重新拉取 Wiki 信息并刷新 Prompt', 'success');
   } catch (err) {
     translateDetail.value.fetchMsg = err.message;
     showToast('在线拉描述失败: ' + err.message, 'error');
   } finally {
     translateDetail.value.fetchBusy = false;
-  }
-}
-
-async function runApiTranslation() {
-  translateDetail.value.apiBusy = true;
-  translateDetail.value.apiError = '';
-  translateDetail.value.apiRaw = '';
-  try {
-    const res = await fetch('http://127.0.0.1:8000/api/translate_character', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ tag: translateDetail.value.tag }),
-    });
-    const data = await res.json();
-    if (!data.ok) {
-      translateDetail.value.apiError = data.error || data.msg || 'API 调用失败';
-      // 把原始内容灌进手动模式的粘贴框，方便用户人工修复后重新解析
-      const raw = data.raw || '';
-      if (raw) {
-        translateDetail.value.apiRaw = raw;
-        translateDetail.value.pasteText = raw;
-        translateDetail.value.mode = 'manual';
-        translateDetail.value.parseError = '';
-        showToast('API 解析失败，已切换到手动模式，请修复 JSON 后点「解析填表」', 'error');
-      } else {
-        showToast(translateDetail.value.apiError, 'error');
-      }
-      return;
-    }
-    const entry = data.entry || {};
-    translateDetail.value.form = {
-      has_chinese: !!entry.has_chinese,
-      chinese_name: entry.chinese_name || '',
-      source_hint: entry.source_hint || '',
-      translated_description_zh: entry.translated_description_zh || '',
-    };
-    showToast('API 翻译完成，请校对后保存', 'success');
-  } catch (err) {
-    translateDetail.value.apiError = '网络/请求异常: ' + err.message;
-    showToast(translateDetail.value.apiError, 'error');
-  } finally {
-    translateDetail.value.apiBusy = false;
   }
 }
 
@@ -2026,11 +2197,12 @@ async function saveTranslation() {
       showToast('保存失败: ' + data.msg, 'error');
       return;
     }
-    showToast('已保存', 'success');
-    // 从主弹窗列表里移除该 tag
+    showToast(data.msg || '已保存并同步到画廊', 'success');
     const tag = translateDetail.value.tag;
-    translationModal.value.list = translationModal.value.list.filter(it => it.tag !== tag);
+    if (translationModal.value.mode === 'dictionary') await searchCharacterDictionary();
+    else translationModal.value.list = translationModal.value.list.filter(it => it.tag !== tag);
     closeTranslateDetail();
+    await loadGallery(gallery.value.selectedDate, false, true);
   } catch (err) {
     showToast('保存失败: ' + err.message, 'error');
   } finally {
@@ -2479,6 +2651,25 @@ function closeViewer() {
   viewer.value.zoom = 1;
 }
 
+async function copyViewerImage() {
+  const item = viewerItem.value;
+  if (!item?.localPath) {
+    showToast('当前图片没有可复制的本地文件', 'warning');
+    return;
+  }
+  let imagePath = item.localPath;
+  if ((item.filename || '').toLowerCase().endsWith('.zip')) {
+    const gifPath = imagePath.replace(/\.zip$/i, '.gif');
+    if (await window.desktopAPI.file.exists(gifPath)) imagePath = gifPath;
+  }
+  const result = await window.desktopAPI.caption.copyImage(imagePath, 2000);
+  if (result?.ok) {
+    showToast(`已复制图片 ${result.width}×${result.height}（上限 2000px）`, 'success');
+  } else {
+    showToast(`复制失败：${result?.error || '不支持的图片格式'}`, 'error');
+  }
+}
+
 function getLogType(line) {
   if (!line) return 'log-info';
 
@@ -2514,6 +2705,18 @@ async function stepViewer(offset) {
   if (gallery.value.refreshOnView) refreshSinglePost(viewerItem.value);
 }
 
+async function stepGalleryDate(offset) {
+  const dates = gallery.value.availableDates || [];
+  const index = dates.indexOf(gallery.value.selectedDate);
+  if (index < 0) {
+    showToast('当前选择的不是日期图库', 'info');
+    return;
+  }
+  const nextIndex = index + offset;
+  if (nextIndex < 0 || nextIndex >= dates.length) return;
+  await loadGallery(dates[nextIndex]);
+}
+
 function onViewerWheel(event) {
   if (!event.ctrlKey) return;
   event.preventDefault();
@@ -2531,11 +2734,25 @@ async function onKeyDown(event) {
   if (['input', 'textarea', 'select', 'video'].includes(tag)) return;
 
   if (viewer.value.open) {
-    if (event.key === 'ArrowLeft') {
+    if ((event.ctrlKey || event.metaKey) && (event.key === 'c' || event.key === 'C')) {
+      event.preventDefault();
+      await copyViewerImage();
+    } else if (event.key === 'ArrowLeft') {
       await stepViewer(-1);
     } else if (event.key === 'ArrowRight') {
       await stepViewer(1);
     }
+    return;
+  }
+
+  if (event.ctrlKey && event.key === 'ArrowLeft') {
+    event.preventDefault();
+    await stepGalleryDate(1);
+    return;
+  }
+  if (event.ctrlKey && event.key === 'ArrowRight') {
+    event.preventDefault();
+    await stepGalleryDate(-1);
     return;
   }
 
@@ -2622,7 +2839,7 @@ const modeDescription = computed(() => {
     case 'collect_ids': return '网络状况不佳时的极速模式：仅拉取列表和元数据，不下载图片本体。';
     case 'download_ids': return '从已收集的 ID 列表中进行批量下载。';
     case 'tags': return `按 ${form.value.tagSource === 'gelbooru' ? 'Gelbooru' : 'Danbooru'} tag 查询下载到 tag 文件夹。`;
-    default: return '选择模式后配置参数，点击启动开始执行。';
+    default: return '选择模式后配置参数，点击加入队列追加任务。';
   }
 });
 
@@ -2643,26 +2860,33 @@ const tagFolderPreview = computed(() => {
 </script>
 
 <template>
-  <div class="crawler-layout">
+  <div class="crawler-layout" :class="{ 'gallery-hidden': !showGalleryPanel }">
     <section class="panel card control-panel">
       <div class="panel-head compact-head">
         <div>
           <h2>抓图任务</h2>
           <p class="inline-note">{{ modeDescription }}</p>
         </div>
-        <button class="ghost" @click="openHostsHint" style="margin-left: auto; color: #ff9800; font-size: 12px; padding: 4px 10px; white-space: nowrap;" title="无法连接 Danbooru / Safebooru 时，按此教程改 hosts">🛠 Hosts</button>
-        <button
-          class="ghost safe-mode-btn"
-          :class="{ 'is-safe': safeMode, 'is-unsafe': !safeMode }"
-          @click="toggleSafeMode"
-          :title="safeMode ? '当前走 safebooru.donmai.us（无 R-18）。点击切换为完整 danbooru' : '当前走 danbooru.donmai.us（含 NSFW）。点击切回 SFW'"
-        >{{ safeMode ? '🛡 SFW' : '🌶 全部内容' }}</button>
-        <button
-          class="ghost proxy-mode-btn"
-          :class="{ 'is-proxy': useProxy, 'is-direct': !useProxy }"
-          @click="toggleProxy"
-          :title="useProxy ? '当前走代理下载。关掉代理软件后请点这里切到「直连」，否则下载会连不上死代理端口' : '当前直连下载（不走代理）。开了代理软件可点这里切回「走代理」'"
-        >{{ useProxy ? '🌐 走代理' : '🔌 直连' }}</button>
+        <div class="crawler-head-actions">
+          <button class="ghost hosts-btn" @click="openHostsHint" title="无法连接 Danbooru / Safebooru 时，按此教程改 hosts">🛠 Hosts</button>
+          <button
+            class="ghost safe-mode-btn"
+            :class="{ 'is-safe': safeMode, 'is-unsafe': !safeMode }"
+            @click="toggleSafeMode"
+            :title="safeMode ? '当前走 safebooru.donmai.us（无 R-18）。点击切换为完整 danbooru' : '当前走 danbooru.donmai.us（含 NSFW）。点击切回 SFW'"
+          >{{ safeMode ? '🛡 SFW' : '🌶 全部内容' }}</button>
+          <button
+            class="ghost proxy-mode-btn"
+            :class="{ 'is-proxy': useProxy, 'is-direct': !useProxy }"
+            @click="toggleProxy"
+            :title="useProxy ? '当前走代理下载。关掉代理软件后请点这里切到「直连」，否则下载会连不上死代理端口' : '当前直连下载（不走代理）。开了代理软件可点这里切回「走代理」'"
+          >{{ useProxy ? '走代理' : '直连' }}</button>
+          <button
+            class="ghost gallery-toggle-btn"
+            @click="showGalleryPanel = !showGalleryPanel"
+            :title="showGalleryPanel ? '隐藏右侧本地图库' : '显示右侧本地图库'"
+          >{{ showGalleryPanel ? '隐藏图库' : '显示图库' }}</button>
+        </div>
       </div>
 
       <div class="mode-selector">
@@ -2734,7 +2958,12 @@ const tagFolderPreview = computed(() => {
       </div>
       <label class="field-full" v-if="['popular', 'download_ids'].includes(form.mode)">
         <span>目标日期 <span class="muted compact-text">{{ form.mode === 'popular' ? '(默认昨天，可改)' : '(留空则用今天)' }}</span></span>
-        <input v-model="form.targetDate" type="date" />
+        <TaskDatePicker
+          v-model="form.targetDate"
+          :placeholder="form.mode === 'popular' ? '默认昨天' : '留空则用今天'"
+          :available-dates="gallery.availableDates"
+          :date-folders="gallery.availableDateFolders"
+        />
       </label>
       <label class="field-full" v-if="form.mode === 'download_ids'">
         <span>
@@ -2755,11 +2984,21 @@ const tagFolderPreview = computed(() => {
       <div class="field-grid" v-if="form.mode === 'popular_range'">
         <label>
           <span>起始日期</span>
-          <input v-model="form.startDate" type="date" />
+          <TaskDatePicker
+            v-model="form.startDate"
+            placeholder="起始日期"
+            :available-dates="gallery.availableDates"
+            :date-folders="gallery.availableDateFolders"
+          />
         </label>
         <label>
           <span>结束日期</span>
-          <input v-model="form.endDate" type="date" />
+          <TaskDatePicker
+            v-model="form.endDate"
+            placeholder="结束日期"
+            :available-dates="gallery.availableDates"
+            :date-folders="gallery.availableDateFolders"
+          />
         </label>
       </div>
       <label class="field-full" v-if="form.mode === 'tags'">
@@ -2789,32 +3028,34 @@ const tagFolderPreview = computed(() => {
       </label>
 
       <div class="button-row">
-        <button @click="startTask" :disabled="task.isRunning">启动</button>
+        <button @click="addCurrentToQueue" title="把当前配置追加到顺序队列">加入队列</button>
         <button class="secondary" @click="pauseTask" :disabled="!task.isRunning || task.isPaused">暂停</button>
         <button class="secondary" @click="resumeTask" :disabled="!task.isRunning || !task.isPaused">继续</button>
-        <button class="ghost" @click="stopTask" :disabled="!task.isRunning">停止</button>
+        <button v-if="!queueRunning" class="ghost" @click="stopTask" :disabled="!task.isRunning">停止当前任务</button>
       </div>
 
       <!-- 失败页横幅：自动重试后仍失败的页，一键定向重跑，无需翻日志 -->
       <div v-if="failedPages.list.length" class="failed-pages-banner">
-        <span class="fpb-text">⚠ 有 {{ failedPages.list.length }} 页抓取失败（已自动重试）：第 {{ failedPages.list.map(p => p.page).join(', ') }} 页</span>
+        <span class="fpb-text">
+          ⚠ 有 {{ failedPages.list.length }} 页抓取失败（已自动重试）：第 {{ failedPages.list.map(p => p.page).join(', ') }} 页
+          <small v-if="queuedFailureReports.length"> · 另有 {{ queuedFailureReports.length }} 份待处理报告</small>
+        </span>
         <div class="fpb-actions">
-          <button class="fpb-retry" @click="retryFailedPages" :disabled="failedPages.retrying || task.isRunning">
-            {{ failedPages.retrying ? '重试中…' : '🔁 重试这些页' }}
+          <button class="fpb-retry" @click="retryFailedPages" :disabled="failedPages.retrying || task.isRunning || task.isStopping">
+            {{ failedPages.retrying ? '重试中…' : (task.isRunning || task.isStopping ? '任务结束后可重试' : '重试这些页') }}
           </button>
-          <button class="fpb-dismiss" @click="dismissFailedPages" title="忽略">✕</button>
+          <button class="fpb-dismiss" @click="dismissFailedPages" title="忽略这份报告，且不再重复弹出">✕</button>
         </div>
       </div>
 
-      <!-- 多任务队列：把多个下载任务排队顺序执行；可存为常用组合一键复用。默认折叠，省左栏空间 -->
+      <!-- 顺序任务队列：运行中可继续追加任务，可删除未运行任务。默认折叠，省左栏空间 -->
       <div class="task-queue-panel">
-        <div class="tq-header" @click="toggleQueuePanel" title="点击展开/收起多任务队列">
+        <div class="tq-header" @click="toggleQueuePanel" title="点击展开/收起顺序任务队列">
           <span class="tq-title">
             <span class="tq-chevron" :class="{ open: queuePanelOpen }">▸</span>
-            🗂 多任务队列<span v-if="queueRunning" class="tq-running-badge">运行中 {{ queueIndex + 1 }}/{{ taskQueue.length }}</span>
-            <span v-else-if="!queuePanelOpen && (taskQueue.length || taskCombos.length)" class="tq-count-badge">{{ taskQueue.length }}{{ taskCombos.length ? ` · ${taskCombos.length}组合` : '' }}</span>
+            顺序队列<span v-if="queueRunning" class="tq-running-badge">运行中 {{ queueIndex + 1 }}/{{ taskQueue.length }}</span>
+            <span v-else-if="!queuePanelOpen && taskQueue.length" class="tq-count-badge">{{ taskQueue.length }}项</span>
           </span>
-          <button class="ghost tq-add" @click.stop="addCurrentToQueue" :disabled="queueRunning" title="把上方当前配置作为一个任务加入队列">＋ 加入队列</button>
         </div>
 
         <div v-show="queuePanelOpen">
@@ -2830,43 +3071,21 @@ const tagFolderPreview = computed(() => {
             <span class="tq-item-idx">{{ i + 1 }}</span>
             <span class="tq-item-label">{{ it.label }}</span>
             <span class="tq-item-ops">
-              <button class="tq-mini" @click="moveQueueItem(i, -1)" :disabled="queueRunning || i === 0" title="上移">↑</button>
-              <button class="tq-mini" @click="moveQueueItem(i, 1)" :disabled="queueRunning || i === taskQueue.length - 1" title="下移">↓</button>
-              <button class="tq-mini tq-del" @click="removeQueueItem(i)" :disabled="queueRunning" title="移除">×</button>
+              <button class="tq-mini" @click="moveQueueItem(i, -1)" :disabled="!canMoveQueueItem(i, -1)" title="上移">↑</button>
+              <button class="tq-mini" @click="moveQueueItem(i, 1)" :disabled="!canMoveQueueItem(i, 1)" title="下移">↓</button>
+              <button class="tq-mini tq-del" @click="removeQueueItem(i)" :disabled="it.status === 'running'" title="移除">×</button>
             </span>
           </div>
         </div>
         <div v-else class="tq-empty">
+          上方“加入队列”会把当前配置追加到这里，任务按列表顺序依次执行。
         </div>
 
         <div v-if="taskQueue.length" class="tq-actions">
-          <button class="tq-run" @click="runQueue" :disabled="queueRunning || task.isRunning" title="按顺序依次执行队列里的全部任务">运行（{{ taskQueue.length }}）</button>
-          <button class="secondary" @click="stopQueue" :disabled="!queueRunning">停止</button>
-          <button class="ghost" @click="clearQueue" :disabled="queueRunning">清空</button>
-          <button class="ghost" @click="saveQueueAsCombo" :disabled="queueRunning" title="把当前队列存成常用组合，下次一键执行">保存</button>
-        </div>
-
-        <div v-if="comboDraft.open" class="tq-combo-save">
-          <input
-            id="combo-name-input"
-            v-model="comboDraft.name"
-            type="text"
-            maxlength="40"
-            placeholder="组合名字，如：晨间例行"
-            class="tq-combo-save-input"
-            @keyup.enter="confirmSaveCombo"
-            @keyup.esc="cancelSaveCombo"
-          />
-          <button class="secondary" @click="confirmSaveCombo">保存</button>
-          <button class="ghost" @click="cancelSaveCombo">取消</button>
-        </div>
-
-        <div v-if="taskCombos.length" class="tq-combos">
-          <span v-for="c in taskCombos" :key="c.name" class="tq-combo-chip">
-            <button class="tq-combo-run" @click="runCombo(c)" :disabled="queueRunning || task.isRunning" :title="comboTooltip(c)">▶ {{ c.name }}</button>
-            <button class="tq-combo-load" @click="loadCombo(c)" :disabled="queueRunning" title="只载入到队列，不立即运行">载入</button>
-            <button class="tq-mini tq-del" @click="deleteCombo(c.name)" :disabled="queueRunning" title="删除该组合">×</button>
-          </span>
+          <button class="tq-run" @click="runQueue" :disabled="queueRunning || task.isRunning || task.isStopping || !pendingQueueCount" title="按顺序依次执行队列里的待执行任务">运行待执行（{{ pendingQueueCount }}）</button>
+          <button class="secondary" @click="skipCurrentQueueItem" :disabled="!queueRunning || queueIndex < 0 || !task.isRunning || task.isStopping || queueSkipItemId !== null" title="结束当前任务，但保留队列并继续下一项">跳过当前</button>
+          <button class="ghost" @click="stopQueue" :disabled="!queueRunning" title="结束当前任务并停止整个顺序队列">停止队列</button>
+          <button class="ghost" @click="clearQueue" :disabled="queueRunning && taskQueue.every(item => item.status === 'running')">{{ queueRunning ? '清除未运行' : '清空' }}</button>
         </div>
         </div>
         <!-- /v-show queuePanelOpen -->
@@ -2874,6 +3093,7 @@ const tagFolderPreview = computed(() => {
 
       <div class="status-pills">
         <span class="pill" :class="{ active: task.isRunning }">运行中: {{ task.isRunning ? '是' : '否' }}</span>
+        <span class="pill" :class="{ warning: task.isStopping }">收尾中: {{ task.isStopping ? '是' : '否' }}</span>
         <span class="pill" :class="{ warning: task.isPaused }">已暂停: {{ task.isPaused ? '是' : '否' }}</span>
       </div>
 
@@ -2951,7 +3171,7 @@ const tagFolderPreview = computed(() => {
       </div>
     </section>
 
-    <section class="panel card gallery-panel">
+    <section v-if="showGalleryPanel" class="panel card gallery-panel">
       <div class="gallery-head">
         <div class="gallery-title-row">
           <h2>{{ gallery.selectedDate || '本地图库' }}</h2>
@@ -3002,7 +3222,7 @@ const tagFolderPreview = computed(() => {
             :class="['hot-toggle', { active: gallery.hotOnly }]"
             @click="gallery.hotOnly = !gallery.hotOnly"
             :title="`只看 score ≥ ${gallery.hotThreshold}`"
-          >🔥 高分</button>
+          >高分</button>
           <div class="refresh-dropdown">
             <button
               :class="['refresh-btn', { active: refresh.isRunning, 'menu-open': refreshMenu.open }]"
@@ -3010,8 +3230,8 @@ const tagFolderPreview = computed(() => {
               :disabled="!gallery.selectedDate && !refresh.isRunning"
               :title="refresh.isRunning ? '点击停止刷新' : '选择刷新范围（本页 / 指定范围 / 全部）'"
             >
-              <span v-if="!refresh.isRunning">🔄 刷新热度 ▾</span>
-              <span v-else>⏸ {{ refresh.done }}/{{ refresh.total }}</span>
+              <span v-if="!refresh.isRunning">刷新热度 ▾</span>
+              <span v-else>{{ refresh.done }}/{{ refresh.total }}</span>
             </button>
             <div v-if="refreshMenu.open && !refresh.isRunning" class="refresh-menu" @click.stop>
               <button class="refresh-menu-item" @click="onRefreshChoice('page')">
@@ -3044,15 +3264,22 @@ const tagFolderPreview = computed(() => {
               :class="{ 'menu-open': translateMenu.open }"
               @click.stop="toggleTranslateMenu"
               title="翻译角色 / 导入翻译字典"
-            >🌐 翻译 ▾</button>
+            >翻译 ▾</button>
             <div v-if="translateMenu.open" class="translate-menu" @click.stop>
               <button
                 class="translate-menu-item"
                 :disabled="!gallery.selectedDate"
                 @click="onTranslateChoice('character')"
               >
-                <span class="translate-menu-label">翻译角色</span>
-                <span class="translate-menu-meta">{{ gallery.selectedDate ? '调用 LLM 或手动粘贴' : '先选日期' }}</span>
+                <span class="translate-menu-label">手动翻译角色</span>
+                <span class="translate-menu-meta">{{ gallery.selectedDate ? '复制 Prompt，粘贴 JSON' : '先选日期' }}</span>
+              </button>
+              <button
+                class="translate-menu-item"
+                @click="onTranslateChoice('dictionary')"
+              >
+                <span class="translate-menu-label">角色字典</span>
+                <span class="translate-menu-meta">搜索和修正同名/多皮肤</span>
               </button>
               <button
                 class="translate-menu-item"
@@ -3076,6 +3303,7 @@ const tagFolderPreview = computed(() => {
            内部根据 selectedDate 是否以 'tag_' 开头决定默认 tab -->
       <GalleryCalendar
         :available-dates="gallery.availableDates"
+        :date-folders="gallery.availableDateFolders"
         :available-tags="gallery.availableTags"
         :selected-date="gallery.selectedDate"
         :today="gallery.today"
@@ -3090,27 +3318,40 @@ const tagFolderPreview = computed(() => {
           @click="showOnlySelected = !showOnlySelected"
           :disabled="!showOnlySelected && !selection.ids.size"
           title="切换：只显示当前日期里已选的图片"
-        >{{ showOnlySelected ? '✓ 只看已选' : '👁 只看已选' }}</button>
+        >只看已选</button>
         <button
           class="secondary"
           @click="selectionListOpen = true"
           :disabled="!selection.ids.size"
           title="查看所有已选 ID（可逐个跳转/移除）"
-        >📋 已选清单</button>
-        <button class="secondary" @click="copySelectedIds" :disabled="!selection.ids.size" title="复制选中图片的 IDs 到剪贴板（明文逗号分隔）">📤 复制 IDs</button>
-        <button class="secondary" @click="openCryptoTool" title="打开加密工具：把任意 IDs 文本压缩成短字符串方便分享">🗜 加密工具</button>
+        >已选清单</button>
+        <button class="secondary" @click="copySelectedIds" :disabled="!selection.ids.size" title="复制选中图片的 IDs 到剪贴板（明文逗号分隔）">复制 IDs</button>
+        <button class="secondary" @click="openCryptoTool" title="打开加密工具：把任意 IDs 文本压缩成短字符串方便分享">加密工具</button>
         <button class="ghost" @click="clearSelection" :disabled="!selection.ids.size">清空</button>
         <button class="ghost" @click="setSelectionEnabled(false)" title="退出选择模式（已选记录会保留）">退出</button>
       </div>
 
-      <div v-if="loadingGallery" class="gallery-empty">正在读取图库...</div>
-      <div v-else-if="!activeItems.length" class="gallery-empty">
+      <div v-if="loadingGallery" class="gallery-switch-status" role="status">
+        正在切换到 {{ galleryPendingDate || gallery.selectedDate }}…
+      </div>
+      <div v-if="!activeItems.length && !loadingGallery" class="gallery-empty">
         {{ showOnlySelected ? '当前日期没有已选图片，切换日期试试' : '当前日期没有图片' }}
       </div>
-      <div v-else class="gallery-grid" :style="`--card-min-w: ${gallery.cardSize}px`">
+      <div v-else-if="activeItems.length" class="gallery-grid" :class="{ 'is-switching': loadingGallery }" :style="`--card-min-w: ${gallery.cardSize}px`" :aria-busy="loadingGallery">
         <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item), 'has-caption': hasCaption(item) }">
           <div class="thumb-wrap">
-            <img class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @click="onThumbClick($event, item)" />
+            <video
+              v-if="isVideoItem(item)"
+              class="thumb clickable-thumb video-card-thumb"
+              :src="videoCardUrl(item)"
+              muted
+              playsinline
+              preload="metadata"
+              @loadedmetadata="prepareVideoThumbnail"
+              @click="onThumbClick($event, item)"
+            ></video>
+            <img v-else class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @click="onThumbClick($event, item)" />
+            <span v-if="isVideoItem(item)" class="video-format-watermark">{{ itemExtension(item).toUpperCase() }}</span>
             <button
               v-if="selection.enabled"
               class="img-select-toggle"
@@ -3168,7 +3409,7 @@ const tagFolderPreview = computed(() => {
             :class="{ active: pagePicker.open }"
             @click.stop="pagePicker.open = !pagePicker.open"
             :title="pagePicker.open ? '关闭页码列表' : '展开页码列表（10列/行）'"
-          >👆</button>
+          >页码</button>
           / {{ activeTotalPages }}
           <Teleport to="body">
           <div v-if="pagePicker.open" class="pg-picker-panel" :style="pagePickerStyle" @click.stop>
@@ -3264,7 +3505,7 @@ const tagFolderPreview = computed(() => {
         />
 
         <div class="crypto-tool-actions">
-          <button class="secondary" @click="cryptoEncrypt" :disabled="!cryptoTool.input.trim()">🗜 加密（压缩）</button>
+          <button class="secondary" @click="cryptoEncrypt" :disabled="!cryptoTool.input.trim()">加密（压缩）</button>
           <button class="secondary" @click="cryptoDecrypt" :disabled="!cryptoTool.input.trim()">🔓 解密（还原）</button>
           <button class="ghost" @click="swapCryptoIO" :disabled="!cryptoTool.output" title="把输出搬回输入，方便再次加/解密">⇅ 交换</button>
         </div>
@@ -3284,13 +3525,19 @@ const tagFolderPreview = computed(() => {
         <div class="crypto-tool-foot">
           <span class="muted compact-text">压缩格式 = base36 增量编码，100+ 个 ID 通常省 60%+</span>
           <button class="ghost" @click="closeCryptoTool">关闭</button>
-          <button @click="copyCryptoOutput" :disabled="!cryptoTool.output">📋 复制输出</button>
+          <button @click="copyCryptoOutput" :disabled="!cryptoTool.output">复制输出</button>
         </div>
       </div>
     </div>
 
     <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer" @mousemove="onViewerMouseMove" @mouseleave="viewer.toolbarHovered = false">
-      <div class="viewer-toolbar" :class="{ 'is-hidden': !viewerToolbarVisible }">
+      <div
+        ref="viewerToolbarRef"
+        class="viewer-toolbar"
+        :class="{ 'is-hidden': !viewerToolbarVisible }"
+        @mouseenter="viewer.toolbarHovered = true"
+        @mouseleave="viewer.toolbarHovered = false"
+      >
         <div class="viewer-toolbar-info">
           <div class="viewer-meta-block">
             <span class="viewer-meta-label">画师</span>
@@ -3311,12 +3558,13 @@ const tagFolderPreview = computed(() => {
           </div>
           <div v-if="viewerItem?.characterTokens?.length" class="viewer-meta-block">
             <span class="viewer-meta-label">角色</span>
-            <template v-for="token in viewerItem.characterTokens" :key="`v-char-${token}`">
+            <template v-for="(token, charIndex) in viewerItem.characterTokens" :key="`v-char-${token}-${charIndex}`">
               <button
                 class="meta-link token-chip viewer-token-chip"
                 :class="{ 'is-favorited-chip': favoritedCharacterSet.has(token) }"
                 @click="applySearch(token); closeViewer();"
-                :title="`搜索同角色作品：${token}`"
+                @contextmenu="onCharacterContextMenu($event, viewerItem, charIndex)"
+                :title="`左键搜索同角色作品；右键编辑角色字典：${token}`"
               >{{ token.includes(' [') ? token.split(' [')[0] : token }}</button>
               <button
                 class="meta-link author-fav-btn viewer-fav-star"
@@ -3337,21 +3585,22 @@ const tagFolderPreview = computed(() => {
             :title="viewerItem && isImageFavorited(viewerItem) ? '取消图片收藏' : '加入图片收藏'"
           >{{ viewerItem && isImageFavorited(viewerItem) ? '♥ 已收藏' : '♡ 收藏' }}</button>
           <button v-if="viewerItem?.filename?.toLowerCase().endsWith('.zip')" class="secondary" @click="convertGif(viewerItem)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
+          <button class="secondary" @click="copyViewerImage" :disabled="!viewerItem?.localPath" title="复制图片到剪贴板，最长边不超过 2000px（Ctrl+C）">复制图片</button>
           <button
             @click="viewerItem && emit('caption-image', viewerItem)"
             :style="hasCaption(viewerItem)
               ? 'background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;'
               : 'background: linear-gradient(135deg, #8b5cf6, #6d28d9); border: none; color: white;'"
             :title="hasCaption(viewerItem) ? '已生成 Caption，点击查看/编辑' : '为这张图生成 AI 描述'"
-          >{{ hasCaption(viewerItem) ? '📝 Caption ✓' : '📝 Caption' }}</button>
+          >{{ hasCaption(viewerItem) ? 'Caption ✓' : 'Caption' }}</button>
           <button @click="editItem(viewerItem)" style="background: linear-gradient(135deg, var(--accent), var(--accent-deep)); border: none; color: white;">编辑图片</button>
-          <button class="ghost" @click="closeViewer" style="color: #fff; border: 1px solid rgba(255,255,255,0.2);">关闭</button>
         </div>
       </div>
 
       <!-- 始终显示的右上角信息小栏：计数 / 适应窗口 / 固定信息栏。
            独立于顶部置顶 toolbar，不随 viewerToolbarVisible 收起 -->
       <div class="viewer-corner-info">
+        <button class="viewer-corner-row viewer-corner-btn viewer-corner-close" @click="closeViewer" title="关闭大图（Esc）">× 关闭</button>
         <div class="viewer-corner-row viewer-corner-counter">
           <span class="viewer-corner-counter-label">第</span>
           <input
@@ -3372,13 +3621,13 @@ const tagFolderPreview = computed(() => {
           class="viewer-corner-row viewer-corner-btn"
           @click="toggleViewerFitMode"
           :title="viewer.fitMode === 'fit' ? '当前：适应窗口，点击切换为原始大小' : '当前：原始大小，点击切换为适应窗口'"
-        >{{ viewer.fitMode === 'fit' ? '⛶ 原始大小' : '▣ 适应窗口' }}</button>
+        >{{ viewer.fitMode === 'fit' ? '原始大小' : '适应窗口' }}</button>
         <button
           class="viewer-corner-row viewer-corner-btn"
           :class="{ 'is-active': viewer.toolbarPinned }"
           @click="toggleViewerToolbarPin"
           :title="viewer.toolbarPinned ? '已固定信息栏，点击取消固定（恢复鼠标悬浮显示）' : '固定信息栏（默认悬浮显示）'"
-        >{{ viewer.toolbarPinned ? '📌 已固定' : '📌 固定' }}</button>
+        >{{ viewer.toolbarPinned ? '已固定' : '固定' }}</button>
       </div>
 
       <!-- 左右切换箭头：默认半透明，悬浮变明显；在边界自动隐藏 -->
@@ -3449,26 +3698,37 @@ const tagFolderPreview = computed(() => {
       <div class="translation-card">
         <div class="translation-head">
           <div>
-            <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">未翻译角色 · {{ gallery.selectedDate || '' }}</h3>
+            <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">
+              {{ translationModal.mode === 'dictionary' ? '角色字典' : `未翻译角色 · ${gallery.selectedDate || ''}` }}
+            </h3>
             <p class="muted compact-text" style="margin: 4px 0 0;">
-              共 {{ translationModal.list.length }} 个 · 已筛选 {{ filteredUntranslated.length }} 个
+              {{ translationModal.mode === 'dictionary' ? '可按 tag、中文名或 source_hint 搜索' : `共 ${translationModal.list.length} 个 · 已筛选 ${filteredUntranslated.length} 个` }}
             </p>
           </div>
           <button class="ghost" @click="closeTranslationModal" style="color: var(--muted);">×</button>
         </div>
 
-        <input
-          v-model="translationModal.search"
-          class="search-input"
-          type="text"
-          placeholder="搜索 tag 或回退名"
-          style="width: 100%; margin-bottom: 10px;"
-        />
+        <div class="character-dict-search-row">
+          <input
+            v-model="translationModal.search"
+            class="search-input"
+            type="text"
+            :placeholder="translationModal.mode === 'dictionary' ? '搜索 tag、中文名或作品来源' : '搜索 tag 或回退名'"
+            @keyup.enter="translationModal.mode === 'dictionary' && searchCharacterDictionary()"
+          />
+          <button v-if="translationModal.mode === 'dictionary'" class="secondary" @click="searchCharacterDictionary">搜索</button>
+        </div>
+
+        <button
+          v-if="translationModal.mode === 'dictionary' && translationModal.targetTag"
+          class="character-dict-target"
+          @click="openTranslateDetail({ tag: translationModal.targetTag, fallback_name: translationModal.targetTag })"
+        >编辑当前精确 tag：{{ translationModal.targetTag }}</button>
 
         <div class="translation-list">
           <div v-if="translationModal.loading" class="gallery-empty" style="min-height: 120px;">正在加载...</div>
           <div v-else-if="!filteredUntranslated.length" class="gallery-empty" style="min-height: 120px;">
-            {{ translationModal.list.length ? '没有匹配的角色' : '当前日期没有未翻译的角色 🎉' }}
+            {{ translationModal.mode === 'dictionary' ? '没有匹配的字典记录，可直接编辑当前精确 tag' : (translationModal.list.length ? '没有匹配的角色' : '当前日期没有未翻译的角色') }}
           </div>
           <div
             v-else
@@ -3479,19 +3739,22 @@ const tagFolderPreview = computed(() => {
           >
             <div class="translation-row-main">
               <span class="translation-row-tag">{{ item.tag }}</span>
-              <span class="translation-row-fallback">{{ item.fallback_name }}</span>
+              <span class="translation-row-fallback">
+                {{ translationModal.mode === 'dictionary' ? (item.chinese_name || item.fallback_name) : item.fallback_name }}
+                <template v-if="translationModal.mode === 'dictionary' && item.source_hint"> · {{ item.source_hint }}</template>
+              </span>
             </div>
-            <span class="translation-row-count">出现 {{ item.post_count }} 次</span>
+            <span v-if="translationModal.mode === 'untranslated'" class="translation-row-count">出现 {{ item.post_count }} 次</span>
+            <span v-else class="translation-row-count">编辑</span>
           </div>
         </div>
 
         <div class="translation-foot">
-          <span class="muted compact-text">
-            完成后点「导入到画廊」把 character_chinese_search.json 合并进 custom_translation.json
-          </span>
+          <span class="muted compact-text">保存单条记录后会立即同步到画廊；右键角色标签可快速进入这里。</span>
           <div style="display: flex; gap: 8px;">
             <button class="ghost" @click="closeTranslationModal" style="color: var(--accent-deep);">关闭</button>
             <button
+              v-if="translationModal.mode === 'untranslated'"
               @click="importTranslationDict"
               :disabled="translationModal.importing"
               style="min-width: 130px;"
@@ -3514,65 +3777,36 @@ const tagFolderPreview = computed(() => {
 
         <div v-if="!translateDetail.source.exists" class="translation-fetch-banner">
           <span style="flex: 1; min-width: 0;">
-            ⚠ character.json 中没有这条记录。可以点右侧按钮调用 Danbooru wiki API 在线拉描述（会写入 character_supplement.json）。
+            character.json 中没有这条记录。可使用下方“重新拉取 Wiki 信息”补充描述，结果会写入 character_supplement.json。
             <span v-if="translateDetail.fetchMsg" style="display: block; color: #9d2c2c; margin-top: 4px;">{{ translateDetail.fetchMsg }}</span>
           </span>
-          <button
-            class="secondary"
-            @click="fetchCharacterSource"
-            :disabled="translateDetail.fetchBusy"
-            style="flex-shrink: 0; min-width: 130px;"
-          >{{ translateDetail.fetchBusy ? '拉取中...' : '🔎 在线拉描述' }}</button>
         </div>
 
         <!-- 描述区固定在头部下方，不进 scrolling body，保证切换 tab / 滚动表单时一直可见 -->
         <div class="translation-detail-section translation-description-pinned">
           <div class="translation-detail-section-head static">
             <span>英文描述与候选名（{{ translateDetail.source.other_names.length }} 个候选）</span>
+            <button
+              class="secondary translation-wiki-refresh"
+              @click="fetchCharacterSource"
+              :disabled="translateDetail.fetchBusy"
+              title="忽略本地缓存，重新请求 Danbooru Wiki 并覆盖增量资料"
+            >{{ translateDetail.fetchBusy ? '正在拉取...' : '重新拉取 Wiki 信息' }}</button>
           </div>
           <div class="translation-detail-section-body">
             <div v-if="translateDetail.source.other_names.length" style="margin-bottom: 8px;">
               <strong style="font-size: 12px;">候选名: </strong>
               <span class="muted compact-text">{{ translateDetail.source.other_names.slice(0, 30).join(' / ') }}</span>
             </div>
-            <pre class="translation-desc">{{ translateDetail.source.description || '(无描述，可点上方「在线拉描述」)' }}</pre>
+            <pre class="translation-desc">{{ translateDetail.source.description || '(无描述，可点上方“重新拉取 Wiki 信息”)' }}</pre>
+            <p v-if="translateDetail.matchedTranslationKey && translateDetail.matchedTranslationKey !== translateDetail.tag" class="translation-inherit-note">
+              当前显示继承自 {{ translateDetail.matchedTranslationKey }}。保存后会为 {{ translateDetail.tag }} 创建精确覆盖，适合修正多皮肤同名问题。
+            </p>
           </div>
         </div>
 
         <div class="translation-detail-body">
-          <div class="translation-mode-tabs">
-            <button
-              class="mode-chip"
-              :class="{ active: translateDetail.mode === 'api' }"
-              @click="translateDetail.mode = 'api'"
-            >API 翻译</button>
-            <button
-              class="mode-chip"
-              :class="{ active: translateDetail.mode === 'manual' }"
-              @click="translateDetail.mode = 'manual'"
-            >手动翻译（复制 Prompt）</button>
-          </div>
-
-          <div v-if="translateDetail.mode === 'api'" class="translation-mode-body">
-            <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-              <button
-                @click="runApiTranslation"
-                :disabled="translateDetail.apiBusy"
-                style="min-width: 130px;"
-              >{{ translateDetail.apiBusy ? '调用中...' : '立即调用 API' }}</button>
-              <span class="muted compact-text">
-                {{ translateDetail.apiBusy ? '正在请求 openrouter，可能需要几十秒' : (translateDetail.source.exists ? '复用 .env 中的 openrouter_api_key（含描述）' : '没有本地描述，建议先点上方「在线拉描述」；也可直接调用 API 仅凭 tag 名翻译') }}
-              </span>
-            </div>
-            <div v-if="translateDetail.apiError" class="translation-api-error">
-              <strong>API 失败：</strong>{{ translateDetail.apiError }}
-              <div v-if="translateDetail.apiRaw" class="muted compact-text" style="margin-top: 6px;">
-                已把原始 LLM 输出灌进下方「手动翻译」标签的文本框，请修复 JSON 后点「解析填表」。
-              </div>
-            </div>
-          </div>
-
-          <div v-else class="translation-mode-body">
+          <div class="translation-mode-body">
             <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap;">
               <button class="secondary" @click="copyManualPrompt" style="min-width: 130px;">复制 Prompt</button>
               <span class="muted compact-text">粘贴到你的大模型，把返回的 JSON 贴到下方</span>
@@ -3772,10 +4006,60 @@ const tagFolderPreview = computed(() => {
 .crawler-layout {
   grid-template-columns: 300px minmax(0, 1fr);
 }
+.crawler-layout.gallery-hidden {
+  grid-template-columns: minmax(270px, 360px);
+}
 @media (max-width: 1400px) {
   .crawler-layout {
     grid-template-columns: 270px minmax(0, 1fr);
   }
+  .crawler-layout.gallery-hidden {
+    grid-template-columns: minmax(270px, 340px);
+  }
+}
+
+.gallery-toggle-btn {
+  font-size: 12px;
+  padding: 4px 9px;
+  white-space: nowrap;
+}
+.control-panel .compact-head {
+  flex-direction: column;
+  align-items: stretch;
+}
+.control-panel .compact-head > div:first-child {
+  min-width: 0;
+}
+.crawler-head-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  width: 100%;
+  justify-content: stretch;
+  gap: 5px;
+  margin-top: 8px;
+}
+.crawler-head-actions button {
+  min-width: 0;
+  font-size: 11px;
+  padding: 4px 5px;
+  border-radius: 8px;
+  white-space: nowrap;
+}
+.crawler-head-actions .hosts-btn {
+  color: #ff9800;
+}
+
+.mode-selector {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+.mode-chip {
+  min-width: 0;
+  min-height: 44px;
+  padding: 8px 4px;
+  font-size: 13px;
+  line-height: 1.15;
+  white-space: nowrap;
 }
 
 /* 控制面板设为 relative，给日志面板的「放大」态做绝对定位锚点 */
@@ -3863,6 +4147,23 @@ const tagFolderPreview = computed(() => {
    覆盖全局 .gallery-grid 的 minmax(180px, 1fr)。 */
 .gallery-grid {
   grid-template-columns: repeat(auto-fill, minmax(var(--card-min-w, 180px), 1fr));
+  transition: opacity 0.14s ease, filter 0.14s ease;
+}
+.gallery-grid.is-switching {
+  opacity: 0.46;
+  filter: saturate(0.72);
+  pointer-events: none;
+}
+.gallery-switch-status {
+  flex: 0 0 auto;
+  margin: 4px 0 8px;
+  padding: 7px 11px;
+  border: 1px solid rgba(59, 130, 160, 0.28);
+  border-radius: 9px;
+  background: rgba(59, 130, 160, 0.1);
+  color: #2a6f8e;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 /* 卡片内的「原帖 / 本地 / 编辑 / 转GIF」按钮：
@@ -3882,6 +4183,27 @@ const tagFolderPreview = computed(() => {
 .image-card .card-actions {
   padding: 8px;
   margin-top: auto;  /* 卡片内剩余空间挤到顶部，让按钮总是贴底，缩略图保持在上 */
+}
+.video-card-thumb {
+  display: block;
+  object-fit: cover;
+  background: linear-gradient(135deg, #252a31, #11151a);
+}
+.video-format-watermark {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  z-index: 4;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+  backdrop-filter: blur(3px);
 }
 
 /* gallery-head 改成两行竖排：
@@ -3950,6 +4272,8 @@ const tagFolderPreview = computed(() => {
   gap: 10px;
   max-width: 92vw;
   min-width: 480px;
+  max-height: min(46vh, 390px);
+  border-radius: 18px;
 }
 .viewer-toolbar-info {
   display: flex;
@@ -3958,6 +4282,10 @@ const tagFolderPreview = computed(() => {
   gap: 10px;
   flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
 }
 .viewer-meta-block {
   display: inline-flex;
@@ -4011,6 +4339,9 @@ const tagFolderPreview = computed(() => {
   flex-wrap: nowrap !important;
   justify-content: center;
   gap: 10px;
+  flex: 0 0 auto;
+  overflow-x: auto;
+  padding-bottom: 2px;
 }
 .viewer-actions button {
   flex: 0 0 auto;
@@ -4954,6 +5285,32 @@ const tagFolderPreview = computed(() => {
 }
 
 /* ---------------- 角色增量翻译弹窗 ---------------- */
+.character-dict-search-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.character-dict-search-row .search-input { width: 100%; }
+.character-dict-target {
+  width: 100%;
+  margin-bottom: 10px;
+  padding: 8px 11px;
+  background: rgba(59, 130, 160, 0.12);
+  border: 1px solid rgba(59, 130, 160, 0.32);
+  color: #2a6f8e;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.translation-inherit-note {
+  margin: 8px 0 0;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: rgba(216, 140, 27, 0.12);
+  color: #8a5a00;
+  font-size: 11px;
+  line-height: 1.5;
+}
 .translation-overlay {
   z-index: 10000;
   display: flex;
@@ -5074,6 +5431,12 @@ const tagFolderPreview = computed(() => {
 }
 .translation-detail-section-head.static {
   cursor: default;
+}
+.translation-wiki-refresh {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  font-size: 11px;
+  white-space: nowrap;
 }
 .translation-detail-section-body {
   padding: 10px 12px;
@@ -5972,7 +6335,7 @@ const tagFolderPreview = computed(() => {
   background: rgba(217, 119, 6, 0.3);
 }
 
-/* ---------------- 多任务队列 + 常用组合 ---------------- */
+/* ---------------- 顺序任务队列 ---------------- */
 .task-queue-panel {
   margin-top: 12px;
   padding: 10px 12px;
@@ -6111,9 +6474,13 @@ const tagFolderPreview = computed(() => {
 .tq-item.current { box-shadow: 0 0 0 2px rgba(59, 130, 160, 0.35); }
 .tq-item.running { border-color: rgba(59, 130, 160, 0.5); background: rgba(59, 130, 160, 0.06); }
 .tq-item.done { border-color: rgba(16, 185, 129, 0.5); background: rgba(16, 185, 129, 0.06); }
+.tq-item.warning { border-color: rgba(216, 140, 27, 0.55); background: rgba(216, 140, 27, 0.08); }
+.tq-item.skipped { border-color: rgba(100, 116, 139, 0.42); background: rgba(100, 116, 139, 0.07); }
 .tq-item.error { border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.06); }
 .tq-item-status { width: 16px; flex: 0 0 auto; text-align: center; }
 .tq-item.done .tq-item-status { color: #059669; }
+.tq-item.warning .tq-item-status { color: #b46b08; }
+.tq-item.skipped .tq-item-status { color: #64748b; }
 .tq-item.error .tq-item-status { color: #dc2626; }
 .tq-item-idx {
   min-width: 18px;
@@ -6160,63 +6527,6 @@ const tagFolderPreview = computed(() => {
   color: #fff;
   font-weight: 600;
 }
-.tq-combo-save { display: flex; gap: 6px; align-items: center; }
-.tq-combo-save-input {
-  flex: 1;
-  min-width: 0;
-  padding: 5px 10px;
-  border: 1px solid var(--accent);
-  border-radius: 7px;
-  font-size: 13px;
-  outline: none;
-  background: #fff;
-  color: var(--ink);
-}
-.tq-combo-save button { font-size: 12px; padding: 4px 12px; }
-.tq-combos {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  padding-top: 6px;
-  border-top: 1px dashed var(--line);
-}
-.tq-combos-label { font-size: 12px; color: var(--muted); }
-.tq-combo-chip {
-  display: inline-flex;
-  align-items: stretch;
-  border: 1px solid rgba(77, 145, 90, 0.4);
-  border-radius: 999px;
-  overflow: hidden;
-  background: rgba(77, 145, 90, 0.08);
-}
-.tq-combo-run {
-  border: none;
-  background: transparent;
-  color: #2d7a3e;
-  font-weight: 600;
-  font-size: 12px;
-  padding: 3px 10px;
-  cursor: pointer;
-}
-.tq-combo-run:hover:not(:disabled) { background: rgba(77, 145, 90, 0.18); }
-.tq-combo-load {
-  border: none;
-  border-left: 1px solid rgba(77, 145, 90, 0.3);
-  background: transparent;
-  color: var(--muted);
-  font-size: 11px;
-  padding: 3px 8px;
-  cursor: pointer;
-}
-.tq-combo-load:hover:not(:disabled) { background: rgba(0, 0, 0, 0.05); color: var(--ink); }
-.tq-combo-chip .tq-del {
-  border: none;
-  border-left: 1px solid rgba(77, 145, 90, 0.3);
-  border-radius: 0;
-}
-.tq-combo-chip button:disabled { opacity: 0.5; cursor: not-allowed; }
-
 /* ---------------- 起始页 / 结束页：缩小输入框 + 右侧最近使用记录 ---------------- */
 /* 注意：类名不能用 .page-grid —— 全局 style.css 里 .page-grid 是应用整体布局
    （340px + 1fr + height:100%），命中后会把这一行撑到面板满高，下方出现大块空白 */
@@ -6354,6 +6664,17 @@ const tagFolderPreview = computed(() => {
 }
 .viewer-corner-counter:hover {
   opacity: 1;
+}
+.viewer-corner-btn.viewer-corner-close {
+  align-self: flex-end;
+  background: rgba(125, 32, 32, 0.66);
+  border-color: rgba(255, 180, 180, 0.34);
+  opacity: 0.58;
+  transition: opacity 0.18s ease, background 0.18s ease;
+}
+.viewer-corner-btn.viewer-corner-close:hover {
+  opacity: 1;
+  background: rgba(157, 44, 44, 0.9);
 }
 .viewer-corner-counter-label {
   color: rgba(255, 255, 255, 0.75);

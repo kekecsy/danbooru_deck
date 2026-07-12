@@ -9790,5 +9790,95 @@
     "chinese_name": "御陵名草",
     "source_hint": "blue_archive",
     "translated_description_zh": "来自《蔚蓝档案》（Blue Archive）的学生角色，所属学园为“百花缭乱纠纷调解委员会”，担任副委员长。其全名为御陵名草（Goryou Nagusa）。该角色存在常服与泳装等不同形象版本，由声优佐仓薰（Sakura Kaoru）配音。"
+  },
+  "marciana_(nikke)": {
+    "has_chinese": true,
+    "chinese_name": "玛律恰那",
+    "source_hint": "nikke",
+    "translated_description_zh": "《胜利女神：妮姬》中的角色，M.M.R.职业学校的理性完美主义教师。她不断努力为学生提供优质教育，同时也拥有喜爱可爱事物的少女一面。她留着黑色长发，棕色眼睛，身材丰满。通常穿着露脐上衣和白色紧身裤，配有肚脐钉，戴着白手套和黑色过膝靴。"
+  },
+  "marciana_(marine_study)_(nikke)": {
+    "has_chinese": true,
+    "chinese_name": "玛律恰那：海洋进修",
+    "source_hint": "goddess_of_victory_nikke",
+    "translated_description_zh": "这是《胜利女神：妮姬》中角色玛律恰那（Marciana）的泳装官方换装皮肤“海洋进修”（Marine Study）。她与她的企鹅小队一同登场。"
+  },
+  "yajwa": {
+    "has_chinese": false,
+    "chinese_name": "",
+    "source_hint": "original",
+    "translated_description_zh": "一位源自《冒险岛》的原创角色。"
+  },
+  "anastasya_feodorovna_snezhnaya": {
+    "has_chinese": true,
+    "chinese_name": "安娜丝塔夏·费奥多罗夫娜·雪奈茨娜娅",
+    "source_hint": "genshin_impact",
+    "translated_description_zh": "《原神》中的冰之女皇，至冬国的统治者，也是愚人众执行官的唯一效忠对象。她正为某种未知原因向天理举起反旗。角色设计在「超越PV·骤雪」中公布，中文CV为刘校妤，日文CV为户松遥。"
+  },
+  "jubilee": {
+    "has_chinese": true,
+    "chinese_name": "李千欢",
+    "source_hint": "marvel",
+    "translated_description_zh": "欢欢（Jubilee），本名朱比莱辛·李（Jubilation Lee），是美国漫威漫画公司出版的《X战警》系列中的超级英雄角色。由编剧克里斯·克莱蒙特和画师马克·西尔维斯特里联合创作，首次登场于《神奇X战警》第244期（1989年5月）。"
+  },
+  "yuuki_sakuna_(3rd_costume)": {
+    "has_chinese": true,
+    "chinese_name": "结城昨日奈",
+    "source_hint": "virtual_youtuber",
+    "translated_description_zh": "虚拟主播结城昨日奈（Yuuki Sakuna）的第三套，也是当前的默认服装，于2025年9月公布，取代了其第一套默认服装。由吉田音设计，忧姬遥（憂姫はぐれ）绘制插画。"
+  },
+  "penguin_squad_(nikke)": {
+    "has_chinese": false,
+    "chinese_name": "",
+    "source_hint": "nikke",
+    "translated_description_zh": "该角色出自游戏《胜利女神：妮姬》。它们是机械企鹅，由角色“蕾”创造，在玛律恰那的夏日旅行中担任她的守护者。它们穿着救生员服装。目前已知共有四只，其中只有4号企鹅能够说话，其余的只能发出“企鹅”声作为回应。"
+  },
+  "bay_(radiant_rabbit)_(nikke)": {
+    "has_chinese": true,
+    "chinese_name": "贝伊：闪耀兔",
+    "source_hint": "goddess_of_victory_nikke",
+    "translated_description_zh": "这是《胜利女神：妮姬》中角色贝伊（Bay）的“闪耀兔”（Radiant Rabbit）官方换装皮肤。该造型属于《花花公子兔女郎》（playboy bunny）风格。"
+  },
+  "kuroda_kunika": {
+    "has_chinese": true,
+    "chinese_name": "黑田那佳",
+    "source_hint": "noble_witches",
+    "translated_description_zh": "来自《高贵魔女》（Noble Witches）的角色，扶桑皇国的飞行军官，隶属于第506统合战斗航空团。出身于大名家的分支家族。武器为Ho-103机枪和MG42，使魔是柴犬，原型为黑木为义。"
+  },
+  "kisaki_(kindergarten_uniform)_(blue_archive)": {
+    "has_chinese": true,
+    "chinese_name": "龙华妃咲（幼儿园服）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "妃咲（Kisaki）是游戏《蔚蓝档案》中的角色，山海经高级中学学生会“玄龙门”的会长。此为她在实装活动期间登场的官方换装，即乔装成幼稚园儿童时的形象，被称为“Kiki”（キキ）。"
+  },
+  "kisaki_(school_uniform)_(blue_archive)": {
+    "has_chinese": true,
+    "chinese_name": "龙华妃咲（校服）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "妃咲（Kisaki）是游戏《蔚蓝档案》中的角色，山海经高级中学学生会“玄龙门”的会长。此为她的学校制服官方换装。"
+  },
+  "chao_ho_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "肇和",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "肇和是游戏《碧蓝航线》中的角色，其原型为中华民国海军肇和号防护巡洋舰。角色由画师yyy (zelda10010)设计，拥有红色与白色的双色长发，扎成双螺髻，紫色眼眸。默认服装为带有白色内搭的改良旗袍，配有飞袖，单侧白色过膝袜和红色高跟鞋。游戏中，她和妹妹应瑞被重新归类为轻巡洋舰以适应现有舰船类型。"
+  },
+  "ying_swei_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "应瑞",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "应瑞是游戏《碧蓝航线》中的角色，其原型为中华民国海军应瑞号防护巡洋舰（Ying Swei/Ying Rui）。角色由画师yyy (zelda10010)设计，拥有紫色与白色的双色长发，扎成双螺髻，紫色眼眸。她的服装与其姐姐肇和的基本相同，但主色调为紫色，单侧过膝袜穿在右腿上。游戏中，她和姐姐肇和被重新归类为轻巡洋舰以适应现有舰船类型。"
+  },
+  "leonardo_da_vinci_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "莱昂纳多·达·芬奇",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "莱昂纳多·达·芬奇是游戏《碧蓝航线》中意大利马可尼级潜艇的拟人化角色，由画师Popqn设计，丸冈和佳奈配音。她拥有金色双马尾和红色眼眸，默认服装为高叉拉链泳衣搭配黑色过膝袜、高跟鞋与印有意大利国旗的白色外套。"
+  },
+  "kisaki_(kindergarten_swimsuit)_(blue_archive)": {
+    "has_chinese": true,
+    "chinese_name": "龙华妃咲（幼儿园泳装）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "该角色为《蔚蓝档案》中角色“龙华妃咲”的官方泳装换装。作为山海经高级中学学生会“玄龙门”的门主，她因夏日来临而换上了泳装。她身穿带有“Kiki”（キキ）名牌的白色与粉色冲浪服风格连体泳衣，搭配白色泳裙和花朵别针，脚穿粉色与黄色人字拖。头发扎成双马尾并系有蓝色发圈和小黄蝴蝶结，常携带黄色透明游泳圈。"
   }
 }

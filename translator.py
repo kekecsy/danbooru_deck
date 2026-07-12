@@ -326,6 +326,55 @@ class Translator:
         data[tag] = normalized
         self.save_search_dict(data)
 
+    def get_translation_entry(self, tag: str) -> dict:
+        """返回当前实际命中的翻译条目，并标明 matched_key。
+        精确 tag 优先；没有精确皮肤条目时才回退到系列/base，方便 UI 创建精确覆盖。"""
+        search = self.load_search_dict()
+        for variant in self._get_tag_variants((tag or "").strip()):
+            entry = search.get(variant)
+            source = "search"
+            if not isinstance(entry, dict):
+                entry = self.custom_dict.get(variant)
+                source = "custom"
+            if isinstance(entry, dict):
+                return {"matched_key": variant, "source": source, **entry}
+        return {"matched_key": "", "source": "", "has_chinese": False, "chinese_name": "", "source_hint": "", "translated_description_zh": ""}
+
+    def search_translation_entries(self, query: str = "", limit: int = 100) -> list:
+        """按 tag / 中文名 / 作品 source_hint / 简介搜索可编辑角色字典。"""
+        merged = {}
+        for tag, entry in self.custom_dict.items():
+            if tag == "__source_hint_aliases__" or not isinstance(entry, dict):
+                continue
+            merged[tag] = {"source": "custom", **entry}
+        for tag, entry in self.load_search_dict().items():
+            if tag == "__source_hint_aliases__" or not isinstance(entry, dict):
+                continue
+            merged[tag] = {"source": "search", **entry}
+
+        keywords = [part for part in (query or "").lower().replace("，", " ").split() if part]
+        rows = []
+        for tag, entry in merged.items():
+            haystack = " ".join([
+                tag,
+                str(entry.get("chinese_name", "") or ""),
+                str(entry.get("source_hint", "") or ""),
+                str(entry.get("translated_description_zh", "") or ""),
+            ]).lower()
+            if keywords and not all(keyword in haystack for keyword in keywords):
+                continue
+            rows.append({
+                "tag": tag,
+                "fallback_name": self._format_tag(tag),
+                "has_chinese": bool(entry.get("has_chinese", False)),
+                "chinese_name": str(entry.get("chinese_name", "") or ""),
+                "source_hint": str(entry.get("source_hint", "") or ""),
+                "translated_description_zh": str(entry.get("translated_description_zh", "") or ""),
+                "source": entry.get("source", ""),
+            })
+        rows.sort(key=lambda item: (item["source_hint"], item["chinese_name"], item["tag"]))
+        return rows[:max(1, min(int(limit or 100), 500))]
+
     def import_search_to_custom(self) -> dict:
         """把 SEARCH_JSON 整体合并进 custom_dict 并写盘。返回 {imported, total}。"""
         search = self.load_search_dict()

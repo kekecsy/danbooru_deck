@@ -45,5 +45,10 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     save: (imagePath, entry) => ipcRenderer.invoke('caption:save', { imagePath, entry }),
     listForDate: (date) => ipcRenderer.invoke('caption:list-for-date', date),
     copyImage: (imagePath, maxEdge) => ipcRenderer.invoke('caption:copy-image', { imagePath, maxEdge })
+  },
+  pose: {
+    read: (imagePath) => ipcRenderer.invoke('pose:read', imagePath),
+    save: (imagePath, entry) => ipcRenderer.invoke('pose:save', { imagePath, entry }),
+    listForDate: (date) => ipcRenderer.invoke('pose:list-for-date', date)
   }
 });
