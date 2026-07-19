@@ -11,6 +11,7 @@ image_favorites.json
 copyright.json
 magazine.json
 desktop-app/dist
+build/
 env_config.json
 logs/
 CLAUDE.md

@@ -982,6 +982,18 @@ async function loadGallery(date, silent = false, preserveView = false) {
   }
 }
 
+async function reloadCurrentGallery() {
+  const date = gallery.value.selectedDate;
+  if (!date || loadingGallery.value) return;
+  const previousCount = gallery.value.images.length;
+  await loadGallery(date, false, true);
+  const addedCount = Math.max(0, gallery.value.images.length - previousCount);
+  showToast(
+    addedCount > 0 ? `已刷新 ${date}，新增 ${addedCount} 张` : `已刷新 ${date}`,
+    'success'
+  );
+}
+
 async function refreshGalleryIndex(date = gallery.value.selectedDate) {
   try {
     const data = await window.desktopAPI.gallery.getByDate(date || gallery.value.selectedDate);
@@ -3180,6 +3192,12 @@ const tagFolderPreview = computed(() => {
           </span>
         </div>
         <div class="gallery-tools">
+          <button
+            class="secondary tool-btn"
+            @click="reloadCurrentGallery"
+            :disabled="!gallery.selectedDate || loadingGallery"
+            title="重新读取当前日期目录，显示下载任务刚写入的新图片，并保留当前页"
+          >{{ loadingGallery ? '刷新中…' : '↻ 刷新图库' }}</button>
           <button
             class="secondary tool-btn select-mode-btn"
             :class="{ active: selection.enabled }"

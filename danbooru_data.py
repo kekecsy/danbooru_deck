@@ -5,6 +5,7 @@ import datetime
 import threading
 
 from my_utils import dedup_viewer_data
+from runtime_paths import DRAWER_DIR, HOT_PIC_DIR, ensure_user_directories
 
 # 进程级「按文件路径分配的可重入锁」表：所有 DanbooruData 实例共享同一张表，
 # 于是对同一个 JSON（尤其是 viewer_data.json）的「读 / 写」在整个进程内串行。
@@ -47,8 +48,9 @@ def _atomic_replace(src, dst, attempts=5, base_delay=0.05):
 
 class DanbooruData:
     def __init__(self, target_date=None):
-        self.base_dir = './hot_pic'
-        self.drawer_dir = './drawer'
+        ensure_user_directories()
+        self.base_dir = str(HOT_PIC_DIR)
+        self.drawer_dir = str(DRAWER_DIR)
         self.today_str = target_date if target_date else datetime.datetime.now().strftime('%Y-%m-%d')
         self.save_dir = os.path.join(self.base_dir, self.today_str)
         

@@ -2,17 +2,18 @@ import json
 from typing import Dict, List, Optional
 import re
 from pathlib import Path
+from runtime_paths import DATA_DIR, RESOURCE_DIR, ensure_user_directories
 
-BASE_DIR = Path(__file__).parent.resolve()
+BASE_DIR = RESOURCE_DIR
 
-CUSTOM_JSON = BASE_DIR / "custom_translation.json"
-SEARCH_JSON = BASE_DIR / "character_chinese_search.json"
+CUSTOM_JSON = DATA_DIR / "custom_translation.json"
+SEARCH_JSON = DATA_DIR / "character_chinese_search.json"
 
 # 角色英文描述源：与 translator.py 同目录放 character.json 即可（项目相对路径）。
 CHARACTER_SOURCE_JSON = BASE_DIR / "character.json"
 # 用户在 UI 里点「在线拉描述」从 Danbooru wiki 抓回来的条目落到这里。
 # 单独存一个增量文件，避免动 12MB 的 base，加载时合并到内存源。
-CHARACTER_SUPPLEMENT_JSON = BASE_DIR / "character_supplement.json"
+CHARACTER_SUPPLEMENT_JSON = DATA_DIR / "character_supplement.json"
 
 MANUAL_PROMPT_TEMPLATE = """你是一个专业的 ACG 角色翻译与命名专家。请按下面的规则给出 JSON。
 
@@ -39,6 +40,7 @@ ID: {tag}
 
 class Translator:
     def __init__(self):
+        ensure_user_directories()
         self.custom_dict = {}
         self._character_source: Optional[dict] = None
         self.load_dicts()

@@ -1,289 +1,195 @@
 # Danbooru 图片抓取与管理桌面应用
 
-基于 **Electron + Vue 3 + FastAPI** 的桌面端，提供 Danbooru 抓图、本地图库管理、标签翻译和打码编辑等功能。
+基于 **Electron + Vue 3 + FastAPI** 的 Windows 桌面应用，提供 Danbooru 抓图、本地图库管理、标签翻译、收藏和图片编辑等功能。
+
+普通用户不需要安装 Python、Node.js、Electron，也不需要配置开发环境。
 
 ---
 
-## 📸 界面预览
+## 界面预览
 
-**抓图主界面** — 左侧配置抓取任务（模式 / 标签 / 起止页 / 日期），右侧本地图库网格；可进入选择模式跨页勾选图片，配合 🗜 加密工具把长 ID 列表压成短串方便分享。
+**抓图主界面** — 左侧配置抓取任务，右侧浏览本地图库；支持多种抓取模式、跨页选择、筛选和排序。
 
 ![抓图主界面](overview_pic/sample1.png)
 
-**点击缩略图打开大图查看器** — 信息栏默认悬浮显示（可 📌 固定），支持 ⛶ 原始大小 / ▣ 适应窗口 切换，并提供画师/角色收藏、编辑跳转、上下张切换等。
+**大图查看器** — 支持原始大小、适应窗口、画师/角色收藏、编辑跳转和上下张切换。
 
 ![大图查看器](overview_pic/sample2.png)
 
 ---
 
-## 🚀 快速开始（Windows）
+## 下载与使用
 
-> 需要 [Python 3.9+](https://www.python.org/downloads/) 和 [Node.js 18+](https://nodejs.org/)。
-> 推荐使用 [uv](https://docs.astral.sh/uv/)进行包管理：
->
-> ```text
-> winget install --id=astral-sh.uv -e
-> ```
->
-> `setup.bat` 会自动识别 uv 并使用；没装也行，会回退到标准 `venv + pip`。
+Windows 用户可以选择安装版或便携版，两者都已包含 Electron 前端、Python 后端及运行依赖。
+
+### 安装版
+
+下载并运行：
 
 ```text
-1. 下载/克隆本仓库
-2. 双击 setup.bat   ← 一键创建 .venv、装依赖、编译前端（优先 uv，回退 pip）
-3. 双击 start.bat   ← 启动桌面端
+Danbooru-Deck-<版本号>-x64.exe
 ```
 
-`setup.bat` 的作用：
+按照安装向导完成安装，然后从桌面或开始菜单启动。
 
-- 检查 Python / Node.js / uv
-- 在项目根目录创建独立 `.venv`，跑 `uv pip install -r requirements.txt`（或 `pip install`）
-- `desktop-app/` 里跑 `npm install` + `npm run build`
-- 写入 `env_config.json`，把 Python 路径指向上面的 `.venv`
+安装版的用户数据默认保存在：
 
-之后只要双击 `start.bat` 即可启动。需要桌面快捷方式的话，对 `start.bat` 右键 → 发送到 → 桌面快捷方式。
-
----
-
-## 🚀 快速开始（macOS / Linux）
-
-> 需要 [Python 3.9+](https://www.python.org/downloads/) 和 [Node.js 18+](https://nodejs.org/)。
-> macOS 推荐先装 [Homebrew](https://brew.sh/)，再用它把依赖一次装齐：
->
-> ```bash
-> brew install python node uv      # uv 可选，但强烈推荐（装依赖快一个数量级）
-> ```
->
-> `setup.sh` 会自动识别 uv 并使用；没装也行，会回退到标准 `venv + pip`。
-
-```bash
-1. 下载/克隆本仓库
-2. cd 到项目目录
-3. chmod +x setup.sh start.sh   ← 首次需要给脚本加执行权限
-4. ./setup.sh                   ← 创建 .venv、装依赖、编译前端（优先 uv，回退 pip）
-5. ./start.sh                   ← 启动桌面端
+```text
+%APPDATA%\Danbooru Deck\data
 ```
 
-`setup.sh` 的作用（与 Windows 版 `setup.bat` 一一对应）：
+卸载或升级应用不会自动删除 `hot_pic`、收藏和其他用户数据。
 
-- 检查 Python3 / Node.js / uv
-- 在项目根目录创建独立 `.venv`，跑 `uv pip install -r requirements.txt`（或 `pip install`）
-- `desktop-app/` 里跑 `npm install` + `npm run build`
-- 写入 `env_config.json`，把 Python 路径指向上面 `.venv` 里的 `bin/python`
+### 便携版
 
-之后只要执行 `./start.sh` 即可启动。
+下载并直接双击：
 
-> 不想加执行权限的话，直接 `bash setup.sh` / `bash start.sh` 也能跑。
+```text
+Danbooru-Deck-<版本号>-x64-Portable.exe
+```
+
+便携版无需安装。首次启动时会在 exe 同目录创建：
+
+```text
+Danbooru Deck Data/
+├── hot_pic/       # 下载的图片和媒体文件
+├── drawer/        # 爬虫运行数据
+├── app-state/     # 窗口状态和缓存
+└── *.json         # 收藏、图库配置和翻译数据
+```
+
+迁移或备份便携版时，请同时复制便携版 exe 和 `Danbooru Deck Data` 文件夹。
+
+> 单文件便携版首次启动需要解压内置资源，速度可能比后续启动稍慢。
+
+### Windows 安全提示
+
+如果发布版本没有配置商业代码签名证书，Windows SmartScreen 可能显示“未知发布者”。请确认文件来自本项目的正式发布页面后再运行。
 
 ---
 
 ## 主要功能
 
-- **多模式抓取**：排行榜 / 日期热门 / 日期范围热门 / 仅收集 ID / 按 ID 下载 / 按 Tag 下载。
-- **本地库管理**：按下载日期归类（`hot_pic/YYYY-MM-DD/`），支持画师 / 角色搜索、score 排序、筛选格式（图片/视频/动图）。
-- **热度刷新**：当前页 / 指定范围 / 全部 三种方式刷新 score、收藏数、画师；范围 >5 页时自动每 4 页休 40s 防风控。
-- **画师 / 角色收藏**：点 chip 旁的 ★ 可分组收藏，角色按 `source_hint` 自动合并归类；被收藏的卡片在画廊中异色高亮。
-- **标签翻译**：英文角色 tag → 中文，支持在线/手动补全；可导入自定义 `json` 词典。
-- **ZIP→GIF 转换**（可选，依赖 FFMPEG，见下文）。
-- **打码编辑器**：内置全屏查看器 + EditorPage 打码/水印工具。
+- **多模式抓取**：排行榜、日期热门、日期范围热门、仅收集 ID、按 ID 下载、按 Tag 下载。
+- **本地图库管理**：按日期归档，支持画师/角色搜索、热度排序和媒体格式筛选。
+- **热度刷新**：支持当前页、指定范围和全部刷新 score、收藏数及画师信息。
+- **画师与角色收藏**：支持分组收藏、来源归类和画廊高亮。
+- **标签翻译**：英文角色标签转中文，支持在线补全和自定义翻译数据。
+- **打码与图片编辑**：内置大图查看器和图片编辑工具。
+- **ZIP 转 GIF**：安装 FFMPEG 后可使用可选的转换功能。
 
 ---
 
-## 自定义配置环境方案（不想用一键脚本时）
+## 用户数据说明
 
-### 1. Python 环境
+以下内容属于用户数据，不会打包进程序，也不会在升级时被覆盖：
 
-**推荐：uv**
+- `hot_pic/`
+- `drawer/`
+- `artist_favorites.json`
+- `character_favorites.json`
+- `image_favorites.json`
+- `library_roots.json`
+- `custom_translation.json`
+- `character_chinese_search.json`
+- `character_supplement.json`
 
-```bash
-uv venv .venv
-# Windows
-uv pip install --python .venv\Scripts\python.exe -r requirements.txt
-# macOS / Linux
-uv pip install --python .venv/bin/python -r requirements.txt
-```
-
-> uv 自动处理 Python 发现、venv 创建、并行下载和 wheel 缓存，第一次完整安装通常在 10 秒级。
-
-其它方式也行：
-
-
-Anaconda：
-
-```bash
-conda create -n danbooru python=3.10
-conda activate danbooru
-pip install -r requirements.txt
-```
-
-venv：
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate          # Windows
-source .venv/bin/activate       # macOS / Linux
-pip install -r requirements.txt
-```
-
-### 2. 指定 Python 解释器
-
-桌面端启动时按以下顺序寻找 Python：
-
-1. 项目根目录的 `env_config.json` 中 `python_path` 字段（绝对路径，Windows 注意 JSON 里反斜杠要写成 `\\`）
-2. 环境变量 `WEB_MOSAIC_PYTHON`
-3. 系统 `PATH` 中的 `python` / `py -3`
-
-`setup.bat`（Windows）/ `setup.sh`（macOS / Linux）会自动生成 `env_config.json`；手动写时格式如下：
-
-Windows（注意 JSON 里反斜杠要写成 `\\`）：
-
-```json
-{
-    "python_path": "D:\\Anaconda3\\envs\\danbooru\\python.exe"
-}
-```
-
-macOS / Linux（正斜杠，无需转义）：
-
-```json
-{
-    "python_path": "/Users/you/web_mosaic_gpt/.venv/bin/python"
-}
-```
-
-提示：在激活的环境里跑 `where python`（Windows）/ `which python3`（macOS / Linux）取第一行即可。
-
-### 3. 前端
-
-```bash
-cd desktop-app
-npm install
-npm run build      # 生产构建（start.bat 走这条）
-npm run dev        # 开发模式（带热重载 + Electron）
-```
+便携版将这些文件保存在 exe 旁的 `Danbooru Deck Data` 中；安装版将它们保存在当前 Windows 用户的应用数据目录中。
 
 ---
 
-## 可选：FFMPEG（仅 ZIP→GIF 转换需要）
+## 可选：FFMPEG
 
-抓图、管理、打码都不需要 FFMPEG。**只有点"转 GIF"按钮时**才会调用它。需要时任选其一：
+抓图、图库管理、收藏和图片编辑不需要 FFMPEG。只有 ZIP 转 GIF 功能需要它。
 
-```bash
-winget install Gyan.FFmpeg   # Windows
-brew install ffmpeg          # macOS
+Windows 可以使用以下命令安装：
+
+```powershell
+winget install Gyan.FFmpeg
 ```
 
-或从 [FFMPEG 官网](https://ffmpeg.org/download.html) 下载，把 `bin/` 加入系统 `PATH`，在终端中验证：
+安装完成后可在终端验证：
 
-```bash
+```powershell
 ffmpeg -version
 ```
 
 ---
 
-## 无法连接 Danbooru？
+## 无法连接 Danbooru
 
-国内网络偶尔会被运营商劫持，可以改 hosts 绕过。
+如果所在网络无法连接 `danbooru.donmai.us`，请先检查代理、DNS 和防火墙设置。应用内也提供了“无法连接”相关说明。
 
-文件位置：
-
-- Windows：`C:\Windows\System32\drivers\etc\hosts`（用管理员权限编辑）
-- macOS / Linux：`/etc/hosts`（`sudo nano /etc/hosts`）
-
-在末尾追加一行：
+如确实需要修改 Windows hosts，请使用管理员权限编辑：
 
 ```text
-104.26.11.39 danbooru.donmai.us
+C:\Windows\System32\drivers\etc\hosts
 ```
 
-桌面端右上角的「无法连接？修改Hosts教程」按钮里也有同样的说明。
+网络地址可能发生变化，不建议长期使用未经确认的固定 IP。
 
 ---
 
-## Electron 装不上 / 报 "Electron failed to install correctly"？
+## 从源码开发
 
-`npm install` 会下载 Electron 本体。国内网络、半截缓存、杀毒软件拦截解压，都可能导致启动时报：
+以下内容仅面向希望修改代码或自行构建发布包的开发者。普通用户无需执行。
 
-```text
-Error: Electron failed to install correctly, please delete node_modules/electron and try installing again
-```
+### 环境要求
 
-### 先用一键修复
+- Python 3.9+
+- Node.js 18+
+- Windows x64
 
-**Windows：**
+### 安装源码依赖
 
-```text
-双击 repair-electron.bat
-```
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install pyinstaller
 
-**macOS / Linux：**
-
-```bash
-bash repair-electron.sh
-```
-
-修复完成后重新运行 `start.bat` / `start.sh`。
-
-这个脚本会自动做这些事：
-
-- 设置 Electron 国内镜像：`https://npmmirror.com/mirrors/electron/`
-- 删除残缺的 `desktop-app/node_modules/electron`
-- 清理 Electron 下载缓存
-- 重新执行 `npm install`
-- 检查 `dist/electron.exe`（macOS / Linux 为对应可执行文件）和 `path.txt`
-- 如果 npm 安装后仍缺本体，自动下载对应版本 zip，并用系统工具手动解压
-- 把全过程写入 `logs/electron-repair.log`
-
-> Windows 如果反复修复失败，请检查杀毒软件的「隔离区 / 防护记录」，看 `electron.exe` 或 `.dll` 是否被拦截。可以把 `desktop-app\node_modules\electron` 加入白名单后再跑一次修复脚本。
-
-### 还是不行：一键收集 issue 信息
-
-**Windows：**
-
-```text
-双击 collect-debug-info.bat
-```
-
-**macOS / Linux：**
-
-```bash
-bash collect-debug-info.sh
-```
-
-它会生成：
-
-```text
-logs/debug-info.txt
-```
-
-发 issue 时请附上：
-
-- `logs/debug-info.txt`
-- `logs/electron-repair.log`（如果运行过修复脚本）
-- 报错截图或终端报错文本
-
-`collect-debug-info` 不会读取 `.env` 或 `env_config.json` 的内容，只记录它们是否存在。日志里可能包含本机路径，上传前可以先打开看一眼。
-
-### 高级用户：手动指定镜像
-
-如果你不用脚本，手动 `npm install` 时需要在同一个终端里设置镜像变量：
-
-**Windows（cmd）：**
-
-```cmd
 cd desktop-app
-set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
 npm install
 ```
 
-**macOS / Linux：**
+也可以使用仓库中的 `setup.bat` 初始化开发环境，使用 `start.bat` 启动源码版。
 
-```bash
+### 开发模式
+
+```powershell
 cd desktop-app
-export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
-npm install
+npm run dev
 ```
 
-不设置 `ELECTRON_MIRROR` 时，Electron 默认从 GitHub 下载。
+### 构建 Python 后端
+
+在项目根目录执行：
+
+```powershell
+.\.venv\Scripts\python.exe -m PyInstaller `
+  --noconfirm `
+  --clean `
+  --distpath build\python-dist `
+  --workpath build\pyinstaller `
+  crawler-backend.spec
+```
+
+### 构建 Windows 发布包
+
+```powershell
+cd desktop-app
+
+# 安装版
+npm run dist:win
+
+# 便携版
+npm run dist:portable
+```
+
+默认输出目录：
+
+```text
+../danbooru_deck_exe/
+```
 
 ---
 
@@ -291,23 +197,21 @@ npm install
 
 ```text
 .
-├── setup.bat / start.bat   # 一键安装 / 启动（Windows）
-├── setup.sh  / start.sh    # 一键安装 / 启动（macOS / Linux）
-├── repair-electron.*       # Electron 安装失败时的一键修复脚本
-├── collect-debug-info.*    # 生成 issue 诊断信息到 logs/debug-info.txt
-├── main.py                 # FastAPI 后端入口
-├── translator.py           # 标签翻译核心
-├── requirements.txt        # Python 依赖
-├── env_config.json         # 桌面端用来找 Python 的配置（setup.bat 自动生成）
-├── custom_translation.json # 用户自定义翻译词典
-├── artist_favorites.json   # 画师收藏（分组）
-├── character_favorites.json# 角色收藏（按 source_hint 合并）
-├── hot_pic/                # 下载根目录，按日期归档
-├── exiftool/               # 已自带，无需另装
-└── desktop-app/            # Electron + Vue 3 前端
-    ├── electron/main.cjs   # Electron 主进程，负责拉起 Python 后端
-    └── src/                # Vue 源码（CrawlerPage / EditorPage / FavoritesPage）
+├── main.py                    # FastAPI 后端入口
+├── runtime_paths.py           # 程序资源与用户数据路径管理
+├── crawler-backend.spec       # PyInstaller 后端打包配置
+├── translator.py              # 标签翻译核心
+├── requirements.txt           # Python 源码开发依赖
+├── setup.bat / start.bat      # Windows 源码开发辅助脚本
+├── hot_pic/                   # 源码开发模式下的下载目录
+└── desktop-app/
+    ├── electron/main.cjs      # Electron 主进程
+    ├── src/                   # Vue 3 前端源码
+    └── package.json           # 前端及 Windows 打包配置
 ```
 
 ---
-*Created by Claude Code AI assistant.*
+
+## 许可证与第三方服务
+
+请遵守 Danbooru 的使用规则、目标站点的访问频率限制，以及所在地适用的法律法规。下载内容的版权归原作者或权利人所有。

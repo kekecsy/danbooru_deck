@@ -6,11 +6,24 @@ const { spawn } = require('node:child_process');
 const crypto = require('node:crypto');
 
 const isDev = !app.isPackaged;
-const repoRoot = path.resolve(__dirname, '..', '..');
-const hotPicDir = path.join(repoRoot, 'hot_pic');
+const sourceRoot = path.resolve(__dirname, '..', '..');
+const resourceRoot = isDev ? sourceRoot : process.resourcesPath;
+const portableRoot = process.env.PORTABLE_EXECUTABLE_DIR || '';
+if (!isDev && portableRoot) {
+  app.setPath('userData', path.join(portableRoot, 'Danbooru Deck Data', 'app-state'));
+}
+const dataRoot = isDev
+  ? sourceRoot
+  : portableRoot
+    ? path.join(portableRoot, 'Danbooru Deck Data')
+    : path.join(app.getPath('userData'), 'data');
+const repoRoot = dataRoot;
+const hotPicDir = path.join(dataRoot, 'hot_pic');
 const presetDirs = [
-  path.join(repoRoot, 'pic_web', 'present'),
-  path.join(repoRoot, 'mosaic_qt', 'present')
+  path.join(resourceRoot, 'backend', 'pic_web', 'present'),
+  path.join(resourceRoot, 'backend', 'mosaic_qt', 'present'),
+  path.join(resourceRoot, 'pic_web', 'present'),
+  path.join(resourceRoot, 'mosaic_qt', 'present')
 ];
 const crawlerApiBase = 'http://127.0.0.1:8000';
 const DEFAULT_WINDOW_STATE = { width: 1540, height: 980, isMaximized: true };
@@ -458,6 +471,9 @@ function listPresetFiles() {
 }
 
 function getPythonCommand() {
+  if (!isDev) {
+    return { command: path.join(resourceRoot, 'backend', 'crawler-backend.exe'), args: [] };
+  }
   const configPath = path.join(repoRoot, 'env_config.json');
   try {
     if (fs.existsSync(configPath)) {
@@ -535,25 +551,29 @@ async function ensureCrawlerService() {
 
     crawlerLastError = '';
     crawlerStdout = [];
-    crawlerProcess = spawn(python.command, [...python.args, ...getPythonSpawnArgs()], {
-      cwd: repoRoot,
+    fs.mkdirSync(hotPicDir, { recursive: true });
+    crawlerProcess = spawn(python.command, getBackendSpawnArgs(python), {
+      cwd: dataRoot,
       windowsHide: true,
       env: {
         ...process.env,
-        PYTHONIOENCODING: 'utf-8'
+        PYTHONIOENCODING: 'utf-8',
+        DANBOORU_DECK_DATA_DIR: dataRoot,
+        DANBOORU_DECK_RESOURCE_DIR: isDev ? sourceRoot : ''
       }
     });
 
     crawlerProcess.stdout.on('data', chunk => {
-      const text = chunk.toString();
-      crawlerStdout.push(...text.split(/\r?\n/).filter(Boolean).slice(-20));
+      const lines = backendOutputLines(chunk.toString());
+      crawlerStdout.push(...lines.slice(-20));
       crawlerStdout = crawlerStdout.slice(-200);
     });
 
     crawlerProcess.stderr.on('data', chunk => {
       const text = chunk.toString();
-      crawlerLastError = text.trim();
-      crawlerStdout.push(...text.split(/\r?\n/).filter(Boolean).slice(-20));
+      const errors = backendErrorLines(text);
+      if (errors.length) crawlerLastError = errors.join('\n');
+      crawlerStdout.push(...backendOutputLines(text).slice(-20));
       crawlerStdout = crawlerStdout.slice(-200);
     });
 
@@ -718,6 +738,25 @@ function captionJsonPathFor(imagePath) {
   const resolved = toAbsolutePath(imagePath);
   if (!resolved || !isWithinLibraryRoots(resolved)) return null;
   return path.join(path.dirname(resolved), 'caption.json');
+}
+
+function getBackendSpawnArgs(python) {
+  return isDev ? [...python.args, ...getPythonSpawnArgs()] : python.args;
+}
+
+function backendOutputLines(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line => !/^INFO:\s+/i.test(line));
+}
+
+function backendErrorLines(text) {
+  return String(text || '')
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(line => /^(ERROR|CRITICAL):\s+/i.test(line) || /^Traceback\b/i.test(line));
 }
 
 ipcMain.handle('caption:read', async (_event, imagePath) => {
@@ -926,6 +965,7 @@ ipcMain.handle('crawler:set-safe-mode', async (_event, safe) => {
 });
 
 app.whenReady().then(() => {
+  fs.mkdirSync(hotPicDir, { recursive: true });
   Menu.setApplicationMenu(null);
   thumbCacheDir = path.join(app.getPath('userData'), 'thumb-cache');
   protocol.handle('local', (request) => {

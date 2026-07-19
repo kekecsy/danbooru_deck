@@ -44,15 +44,18 @@ from my_utils import (
 import danbooru_api
 import gelbooru_api
 from danbooru_data import DanbooruData
+from runtime_paths import DATA_DIR, HOT_PIC_DIR, RESOURCE_DIR, ensure_user_directories
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ensure_user_directories()
+
+PROJECT_ROOT = RESOURCE_DIR
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from pic_web.main import app as mosaic_editor_app
 from translator import translator
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = DATA_DIR
 # 画师收藏存盘文件，结构 {group_name: [artist, ...]}；同一画师可在多个分组
 ARTIST_FAVORITES_JSON = BASE_DIR / "artist_favorites.json"
 # 角色收藏存盘文件，结构 {group_name: [character_display_token, ...]}；
@@ -75,7 +78,7 @@ def _load_library_roots_config():
       ["D:/pics/hot_pic", {"id": "archive", "label": "Archive", "path": "E:/hot_pic"}]
     or {"roots": [...]}.
     """
-    default_path = (BASE_DIR / "hot_pic").resolve()
+    default_path = HOT_PIC_DIR.resolve()
     roots = [{
         "id": "default",
         "label": "hot_pic",
@@ -776,8 +779,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/images", StaticFiles(directory="hot_pic"), name="images")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/images", StaticFiles(directory=str(HOT_PIC_DIR)), name="images")
+app.mount("/static", StaticFiles(directory=str(RESOURCE_DIR / "static")), name="static")
 app.mount("/mosaic", mosaic_editor_app)
 
 
@@ -785,7 +788,7 @@ app.mount("/mosaic", mosaic_editor_app)
 # 缩略图接口（解决收藏/抓图页加载原图导致的卡顿）
 # 原图常是数 MB ~ 几十 MB，但卡片只显示 ~200px，缩到磁盘缓存后体积可降到 30KB 量级。
 # ==========================================
-_THUMB_CACHE_DIR = BASE_DIR / "hot_pic" / ".thumb_cache"
+_THUMB_CACHE_DIR = HOT_PIC_DIR / ".thumb_cache"
 _THUMB_VALID_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
 _THUMB_ALLOWED_SIZES = (200, 400, 800)
 _THUMB_LOCK = threading.Lock()
@@ -816,9 +819,9 @@ def api_thumbnail(date_str: str, filename: str, w: int = 400):
     if w not in _THUMB_ALLOWED_SIZES:
         w = 400  # 限定档位，避免无限大小占满磁盘
 
-    src_path = (BASE_DIR / "hot_pic" / date_str / filename).resolve()
+    src_path = (HOT_PIC_DIR / date_str / filename).resolve()
     # 路径穿越防护：解析后必须仍在 hot_pic 下
-    hot_pic_root = (BASE_DIR / "hot_pic").resolve()
+    hot_pic_root = HOT_PIC_DIR.resolve()
     try:
         src_path.relative_to(hot_pic_root)
     except ValueError:
@@ -2866,4 +2869,11 @@ def api_caption_prompt(req: CaptionPromptRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run(
+        app,
+        host="127.0.0.1",
+        port=8000,
+        reload=False,
+        access_log=False,
+        log_level="warning",
+    )
