@@ -127,7 +127,10 @@ const dateFolderRecords = computed(() => {
       imageCount,
       sourceCount: toFiniteCount(item.sourceCount ?? item.source_count, 1),
       hasImages: hasCount ? imageCount > 0 : Boolean(item.hasImages ?? item.has_images ?? true),
-      countKnown: hasCount
+      countKnown: hasCount,
+      // 该日期 folder 的 ids_data.json 里待下载 id 数（来自后端扫盘）。
+      // > 0 时日历用橙色标出，提醒"还有 id 没下载"。
+      pendingIds: toFiniteCount(item.pendingIds ?? item.pending_ids, 0)
     });
   }
   for (const value of props.availableDates || []) {
@@ -137,7 +140,8 @@ const dateFolderRecords = computed(() => {
       imageCount: null,
       sourceCount: 1,
       hasImages: true,
-      countKnown: false
+      countKnown: false,
+      pendingIds: 0
     });
   }
   return Array.from(records.values()).sort((a, b) => b.date.localeCompare(a.date));
@@ -211,13 +215,20 @@ const cells = computed(() => {
   return result.map(item => {
     const date = formatDate(item.year, item.month, item.day);
     const folder = dateFolderMap.value.get(date) || null;
+    const pendingIds = folder?.pendingIds || 0;
     return {
       ...item,
       date,
-      enabled: !!folder,
+      // 任何合法 YYYY-MM-DD 都可以点：选了一个还没建文件夹的日期时，
+      // 后端会建空文件夹并进入，而不是回退到 today。folder 状态仅用于视觉区分。
+      enabled: true,
+      hasFolder: !!folder,
+      noFolder: !folder,
       hasImages: !!folder?.hasImages,
       countKnown: !!folder?.countKnown,
       imageCount: folder?.imageCount ?? null,
+      pendingIds,
+      hasPendingIds: pendingIds > 0,
       selected: !isTagSelected.value && date === props.selectedDate,
       today: !isTagFolder(props.today) && date === props.today
     };
@@ -233,12 +244,19 @@ const monthItems = computed(() => {
     const prefix = `${String(currentYear.value).padStart(4, '0')}-${String(month).padStart(2, '0')}-`;
     const folders = dateFolderRecords.value.filter(item => item.date.startsWith(prefix));
     const imageCount = folders.reduce((sum, item) => sum + (item.imageCount || 0), 0);
+    const pendingIds = folders.reduce((sum, item) => sum + (item.pendingIds || 0), 0);
     return {
       month,
       label,
-      enabled: folders.length > 0,
+      // 任何月份都允许进入：用户可能想挑一个月里完全没建文件夹的某一天。
+      // hasFolder 仅用于视觉区分（绿色=有图，米色=空文件夹，浅虚线=还没建）。
+      enabled: true,
+      hasFolder: folders.length > 0,
+      noFolder: folders.length === 0,
       folderCount: folders.length,
       imageCount,
+      pendingIds,
+      hasPendingIds: pendingIds > 0,
       hasImages: folders.some(item => item.hasImages),
       countKnown: folders.some(item => item.countKnown),
       selected: !!selected && selected.year === currentYear.value && selected.month === month,
@@ -256,11 +274,16 @@ const yearItems = computed(() => {
     const prefix = `${String(year).padStart(4, '0')}-`;
     const folders = dateFolderRecords.value.filter(item => item.date.startsWith(prefix));
     const imageCount = folders.reduce((sum, item) => sum + (item.imageCount || 0), 0);
+    const pendingIds = folders.reduce((sum, item) => sum + (item.pendingIds || 0), 0);
     return {
       year,
-      enabled: folders.length > 0,
+      enabled: true,
+      hasFolder: folders.length > 0,
+      noFolder: folders.length === 0,
       folderCount: folders.length,
       imageCount,
+      pendingIds,
+      hasPendingIds: pendingIds > 0,
       hasImages: folders.some(item => item.hasImages),
       countKnown: folders.some(item => item.countKnown),
       selected: !!selected && selected.year === year,
@@ -276,17 +299,32 @@ function imageCountLabel(count) {
 }
 
 function dateCellTitle(cell) {
-  if (!cell.enabled) return `${cell.date} 没有日期文件夹`;
-  if (!cell.countKnown) return `查看 ${cell.date}`;
-  return cell.hasImages ? `${cell.date} · ${cell.imageCount} 张图片` : `${cell.date} · 文件夹为空`;
+  if (cell.noFolder) return `点击创建 ${cell.date} 的空文件夹并进入`;
+  // 不显示具体数量，只提示"有未下载 id"
+  const pending = cell.pendingIds > 0 ? ' · 有未下载 id' : '';
+  if (!cell.countKnown) return `查看 ${cell.date}${pending}`;
+  return cell.hasImages
+    ? `${cell.date} · 有图片${pending}`
+    : `${cell.date} · 文件夹为空${pending}`;
 }
 
 function periodTitle(label, item) {
-  if (!item.enabled) return `${label} 没有日期文件夹`;
-  if (!item.countKnown) return `查看 ${label}`;
+  if (item.noFolder) return `${label} · 点击进入（里面还没建日期文件夹）`;
+  const pending = item.pendingIds > 0 ? ' · 有未下载 id' : '';
+  if (!item.countKnown) return `查看 ${label}${pending}`;
   return item.hasImages
-    ? `${label} · ${item.folderCount} 个日期 · ${item.imageCount} 张图片`
-    : `${label} · ${item.folderCount} 个日期 · 文件夹为空`;
+    ? `${label} · ${item.folderCount} 个日期${pending}`
+    : `${label} · ${item.folderCount} 个日期 · 文件夹为空${pending}`;
+}
+
+// 年份格子专用 tooltip：按需求不展示当年的图片总数
+function yearCellTitle(item) {
+  if (item.noFolder) return `${item.year} 年 · 点击进入（里面还没建日期文件夹）`;
+  const pending = item.pendingIds > 0 ? ' · 有未下载 id' : '';
+  if (!item.countKnown) return `查看 ${item.year} 年${pending}`;
+  return item.hasImages
+    ? `${item.year} 年 · ${item.folderCount} 个日期${pending}`
+    : `${item.year} 年 · 文件夹为空${pending}`;
 }
 
 function prevMonth() {
@@ -426,9 +464,8 @@ function pickTag(folder) {
               v-for="cell in cells"
               :key="cell.date"
               class="day-cell"
-              :class="{ disabled: !cell.enabled, selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.enabled, 'has-images': cell.hasImages, 'empty-folder': cell.enabled && cell.countKnown && !cell.hasImages }"
+              :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.hasFolder, 'no-folder': cell.noFolder, 'has-images': cell.hasImages, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages, 'has-pending-ids': cell.hasPendingIds }"
               :title="dateCellTitle(cell)"
-              :disabled="!cell.enabled"
               @click="pickDate(cell.date)"
             >
               <span>{{ cell.day }}</span>
@@ -441,13 +478,11 @@ function pickTag(folder) {
             v-for="m in monthItems"
             :key="m.month"
             class="month-cell"
-            :class="{ disabled: !m.enabled, selected: m.selected, today: m.today, 'has-images': m.hasImages, 'empty-folder': m.enabled && m.countKnown && !m.hasImages }"
-            :disabled="!m.enabled"
+            :class="{ selected: m.selected, today: m.today, 'has-folder': m.hasFolder, 'no-folder': m.noFolder, 'has-images': m.hasImages, 'empty-folder': m.hasFolder && m.countKnown && !m.hasImages, 'has-pending-ids': m.hasPendingIds }"
             :title="periodTitle(`${currentYear} 年 ${m.label}`, m)"
             @click="pickMonth(m.month)"
           >
             <span>{{ m.label }}</span>
-            <small v-if="m.countKnown">{{ imageCountLabel(m.imageCount) }}图</small>
           </button>
         </div>
 
@@ -462,13 +497,11 @@ function pickTag(folder) {
               v-for="y in yearItems"
               :key="y.year"
               class="year-cell"
-              :class="{ disabled: !y.enabled, selected: y.selected, today: y.today, 'has-images': y.hasImages, 'empty-folder': y.enabled && y.countKnown && !y.hasImages }"
-              :disabled="!y.enabled"
-              :title="periodTitle(`${y.year} 年`, y)"
+              :class="{ selected: y.selected, today: y.today, 'has-folder': y.hasFolder, 'no-folder': y.noFolder, 'has-images': y.hasImages, 'empty-folder': y.hasFolder && y.countKnown && !y.hasImages, 'has-pending-ids': y.hasPendingIds }"
+              :title="yearCellTitle(y)"
               @click="pickYear(y.year)"
             >
               <span>{{ y.year }}</span>
-              <small v-if="y.countKnown">{{ imageCountLabel(y.imageCount) }}图</small>
             </button>
           </div>
         </div>
@@ -477,8 +510,7 @@ function pickTag(folder) {
             v-for="y in yearItems"
             :key="`strip-${y.year}`"
             class="year-strip-btn"
-            :class="{ active: y.year === currentYear, disabled: !y.enabled }"
-            :disabled="!y.enabled"
+            :class="{ active: y.year === currentYear }"
             @click="currentYear = y.year"
           >{{ y.year }}</button>
         </div>
@@ -558,8 +590,8 @@ function pickTag(folder) {
   opacity: 0.6;
 }
 .calendar-trigger.is-tag {
-  background: linear-gradient(135deg, #faecd9, #f5dbb8);
-  border-color: rgba(74, 53, 25, 0.35);
+  background: var(--surface-muted);
+  border-color: rgba(30, 41, 82, 0.35);
   font-weight: 600;
 }
 
@@ -581,7 +613,7 @@ function pickTag(folder) {
   flex: 1 1 auto;
   min-width: 104px;
   height: 28px;
-  border: 1px solid rgba(74, 53, 25, 0.16);
+  border: 1px solid rgba(30, 41, 82, 0.16);
   border-radius: 7px;
   background: rgba(255, 252, 246, 0.86);
   color: var(--accent-deep);
@@ -590,7 +622,7 @@ function pickTag(folder) {
   cursor: pointer;
 }
 .date-heading-btn:hover {
-  background: rgba(243, 223, 212, 0.8);
+  background: rgba(99, 102, 241, 0.12);
 }
 .date-quickbar {
   display: grid;
@@ -602,7 +634,7 @@ function pickTag(folder) {
   height: 26px;
   min-width: 0;
   padding: 0 6px;
-  border: 1px solid rgba(74, 53, 25, 0.14);
+  border: 1px solid rgba(30, 41, 82, 0.14);
   border-radius: 7px;
   background: rgba(255, 252, 246, 0.78);
   color: var(--muted, #846a55);
@@ -611,7 +643,7 @@ function pickTag(folder) {
   cursor: pointer;
 }
 .date-quick:hover:not(:disabled) {
-  background: rgba(243, 223, 212, 0.75);
+  background: rgba(99, 102, 241, 0.11);
   color: var(--accent-deep);
 }
 .date-quick:disabled {
@@ -635,6 +667,37 @@ function pickTag(folder) {
   color: #a99684;
   box-shadow: none;
 }
+/* ids_data.json 非空（待下载 id 队列）：有图时右上角加橙点；空文件夹时整格变橙强调。*/
+.day-cell.has-pending-ids.has-images:not(.selected) {
+  position: relative;
+}
+.day-cell.has-pending-ids.has-images:not(.selected)::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 1.5px rgba(255, 252, 246, 0.9);
+}
+.day-cell.has-pending-ids.empty-folder:not(.selected) {
+  background: rgba(245, 158, 11, 0.22);
+  color: #8a5a0a;
+  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.45);
+  font-weight: 600;
+}
+/* 还没有日期文件夹的格子：可点（点了就建空文件夹），用虚线边暗示「点击会建」 */
+.day-cell.no-folder:not(.selected) {
+  background: rgba(255, 252, 246, 0.4);
+  color: #b3a89a;
+  box-shadow: inset 0 0 0 1px dashed rgba(139, 90, 43, 0.32);
+}
+.day-cell.no-folder:not(.selected):hover {
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--accent-deep);
+}
 
 .month-grid,
 .year-grid {
@@ -646,7 +709,7 @@ function pickTag(folder) {
 .year-cell {
   height: 34px;
   min-width: 0;
-  border: 1px solid rgba(74, 53, 25, 0.16);
+  border: 1px solid rgba(30, 41, 82, 0.16);
   border-radius: 7px;
   background: rgba(255, 252, 246, 0.86);
   color: var(--ink, #2d2417);
@@ -681,12 +744,34 @@ function pickTag(folder) {
 .month-cell.empty-folder:not(.selected),
 .year-cell.empty-folder:not(.selected) {
   background: rgba(230, 224, 214, 0.58);
-  border-color: rgba(74, 53, 25, 0.1);
+  border-color: rgba(30, 41, 82, 0.1);
   color: #a99684;
+}
+/* 月 / 年里有日期含待下载 id 队列：橙色顶边 + 角标，整格给一个明显的提示。*/
+.month-cell.has-pending-ids:not(.selected),
+.year-cell.has-pending-ids:not(.selected) {
+  border-top: 2px solid #f59e0b;
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.18) 0%, var(--surface-muted, rgba(255, 252, 246, 0.86)) 60%);
+  color: var(--ink, #2d2417);
+  font-weight: 600;
+}
+.month-cell.has-pending-ids.has-images:not(.selected),
+.year-cell.has-pending-ids.has-images:not(.selected) {
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.22) 0%, rgba(77, 139, 87, 0.16) 70%);
+  color: #276136;
+  font-weight: 700;
+}
+/* 月 / 年还没有任何日期文件夹时：可点（进入该月 / 年视图，里面还能挑具体某天） */
+.month-cell.no-folder:not(.selected),
+.year-cell.no-folder:not(.selected) {
+  background: rgba(255, 252, 246, 0.4);
+  border-color: rgba(30, 41, 82, 0.08);
+  border-style: dashed;
+  color: #b3a89a;
 }
 .month-cell:hover:not(:disabled),
 .year-cell:hover:not(:disabled) {
-  background: rgba(243, 223, 212, 0.8);
+  background: rgba(99, 102, 241, 0.12);
 }
 .month-cell.selected,
 .year-cell.selected {
@@ -735,7 +820,7 @@ function pickTag(folder) {
   height: 24px;
   min-width: 0;
   padding: 0 4px;
-  border: 1px solid rgba(74, 53, 25, 0.12);
+  border: 1px solid rgba(30, 41, 82, 0.12);
   border-radius: 6px;
   background: rgba(255, 252, 246, 0.72);
   color: var(--muted, #846a55);
@@ -758,7 +843,7 @@ function pickTag(folder) {
 .selector-tabs {
   display: flex;
   gap: 6px;
-  border-bottom: 1px solid rgba(74, 53, 25, 0.12);
+  border-bottom: 1px solid rgba(30, 41, 82, 0.12);
   margin: -4px -4px 10px;
   padding: 0 4px;
 }
@@ -784,7 +869,7 @@ function pickTag(folder) {
   display: inline-block;
   margin-left: 4px;
   padding: 0 6px;
-  background: rgba(74, 53, 25, 0.1);
+  background: rgba(30, 41, 82, 0.1);
   border-radius: 8px;
   font-size: 11px;
   font-weight: 600;
@@ -803,7 +888,7 @@ function pickTag(folder) {
 }
 .tag-search {
   padding: 6px 10px;
-  border: 1px solid rgba(74, 53, 25, 0.18);
+  border: 1px solid rgba(30, 41, 82, 0.18);
   border-radius: 8px;
   font-family: inherit;
   font-size: 13px;
@@ -863,7 +948,7 @@ function pickTag(folder) {
   white-space: nowrap;
   min-width: 0;
 }
-.tag-row:not(.selected) .tag-name:hover { background: rgba(243, 223, 212, 0.7); }
+.tag-row:not(.selected) .tag-name:hover { background: rgba(99, 102, 241, 0.1); }
 .tag-row.selected .tag-name { color: #fff; font-weight: 600; }
 .tag-remove {
   background: transparent;
@@ -898,7 +983,7 @@ function pickTag(folder) {
   white-space: nowrap;
   min-width: 0;
 }
-.tag-row-flat:hover { background: rgba(243, 223, 212, 0.7); }
+.tag-row-flat:hover { background: rgba(99, 102, 241, 0.1); }
 .tag-row-flat.selected {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   color: #fff;
@@ -913,4 +998,14 @@ function pickTag(folder) {
   font-style: italic;
   line-height: 1.5;
 }
+
+/* Lightweight anime theme */
+.tag-name,
+.tag-row-flat { color: var(--ink, #29263a); }
+.tag-row:not(.selected) .tag-name:hover,
+.tag-row-flat:hover { background: var(--soft-violet); }
+.tag-remove { color: var(--muted, #77738b); }
+.tag-remove:hover { background: var(--soft); color: var(--accent-deep); }
+.tag-row.selected,
+.tag-row-flat.selected { background: var(--accent-gradient); }
 </style>

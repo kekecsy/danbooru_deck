@@ -1,12 +1,8 @@
 # 当前网不是很好的时候用于收集ids，等网好了再去用download_by_ids.py下载
-import os
-from time import sleep
-import datetime
-import json
 import danbooru_api
 from danbooru_data import DanbooruData
 
-def grabber(db_data, page_num, log_callback=None, filter_tags=['furry','futanari']):
+def grabber(db_data, page_num, log_callback=None, filter_tags=['furry','futanari','guro']):
     def custom_print(msg):
             print(msg) # 控制台依然显示
             if log_callback:

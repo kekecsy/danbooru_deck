@@ -1,7 +1,6 @@
 import json
-from typing import Dict, List, Optional
+from typing import List, Optional
 import re
-from pathlib import Path
 from runtime_paths import DATA_DIR, RESOURCE_DIR, ensure_user_directories
 
 BASE_DIR = RESOURCE_DIR
@@ -22,17 +21,33 @@ ID: {tag}
 候选名称: {other_names}
 英文描述: {description}
 
+【标签结构解析（已由程序拆分，供你参考）】
+角色本名: {base_name}
+换装/皮肤部分: {costume}
+作品来源: {source_name}
+
+说明：Danbooru 角色标签形如 `本名_(换装)_(作品)`，最后一个括号通常是作品来源，
+中间的括号是该角色在这部作品里的「换装 / 皮肤 / 形态」限定。
+例如 `shun_(small)_(swimsuit)_(blue_archive)`：本名 shun、来源 blue_archive、换装为 small + swimsuit（碧蓝档案「泳装小峰」）。
+
 【任务】
 1. 判断该角色是否存在公认的中文名
-2. 如果存在，从候选名称中选出最常用的中文名 chinese_name；不存在则置为空字符串
-3. 提取来源 source_hint（小写英文，如 vocaloid / touhou / blue_archive / fate / kancolle / azur_lane 等）
-4. 把英文描述概括翻译成中文 translated_description_zh，保留作品来源与角色定位
-5. 在如bangumi、萌娘百科等中文社区上搜索最可能的中文名
+2. 如果存在，从候选名称中选出最常用的中文名作为角色本名的译名；不存在则置为空字符串
+3. 【重点】如果「换装/皮肤部分」不为空(无)：
+   - 到该作品来源对应的中文社区 / 官方译名站（如碧蓝档案 Wiki、明日方舟 Wiki、原神 Wiki、萌娘百科、bangumi 等）
+     查找这套换装/皮肤在中文版里的官方译名（例如泳装、圣诞、婚纱、体操服……）。
+     注意：英文描述中也可能包含换装部位的英文或日文名称，可作为线索。
+   - 把换装译名与角色本名组合成完整 chinese_name，换装部分放在括号里，例如「峰（泳装）」「阿米娅（假日威龙）」。
+   - 找不到官方换装译名时，用最贴切的中文意译，仍放进括号。
+   若「换装/皮肤部分」为(无)，chinese_name 就是角色本名的中文译名。
+4. 提取来源 source_hint（小写英文，如 vocaloid / touhou / blue_archive / fate / kancolle / azur_lane 等）
+5. 把英文描述概括翻译成中文 translated_description_zh，保留作品来源、角色定位与换装信息
+6. 在如 bangumi、萌娘百科、对应的游戏论坛等中文社区上搜索最可能的中文名
 
 【输出格式（严格 JSON，无任何额外解释或 Markdown 包裹符号）】
 {{
   "has_chinese": true 或 false,
-  "chinese_name": "中文名或空字符串",
+  "chinese_name": "中文名（含换装）或空字符串",
   "source_hint": "小写英文来源标签",
   "translated_description_zh": "中文简介或空字符串"
 }}
@@ -282,16 +297,45 @@ class Translator:
         text = (text or "").replace("\r\n", " ").replace("\n", " ").strip()
         return " ".join(text.split())
 
+    @staticmethod
+    def _split_tag_parts(tag: str) -> dict:
+        """把 Danbooru 角色标签拆成 本名 / 换装 / 来源 三部分。
+        规则：最后一个括号是作品来源，中间的括号都是换装/皮肤限定。
+        e.g. 'shun_(small)_(swimsuit)_(blue_archive)' ->
+            {base_name: 'shun', costume: 'small, swimsuit', source_name: 'blue_archive'}
+        没有括号时 source/costume 为空。只有一个括号时视为来源，无换装。"""
+        tag = (tag or "").strip()
+        paren_segments = re.findall(r'_\(([^)]*)\)', tag)
+        base_name = re.sub(r'_\([^)]*\).*$', '', tag).strip('_') or tag
+        base_name = base_name.replace('_', ' ').strip()
+
+        source_name = ""
+        costume_parts: List[str] = []
+        if paren_segments:
+            source_name = paren_segments[-1].replace('_', ' ').strip()
+            costume_parts = [p.replace('_', ' ').strip() for p in paren_segments[:-1] if p.strip()]
+
+        costume = ", ".join(costume_parts)
+        return {
+            "base_name": base_name or "(无)",
+            "costume": costume or "(无)",
+            "source_name": source_name or "(无)",
+        }
+
     def build_manual_prompt(self, tag: str, source: Optional[dict] = None) -> str:
-        """组装一段「人类可贴」的 prompt：把描述+候选名称塞进 MANUAL_PROMPT_TEMPLATE。"""
+        """组装一段「人类可贴」的 prompt：把描述+候选名称+标签结构塞进 MANUAL_PROMPT_TEMPLATE。"""
         if source is None:
             source = self.get_character_source(tag)
         names = ", ".join((source.get("other_names") or [])[:20]) or "(无)"
         desc = self._clean_description(source.get("description", "")) or "(无)"
+        parts = self._split_tag_parts(tag)
         return MANUAL_PROMPT_TEMPLATE.format(
             tag=tag,
             other_names=names,
             description=desc,
+            base_name=parts["base_name"],
+            costume=parts["costume"],
+            source_name=parts["source_name"],
         )
 
     @staticmethod

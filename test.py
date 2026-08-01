@@ -1,6 +1,3 @@
-import requests
-from curl_cffi import requests
-from proxy import get_proxies_for_url 
 from curl_cffi import requests  # 确保使用的是 curl_cffi
 
 # 目标 API 地址

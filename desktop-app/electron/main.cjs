@@ -8,23 +8,26 @@ const crypto = require('node:crypto');
 const isDev = !app.isPackaged;
 const sourceRoot = path.resolve(__dirname, '..', '..');
 const resourceRoot = isDev ? sourceRoot : process.resourcesPath;
+// 旧 Portable 版は exe の場所（PORTABLE_EXECUTABLE_DIR）隣に Danbooru Deck Data を置いていたが、
+// exe を移動/コピーしたりインストーラ版と併用すると参照先がブレて習慣・収藏を見失う問題があった。
+// 現在は Portable/インストーラを問わず userData（%APPDATA%\Danbooru Deck）に固定する。
+// portableRoot は旧データの「初回自動移行」の移行元探索にのみ使う（下の migrateLegacyPortableData）。
 const portableRoot = process.env.PORTABLE_EXECUTABLE_DIR || '';
-if (!isDev && portableRoot) {
-  app.setPath('userData', path.join(portableRoot, 'Danbooru Deck Data', 'app-state'));
-}
 const dataRoot = isDev
   ? sourceRoot
-  : portableRoot
-    ? path.join(portableRoot, 'Danbooru Deck Data')
-    : path.join(app.getPath('userData'), 'data');
+  : path.join(app.getPath('userData'), 'data');
 const repoRoot = dataRoot;
 const hotPicDir = path.join(dataRoot, 'hot_pic');
-const presetDirs = [
-  path.join(resourceRoot, 'backend', 'pic_web', 'present'),
-  path.join(resourceRoot, 'backend', 'mosaic_qt', 'present'),
-  path.join(resourceRoot, 'pic_web', 'present'),
-  path.join(resourceRoot, 'mosaic_qt', 'present')
-];
+const presetDirs = isDev
+  ? [
+      // dev 模式：直接指向源码目录
+      path.join(sourceRoot, 'pic_web', 'present')
+    ]
+  : [
+      // 打包分发：贴图素材放在用户数据目录 danbooru_DATA/present（首次启动由后端播种），
+      // 不再从 exe 同梱资源里读，用户增删的贴图会被保留。
+      path.join(dataRoot, 'present')
+    ];
 const crawlerApiBase = 'http://127.0.0.1:8000';
 const DEFAULT_WINDOW_STATE = { width: 1540, height: 980, isMaximized: true };
 const MIN_WINDOW_WIDTH = 1240;
@@ -180,6 +183,27 @@ function createWindow() {
   win.setMenuBarVisibility(false);
   if (windowState.isMaximized) win.maximize();
 
+  // 全局右键复制：所有能划取文字的面上，右键直接落剪贴板 + 弹轻量 toast。
+  // - 有选中文字：clipboard.writeText + 通知 renderer 弹 toast
+  //   · 非可编辑区（div/pre/log/角色 chip 之外的部分…）：preventDefault 屏蔽默认菜单
+  //     （这些地方没有 Cut/Paste 等可用项，二级菜单点 Copy 没必要）
+  //   · 可编辑区（input/textarea/contenteditable）：不 preventDefault，让默认菜单
+  //     出来，Cut/Paste/Select All 还能用；用户从默认菜单点 Copy 会再写一次（幂等无害）
+  // - 无选区：什么都不做（让默认行为或自定义菜单照常）
+  // 已有 renderer 端 event.preventDefault() 的自定义菜单（CrawlerPage 字符 tag chip、
+  // PosePage 姿势 SVG、pic_web 画布）会在主进程之前拦截 context-menu 事件，保留原行为。
+  win.webContents.on('context-menu', (event, params) => {
+    const text = params.selectionText;
+    if (text && text.trim()) {
+      clipboard.writeText(text);
+      win.webContents.send('context-menu:copied', {
+        length: text.length,
+        preview: text.slice(0, 40).replace(/\s+/g, ' '),
+      });
+      if (!params.isEditable) event.preventDefault();
+    }
+  });
+
   // 关闭拦截：右上角 × / Alt+F4 / 系统菜单 关闭时弹出异步确认对话框，
   // 避免后台抓图任务被误关打断。用户确认后再真正关闭。
   let confirmingClose = false;
@@ -256,6 +280,20 @@ function toAbsolutePath(targetPath) {
   return path.isAbsolute(targetPath) ? path.normalize(targetPath) : path.resolve(repoRoot, targetPath);
 }
 
+function countPendingIds(dirPath) {
+  // 读 folder/ids_data.json 里待下载的 id 数量，给日历标出「有 id 待下载」的日期。
+  // 文件不存在 / 解析失败 / 非数组都按 0 计。
+  const idsFile = path.join(dirPath, 'ids_data.json');
+  if (!fs.existsSync(idsFile)) return 0;
+  try {
+    const raw = fs.readFileSync(idsFile, 'utf-8');
+    const data = JSON.parse(raw);
+    return Array.isArray(data) ? data.length : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
 function listDateFolderDetails() {
   const byDate = new Map();
   for (const root of loadLibraryRoots()) {
@@ -266,11 +304,13 @@ function listDateFolderDetails() {
         date: item.name,
         imageCount: 0,
         sourceCount: 0,
-        hasImages: false
+        hasImages: false,
+        pendingIds: 0
       };
       rec.sourceCount += 1;
       rec.imageCount += countGalleryMediaFiles(path.join(root.path, item.name));
       rec.hasImages = rec.imageCount > 0;
+      rec.pendingIds += countPendingIds(path.join(root.path, item.name));
       byDate.set(item.name, rec);
     }
   }
@@ -289,20 +329,40 @@ function normalizeDateFolderDetails(rawDetails, fallbackDates = []) {
     if (!isDateFolder(date) || seen.has(date)) continue;
     const imageCount = Number(item.imageCount ?? item.image_count ?? item.count ?? 0);
     const sourceCount = Number(item.sourceCount ?? item.source_count ?? 1);
+    const pendingIds = Number(item.pendingIds ?? item.pending_ids ?? 0);
     seen.add(date);
     details.push({
       date,
       imageCount: Number.isFinite(imageCount) ? imageCount : 0,
       sourceCount: Number.isFinite(sourceCount) ? sourceCount : 1,
+      pendingIds: Number.isFinite(pendingIds) ? pendingIds : 0,
       hasImages: Boolean(item.hasImages ?? item.has_images ?? imageCount > 0)
     });
   }
   for (const date of fallbackDates || []) {
     if (!isDateFolder(date) || seen.has(date)) continue;
     seen.add(date);
-    details.push({ date, imageCount: null, sourceCount: 1, hasImages: true });
+    details.push({ date, imageCount: null, sourceCount: 1, pendingIds: 0, hasImages: true });
   }
   return details.sort((a, b) => b.date.localeCompare(a.date));
+}
+
+function tryCreateEmptyDateFolder(date) {
+  // 用户主动选中一个还没有文件夹的日期 → 在 default 根目录下建空文件夹。
+  // 路径越界 / 非法日期 / 写盘失败时返回 false，让上层继续走 today 回退。
+  if (!isDateFolder(date)) return false;
+  const roots = loadLibraryRoots();
+  if (!roots.length) return false;
+  const baseRoot = path.resolve(roots[0].path);
+  const target = path.resolve(baseRoot, date);
+  // 路径穿越防护：解析后必须仍在 default 根目录下
+  if (!target.startsWith(baseRoot + path.sep) && target !== baseRoot) return false;
+  try {
+    fs.mkdirSync(target, { recursive: true });
+    return true;
+  } catch (_) {
+    return false;
+  }
 }
 
 function resolveDate(requestedDate) {
@@ -311,6 +371,17 @@ function resolveDate(requestedDate) {
   const today = getTodayString();
   if (requestedDate && availableDates.includes(requestedDate)) {
     return { selectedDate: requestedDate, availableDates, dateFolders, today };
+  }
+  // 用户主动选中一个还没有文件夹的日期 → 建空文件夹并进入，
+  // 避免后端回退到 today 之后前端又被「被改写的 selected_date」拽回去。
+  if (requestedDate && tryCreateEmptyDateFolder(requestedDate)) {
+    const refreshed = listDateFolderDetails();
+    return {
+      selectedDate: requestedDate,
+      availableDates: refreshed.map(item => item.date),
+      dateFolders: refreshed,
+      today
+    };
   }
   if (availableDates.includes(today)) {
     return { selectedDate: today, availableDates, dateFolders, today };
@@ -806,8 +877,9 @@ ipcMain.handle('caption:list-for-date', async (_event, date) => {
 
 // Caption 手动模式：把当前图片复制到系统剪贴板，方便用户粘贴到任意 chat LLM
 // (Claude / ChatGPT / Gemini Web)。
-// nativeImage.createFromPath 支持 PNG/JPG/BMP/TIFF；GIF 取首帧；WebP/AVIF 看系统支持。
-// 不支持的格式（动图 zip / avif 在某些 Windows 上）返回 ok:false，由前端 fallback。
+// nativeImage.createFromPath 支持 PNG/JPG/BMP/TIFF；走 clipboard.writeImage 的话 GIF 只能塞首帧。
+// 所以 GIF 单独走 clipboard.writeBuffer('image/gif', ...) 写原始字节，保留多帧动画。
+// 不支持的格式（WebP/AVIF 看系统）返回 ok:false，由前端 fallback。
 ipcMain.handle('caption:copy-image', async (_event, payload) => {
   const imagePath = typeof payload === 'string' ? payload : payload?.imagePath;
   const rawMaxEdge = typeof payload === 'object' ? Number(payload?.maxEdge) : 0;
@@ -820,12 +892,35 @@ ipcMain.handle('caption:copy-image', async (_event, payload) => {
   if (!isWithinLibraryRoots(resolved)) {
     return { ok: false, error: '非法路径' };
   }
+  // .gif 单独走原始字节通道，否则会被 nativeImage 拍成首帧静图
+  if (resolved.toLowerCase().endsWith('.gif')) {
+    try {
+      const buffer = fs.readFileSync(resolved);
+      clipboard.clear();
+      // 写 'image/gif' 走系统剪贴板的 GIF 通道，粘贴到浏览器/聊天框仍是动图
+      clipboard.writeBuffer('image/gif', buffer);
+      // nativeImage 只能拿首帧尺寸；toast 展示首帧大小够用
+      const firstFrame = nativeImage.createFromPath(resolved);
+      const size = firstFrame.isEmpty() ? { width: 0, height: 0 } : firstFrame.getSize();
+      // writeBuffer 没有标准 readBuffer 校验；用文件字节数和剪贴板字节数交叉确认
+      const written = clipboard.readBuffer('image/gif');
+      return {
+        ok: written.length === buffer.length,
+        width: size.width,
+        height: size.height,
+        bytes: buffer.length,
+        isGif: true
+      };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  }
   try {
     let image = nativeImage.createFromPath(resolved);
     if (image.isEmpty()) {
       return {
         ok: false,
-        error: '该图片格式无法转成剪贴板图像（可能是 GIF/WebP/AVIF），请直接把文件拖进 LLM 对话框'
+        error: '该图片格式无法转成剪贴板图像（可能是 WebP/AVIF），请直接把文件拖进 LLM 对话框'
       };
     }
     const originalSize = image.getSize();
@@ -964,7 +1059,36 @@ ipcMain.handle('crawler:set-safe-mode', async (_event, safe) => {
   });
 });
 
+// 旧 Portable 版（exe 隣の Danbooru Deck Data）に溜まっていたデータを、
+// 新しい固定先 userData（%APPDATA%\Danbooru Deck）へ初回だけ移行する。
+// - dataRoot（%APPDATA%\Danbooru Deck\data）がまだ無く、かつ exe 隣に旧フォルダがある時だけ実行（冪等）。
+// - 旧 app-state（localStorage / window-state 等）は userData 直下へ、それ以外は data/ 下へコピー。
+// - 旧データは削除せず残す（安全側）。移行に失敗しても致命ではないので握りつぶす。
+function migrateLegacyPortableData() {
+  if (isDev || !portableRoot) return;
+  const legacyRoot = path.join(portableRoot, 'Danbooru Deck Data');
+  // 新しい固定先が既にあるなら移行済み。exe 隣に旧フォルダが無いなら移行対象なし。
+  if (fs.existsSync(dataRoot) || !fs.existsSync(legacyRoot)) return;
+  // 旧フォルダが偶然 userData 配下（＝既に固定先）なら二重コピーになるので回避。
+  if (isWithin(app.getPath('userData'), legacyRoot)) return;
+  try {
+    fs.mkdirSync(dataRoot, { recursive: true });
+    for (const name of fs.readdirSync(legacyRoot)) {
+      const src = path.join(legacyRoot, name);
+      // app-state（Chromium プロファイル）だけ userData 直下、他は data/ 下へ。
+      const dst = name === 'app-state'
+        ? app.getPath('userData')
+        : path.join(dataRoot, name);
+      fs.cpSync(src, dst, { recursive: true, force: false, errorOnExist: false });
+    }
+    console.log(`[migrate] legacy portable data copied from ${legacyRoot} -> ${dataRoot}`);
+  } catch (err) {
+    console.error('[migrate] legacy portable data migration failed:', err);
+  }
+}
+
 app.whenReady().then(() => {
+  migrateLegacyPortableData();
   fs.mkdirSync(hotPicDir, { recursive: true });
   Menu.setApplicationMenu(null);
   thumbCacheDir = path.join(app.getPath('userData'), 'thumb-cache');

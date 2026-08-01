@@ -4,9 +4,6 @@ import os
 import re
 import time
 from requests.utils import get_environ_proxies
-import sys
-import subprocess
-import tempfile
 
 def get_proxies_for_url(url):
     proxies = get_environ_proxies(url)
@@ -159,13 +156,3 @@ def clear_runtime_snapshot(runtime_snapshot_path):
         os.remove(runtime_snapshot_path)
     except PermissionError:
         pass
-
-
-if __name__ == "__main__":
-    # 测试 add_extra_info_to_img
-    test_img_path = r"C:\Users\27147\Desktop\4a4d4cb0cdb4ecc121b077c18716623e.jpg"
-    test_extra_info = {
-        "artist": "AAA",
-        "urls": "BBB.jpg"
-    }
-    add_extra_info_to_img(test_img_path, test_extra_info)

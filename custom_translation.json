@@ -271,9 +271,9 @@
   },
   "doodle_sensei_(blue_archive)": {
     "has_chinese": true,
-    "chinese_name": "阿罗娜的老师涂鸦",
+    "chinese_name": "涂鸦老师",
     "source_hint": "blue_archive",
-    "translated_description_zh": "这是《碧蓝档案》中玩家角色「老师」的一种形象，源自AI看板娘阿罗娜所画的老师肖像。其形象为一幅儿童画风格的男性简笔画，头顶稀疏头发，带着极具辨识度的「微笑」。这个形象常被用来代表粉丝群体中「变态」的一面，也是《碧蓝档案》社区中最常见的老师形象。通常情况下，「涂鸦老师」从头到脚都被描绘成一幅涂鸦的样子。不过也经常出现（尤其在NSFW作品中）无脸男性角色脸上贴着一张画有该涂鸦的纸作为「面具」的描绘方式，有时整个头部也会被替换成涂鸦版本的头。"
+    "translated_description_zh": "《蔚蓝档案》中的老师（玩家角色）的一种非官方形象，起源于阿罗娜绘制的简笔画。他被描绘成一个拥有稀疏头发和标志性“微笑”的简笔画男子形象。在社区中，他常被用来代表玩家群体中“不正经”或“变态”的一面，是游戏社区中最为常见的老师形象之一。通常，涂鸦老师从头到脚都被描绘成简笔画风格。在部分作品中（尤其是R18作品），他也会被描绘成一个面部戴着印有简笔画表情纸面具的无脸男性。"
   },
   "trailblazer_(honkai:_star_rail)": {
     "has_chinese": true,
@@ -12348,10 +12348,10 @@
     "translated_description_zh": "维吉尔是斯帕达和伊娃的长子，但丁的哥哥，是《鬼泣3》的主要反派。他接受恶魔血统，厌恶人性，性格冷酷讽刺，渴望获得父亲斯帕达的力量。他使用继承自父亲的妖刀·雅塔托，有时会与弟弟但丁结盟，甚至使用他憎恶的枪械。在故事中以尼洛·安杰洛形态被击败，但据说留下儿子尼罗。英文配音丹尼尔·萨思沃斯，日文配音平田广明"
   },
   "ichijou_ririka": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "hololive dev_is",
-    "translated_description_zh": "一位属于hololive DEV_IS的虚拟YouTuber（VTuber），隶属于ReGLOSS组合，由Zattape设计。她拥有长长的渐变橙色头发，内侧粉色，撩刘海、呆毛以及橙色眼睛，常佩戴发夹、耳环以及戴在头顶的太阳镜"
+    "has_chinese": true,
+    "chinese_name": "一条莉莉华",
+    "source_hint": "hololive",
+    "translated_description_zh": "hololive DEV_IS旗下音乐团体ReGLOSS的成员，一位虚拟YouTuber。角色设定为新人女社长，擅长与人沟通并亲自处理海外业务。橙发渐变粉色内层，有呆毛，佩戴发夹、耳环和墨镜。"
   },
   "kuki_shinobu": {
     "has_chinese": true,
@@ -19429,9 +19429,9 @@
   },
   "atago_(stunning_speedster)_(azur_lane)": {
     "has_chinese": true,
-    "chinese_name": "巅峰时速(疾速狂热)",
-    "source_hint": "race queen",
-    "translated_description_zh": "这是[[Atago (azur lane)|]]的[[race queen]][[official alternate costume|costume]]，主题为（疾速狂热）。自2018年9月起通过周边商品存在，但直至2020年6月才作为官方皮肤加入游戏。另见：[[Taihou (Enraptured Companion) (Azur Lane)]]、[[Zuikaku (The Wind's True Name) (Azur Lane)]]、[[Shoukaku (Sororal Wings) (Azur Lane)]]、[[Prince of Wales (The Laureate's Victory Lap) (Azur Lane)]]、[[Takao (Full Throttle Charmer) (Azur Lane)]]、[[Duke of York (Prestige of the Glorious Formula) (Azur Lane)]]"
+    "chinese_name": "爱宕（巅峰时速）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中重樱阵营重巡洋舰爱宕的赛车女郎主题官方换装。该换装自2018年9月起以周边商品形式存在，至2020年6月正式作为游戏内皮肤实装。"
   },
   "aketa_mikoto": {
     "has_chinese": false,
@@ -19933,9 +19933,9 @@
   },
   "sirius_(azure_horizons)_(azur_lane)": {
     "has_chinese": true,
-    "chinese_name": "碧波青云",
-    "source_hint": "azur lane",
-    "translated_description_zh": "这是《碧蓝航线》角色天狼星的官方替换服装。外观：* !post #3764448: 概"
+    "chinese_name": "天狼星（碧波青云）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中角色天狼星的一款官方换装皮肤，名为「碧波青云」。该皮肤展示了角色的另一种形象。"
   },
   "creeper": {
     "has_chinese": true,
@@ -22524,10 +22524,10 @@
     "translated_description_zh": "这是《崩坏3rd》中角色八重樱的可玩官方替换服装（战斗服），默认外观，亦称为‘逆神巫女’，由白色和服上装、分离宽袖、红色腰带、绳索、粉色褶皱格子裙、白色过膝袜、护臂、紫色围巾及紫色高跟靴组成"
   },
   "sirius_(scorching-hot_seirios)_(azur_lane)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "azur lane",
-    "translated_description_zh": "这是《碧蓝航线》角色天狼星（Sirius）的盛夏泳装官方替换服装，特点是黑色比基尼配O型环上衣和开口、心形太阳镜戴在头上、两个白色发圈手环、褶边大腿带、黑色无脚趾鞋以及覆盖手臂部分的白色透明布料"
+    "has_chinese": true,
+    "chinese_name": "天狼星（盛夏的Seirios）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中天狼星的一款泳装皮肤，名称来自希腊语Seirios（天狼星的语源）。该皮肤采用黑色比基尼搭配圆环上衣与镂空设计，头戴心形墨镜，腕部配有白色发圈，腿部饰有褶边腿环，脚穿黑色露趾鞋，手臂部分覆有白色薄纱。换装附带Live2D效果。"
   },
   "kakania_(reverse:1999)": {
     "has_chinese": true,
@@ -26551,9 +26551,9 @@
   },
   "atago_(summer_march)_(azur_lane)": {
     "has_chinese": true,
-    "chinese_name": "盛夏进行曲",
-    "source_hint": "atago (azur lane)",
-    "translated_description_zh": "这是[[Atago (Azur Lane)|]]的官方替换服装，主题为夏日泳装，于2017年10月发布"
+    "chinese_name": "爱宕（盛夏进行曲）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中重樱阵营重巡洋舰爱宕的夏日泳装主题官方换装，于2017年10月实装。该皮肤以白色泳装和轻薄纱裙为特色，在游戏内拥有Live2D效果。"
   },
   "type_97_(girls'_frontline)": {
     "has_chinese": true,
@@ -28632,10 +28632,10 @@
     "translated_description_zh": "来自《火焰之纹章：圣战的系谱》的角色。她是雷神之书Mjöllnir的继承者，是反复出现的反派，在选择正义一方还是为她深爱的朱利叶斯而战之间犹豫不决。[剧透]她选择了后者，在冒险过程中多次与塞利夫对峙，同时暗中帮助阿维斯对抗朱利叶斯发动的童子狩猎，尽管她深爱朱利叶斯。伊斯塔尔最终在贝尔哈拉附近与解放军的最后一战中战死。职业：贤者，圣血：特鲁德（主要）。外观：默认姿势、Soiree、Resplendent、Echoing Thunder、Bride（与朱莉娅同框）"
   },
   "memcho": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "oshi no ko",
-    "translated_description_zh": "角色出自《我的推子》。她是新生B-Komachi的成员。她有蓝眼睛，短短的金色头发，带有直刘海，以及棕色的发根和假角。[spoiler]实际上她已经二十多岁。[/spoiler]她由大久保瑠美配音"
+    "has_chinese": true,
+    "chinese_name": "MEM啾",
+    "source_hint": "oshi_no_ko",
+    "translated_description_zh": "《我推的孩子》中的角色，新生B小町成员。她拥有蓝色眼睛、金色短发（发根为棕色）、猫嘴，头戴小恶魔角。真实年龄25岁，但对外自称18岁。由大久保瑠美配音。"
   },
   "hachune_miku": {
     "has_chinese": false,
@@ -29682,8 +29682,8 @@
     "translated_description_zh": "《海贼王》角色。他是‘十一超新星’之一，也是海贼王 kid 海贼团的船长。他是 fellow supernovas [[Monkey D. Luffy]] 和 [[Trafalgar Law]] 的 rival。在时空跳跃期间，他挑战了皇帝 [[Shanks (one piece)|]]，并在与其第一伙伴 [[Benn Beckman]] 的战斗中失去了左臂。他食用了 Jiki Jiki no Mi [[Devil Fruit]]，拥有磁力能力，能够随意吸引或排斥金属物体。时空跳跃后，他利用这种能力将他的 [[prosthetic arm]] 附身，这也同时充当了 [[railgun]]"
   },
   "kearsarge_(azur_lane)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "奇尔沙治",
     "source_hint": "azur lane",
     "translated_description_zh": "这是《碧蓝航线》中战列舰-航母混合型USS Kearsarge的拟人化角色，作为与《世界舰船》的合作内容。角色设计由YD (orange maru)负责，青山吉能配音。她拥有极长的白色长发，配有黑色发饰，紫色眼睛，以及丰满的胸部。默认服装是一件代表飞行甲板形状的无肩带白色连体泳装（仅覆盖身体前半部，靠裆部板固定），外加白色短上衣、左右不匹配的袜装（左侧白色过膝袜，右侧黑色大腿靴）和黑色手套。由于连体泳装的特殊穿法，她的背部和臀部完全裸露，并具有机械脊柱。她的装备包括头顶上方的大型机械光环和小型自然光环，以及白色船体部件和四座406毫米三联装炮塔。她的设计后来略作修改，使飞行甲板出现在两侧，并伴有一队F8F Bearcat战机"
   },
@@ -29952,10 +29952,10 @@
     "translated_description_zh": "这是《我的英雄学院》中的角色。上鳴電氣不太聰明，考試成績差，經常出糗，尤其是過度使用他的產電異能導致大腦短路時。這通常會導致他被[[Jiro Kyoka]]取笑。他有一頭分開的[[blonde hair]]，帶有黑色閃電形狀的條紋，與他的異能相匹配"
   },
   "ichijou_ririka_(1st_costume)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "hololive dev_is",
-    "translated_description_zh": "这是hololive DEV_IS的Ichijou Ririka的默认服装。她身穿白色夹克外套，内搭粉色无袖衬衫，带有中心褶边（衬衫塞入），紫色铅笔裙迷你裙，以及黑色高跟靴。配饰包括白色腰带、大腿环、金色项链、手表以及戴在头顶的太阳镜"
+    "has_chinese": true,
+    "chinese_name": "一条莉莉华",
+    "source_hint": "hololive",
+    "translated_description_zh": "hololive DEV_IS旗下音乐团体ReGLOSS成员，新人女社长，善于沟通并亲自处理海外业务。常服为白色毛领夹克内搭粉色荷叶边无袖衬衫，配紫色铅笔迷你裙和黑色高跟长靴，饰有腰带、腿环、金色项圈、手表和墨镜。"
   },
   "morgan_le_fay_(queen_of_winter)_(fate)": {
     "has_chinese": false,
@@ -33450,10 +33450,10 @@
     "translated_description_zh": ""
   },
   "sirius_symboli_(feroce)_(umamusume)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "天狼星象征（Féroce）",
     "source_hint": "umamusume",
-    "translated_description_zh": "Uma Musume（赛马娘）角色 Sirius Symboli 的赛装。外观：当前帖子 #7607591，草稿帖子 #760758"
+    "translated_description_zh": "《赛马娘 Pretty Derby》中赛马娘天狼星象征的赛服（racing outfit），日文原名「Féroce」，该词在法语中意为“凶猛的、猛烈的”或“骄傲的、勇猛的”。此服装为其在游戏中的初始赛服及三星卡面形象。"
   },
   "atsuko_(swimsuit)_(blue_archive)": {
     "has_chinese": true,
@@ -53089,9 +53089,9 @@
   },
   "atago_(school_traumerei)_(azur_lane)": {
     "has_chinese": true,
-    "chinese_name": "学园幻想曲(校园生活)",
-    "source_hint": "azur lane",
-    "translated_description_zh": "这是[[Atago (Azur Lane)|]]的[[serafuku]][[官方替换服装|costume]]，主题为校园生活(校园生活)，于2018年6月发"
+    "chinese_name": "爱宕（学园幻想曲）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中重樱阵营重巡洋舰爱宕的校园主题官方换装，于2018年6月实装。该换装以水手服为特征，常被译为“学园幻想曲”或“学院幻想曲”。"
   },
   "enna_alouette_(1st_costume)": {
     "has_chinese": false,
@@ -77191,9 +77191,9 @@
   },
   "remielle_dan": {
     "has_chinese": true,
-    "chinese_name": "拉米尔",
+    "chinese_name": "蕾米埃尔·丹",
     "source_hint": "zenless_zone_zero",
-    "translated_description_zh": "《绝区零》中即将登场的角色。拉米尔留着带有侧分刘海和呆毛的粉色中发，拥有粉色眼睛、尖耳朵、位置较低的黑色翅膀以及丰满的身材。她身穿一件带有露背设计和胸部绑带的黑色连衣裙，搭配通过吊带固定在两侧的黑色蕾丝边过膝袜。她的头发上戴有包括十字架、四角星和两条黑色丝带在内的多种发饰。她通常戴着一个黑色蕾丝口罩。其外貌酷似丹（Dan），被推测为其后代。日语版由大西沙织配音，英语版由Amber Lee Connors配音，汉语版由Cucu配音。"
+    "translated_description_zh": "《绝区零》中的可玩角色，新艾利都初代虚狩之一。蕾米埃尔拥有粉色中长发、粉色眼睛、尖耳和白色低翼。身着带有背部镂空设计的白色连衣裙、无袖袖套和白色过膝袜，头戴银色发带，饰有多个四角星形发饰。战斗中手持虚狩武器“Thaumiel”时，常被描绘为同时佩戴机械翼和剑。日配为大西沙织，英配为Amber Lee Connors，中配为醋醋。"
   },
   "exosister_irene": {
     "has_chinese": true,
@@ -77386,5 +77386,23 @@
     "chinese_name": "龙华妃咲（幼儿园泳装）",
     "source_hint": "blue_archive",
     "translated_description_zh": "该角色为《蔚蓝档案》中角色“龙华妃咲”的官方泳装换装。作为山海经高级中学学生会“玄龙门”的门主，她因夏日来临而换上了泳装。她身穿带有“Kiki”（キキ）名牌的白色与粉色冲浪服风格连体泳衣，搭配白色泳裙和花朵别针，脚穿粉色与黄色人字拖。头发扎成双马尾并系有蓝色发圈和小黄蝴蝶结，常携带黄色透明游泳圈。"
+  },
+  "atago_(full_moon's_feral_wolf)_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "爱宕（满月之夜的狼）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中重樱阵营SSR重巡洋舰爱宕的官方万圣节主题换装。"
+  },
+  "owari_(my_wish_is_for_love)_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "尾张（愿望为“爱”）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中重樱阵营战列舰尾张的万圣节主题官方换装。该换装在游戏内对应的皮肤名为「愿望为“爱”」，亦有手办产品名为「愿望为‘爱’ Ver.」。"
+  },
+  "sirius_(rabbit_of_paradise)_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "天狼星（至高乐园的白兔）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中皇家阵营轻巡洋舰天狼星的兔女郎主题官方换装。中文社区常称此皮肤为「至高乐园的白兔」，也有手办产品直接使用日文原名「パラダイス・コニー」（即 Paradise Connie/兔女郎乐园）。该皮肤以其独特的非传统兔女郎装束为特征。"
   }
 }

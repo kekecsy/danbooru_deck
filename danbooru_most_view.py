@@ -51,41 +51,6 @@ if os.path.exists(os.path.join(save_dir, "viewer_data.json")):
     except:
         daily_viewer_data = []
 
-def check_proxy(self):
-    url = "https://danbooru.donmai.us"
-    try:
-        resp = requests.get(
-            url,
-            timeout=5,                 # 防止卡死 UI
-            allow_redirects=True,
-            proxies=proxies           # 使用代理设置
-        )
-
-        if resp.status_code == 200:
-            proxies = requests.utils.get_environ_proxies(url)
-            if proxies:
-                self.proxy_label.setText("状态: 代理可用（已连通 Danbooru）")
-                self.proxy_label.setStyleSheet("color: #4CAF50")
-            else:
-                self.proxy_label.setText("状态: 直连可用（未使用代理）")
-                self.proxy_label.setStyleSheet("color: #FF9800")
-        else:
-            self.proxy_label.setText(f"状态: 访问异常 ({resp.status_code})")
-            self.proxy_label.setStyleSheet("color: #F44336")
-
-    except requests.exceptions.ProxyError:
-        self.proxy_label.setText("状态: 代理错误")
-        self.proxy_label.setStyleSheet("color: #F44336")
-
-    except requests.exceptions.Timeout:
-        self.proxy_label.setText("状态: 连接超时")
-        self.proxy_label.setStyleSheet("color: #F44336")
-
-    except requests.exceptions.RequestException:
-        self.proxy_label.setText("状态: 无法访问 Danbooru")
-        self.proxy_label.setStyleSheet("color: #F44336")
-
-
 def write_status(state, page=None):
     with open(status_path, 'w', encoding='utf-8') as f:
         json.dump({
@@ -159,7 +124,7 @@ def get_folder_name(name):
     return (name.replace(":", "%3A").replace("/", "%2F").replace("!", "_")
             .replace("?", "_").replace("<", "_").replace(">", "_").rstrip('.'))
 
-def grabber(all_drawer, page_num,log_callback=None, filter_tags=['furry','futanari']):
+def grabber(all_drawer, page_num,log_callback=None, filter_tags=['furry','futanari','guro']):
     def custom_print(msg):
             print(msg) # 控制台依然显示
             if log_callback:

@@ -58,6 +58,8 @@ const editor = reactive({
   imageOverlayName: '',
   revealColor: '#000000',
   revealOpacity: 0.8,
+  revealBlur: 0,
+  solidColor: '#000000',
   // 用户习惯：复制尺寸上限。0 表示原图无上限。watch 里会落盘。
   outputMaxEdge: Number.isFinite(editorHabits.outputMaxEdge) ? editorHabits.outputMaxEdge : 1600,
   sourceMeta: {
@@ -119,6 +121,8 @@ function applyControlsToLayer(layer) {
   layer.imageOverlayName = editor.imageOverlayName;
   layer.revealColor = editor.revealColor;
   layer.revealOpacity = editor.revealOpacity;
+  layer.revealBlur = editor.revealBlur;
+  layer.solidColor = editor.solidColor;
   normalizeLayer(layer);
 }
 
@@ -136,17 +140,34 @@ function pointInRect(px, py, rect) {
 }
 
 function handles(layer, customSize = 12) {
-  const x = layer.x * editor.zoom;
-  const y = layer.y * editor.zoom;
-  const w = layer.width * editor.zoom;
-  const h = layer.height * editor.zoom;
+  const z = editor.zoom;
+  const cx = (layer.x + layer.width / 2) * z;
+  const cy = (layer.y + layer.height / 2) * z;
+  const w = layer.width * z;
+  const h = layer.height * z;
+  const rad = ((layer.rotation || 0) * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
   const s = customSize;
-  return {
-    nw: { x: x - s / 2, y: y - s / 2, s },
-    ne: { x: x + w - s / 2, y: y - s / 2, s },
-    sw: { x: x - s / 2, y: y + h - s / 2, s },
-    se: { x: x + w - s / 2, y: y + h - s / 2, s }
+  const corners = {
+    nw: [-w / 2, -h / 2],
+    ne: [w / 2, -h / 2],
+    sw: [-w / 2, h / 2],
+    se: [w / 2, h / 2]
   };
+  const out = {};
+  for (const [key, [lx, ly]] of Object.entries(corners)) {
+    const rx = lx * cos - ly * sin + cx;
+    const ry = lx * sin + ly * cos + cy;
+    out[key] = { x: rx - s / 2, y: ry - s / 2, s };
+  }
+  // rot 手柄：local (0, -h/2 - 20)，屏幕空间略大于四角方便点击
+  const rH = 20;
+  const rotLy = -h / 2 - rH;
+  const rx = -rotLy * sin + cx;
+  const ry = rotLy * cos + cy;
+  out.rot = { x: rx - 8, y: ry - 8, s: 16 };
+  return out;
 }
 
 function findHandle(point, layer, hitSize = 30) {
@@ -159,16 +180,26 @@ function findHandle(point, layer, hitSize = 30) {
   return null;
 }
 
+function pointInRotatedRect(px, py, layer) {
+  const z = editor.zoom;
+  const cx = (layer.x + layer.width / 2) * z;
+  const cy = (layer.y + layer.height / 2) * z;
+  const w = layer.width * z;
+  const h = layer.height * z;
+  const rad = -((layer.rotation || 0) * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const dx = px - cx;
+  const dy = py - cy;
+  const lx = dx * cos - dy * sin;
+  const ly = dx * sin + dy * cos;
+  return Math.abs(lx) <= w / 2 && Math.abs(ly) <= h / 2;
+}
+
 function topLayerAt(point) {
   for (let i = editor.layers.length - 1; i >= 0; i -= 1) {
     const layer = editor.layers[i];
-    const rect = {
-      x: layer.x * editor.zoom,
-      y: layer.y * editor.zoom,
-      width: layer.width * editor.zoom,
-      height: layer.height * editor.zoom
-    };
-    if (pointInRect(point.x, point.y, rect)) return layer;
+    if (pointInRotatedRect(point.x, point.y, layer)) return layer;
   }
   return null;
 }
@@ -187,6 +218,8 @@ function syncFromLayer(layer) {
   editor.imageOverlayName = layer.imageOverlayName || '';
   editor.revealColor = layer.revealColor || '#000000';
   editor.revealOpacity = layer.revealOpacity ?? 0.8;
+  editor.revealBlur = layer.revealBlur ?? 0;
+  editor.solidColor = layer.solidColor || '#000000';
   if (editor.imageDataUrl) preloadOverlay(editor.imageDataUrl).catch(() => {});
 }
 
@@ -203,6 +236,7 @@ function addLayer(rect) {
     y: rect.y,
     width: rect.width,
     height: rect.height,
+    rotation: 0,
     fillMode: editor.fillMode,
     opacity: editor.opacity,
     mosaicBlockSize: editor.mosaicBlockSize,
@@ -214,7 +248,9 @@ function addLayer(rect) {
     imageDataUrl: editor.imageDataUrl,
     imageOverlayName: editor.imageOverlayName,
     revealColor: editor.revealColor,
-    revealOpacity: editor.revealOpacity
+    revealOpacity: editor.revealOpacity,
+    revealBlur: editor.revealBlur,
+    solidColor: editor.solidColor
   };
   applyControlsToLayer(layer);
   editor.layers.push(layer);
@@ -238,6 +274,14 @@ function drawMosaic(ctx, layer, scale) {
   );
   ctx.save();
   ctx.globalAlpha = layer.opacity;
+  const cx = (layer.x + layer.width / 2) * scale;
+  const cy = (layer.y + layer.height / 2) * scale;
+  const rad = ((layer.rotation || 0) * Math.PI) / 180;
+  if (rad) {
+    ctx.translate(cx, cy);
+    ctx.rotate(rad);
+    ctx.translate(-cx, -cy);
+  }
   ctx.imageSmoothingEnabled = false;
   ctx.drawImage(
     pixelCanvas,
@@ -273,8 +317,16 @@ function drawStripe(ctx, layer, scale) {
   const y = layer.y * scale;
   const w = layer.width * scale;
   const h = layer.height * scale;
+  const cx = (layer.x + layer.width / 2) * scale;
+  const cy = (layer.y + layer.height / 2) * scale;
+  const rad = ((layer.rotation || 0) * Math.PI) / 180;
   ctx.save();
   ctx.globalAlpha = layer.opacity;
+  if (rad) {
+    ctx.translate(cx, cy);
+    ctx.rotate(rad);
+    ctx.translate(-cx, -cy);
+  }
 
   // Removed background box for watermark style
 
@@ -308,17 +360,71 @@ function drawStripe(ctx, layer, scale) {
   ctx.restore();
 }
 
+function drawSolid(ctx, layer, scale) {
+  const x = layer.x * scale;
+  const y = layer.y * scale;
+  const w = layer.width * scale;
+  const h = layer.height * scale;
+  const cx = (layer.x + layer.width / 2) * scale;
+  const cy = (layer.y + layer.height / 2) * scale;
+  const rad = ((layer.rotation || 0) * Math.PI) / 180;
+  ctx.save();
+  ctx.globalAlpha = layer.opacity;
+  if (rad) {
+    ctx.translate(cx, cy);
+    ctx.rotate(rad);
+    ctx.translate(-cx, -cy);
+  }
+  ctx.fillStyle = layer.solidColor || '#000000';
+  ctx.fillRect(x, y, w, h);
+  ctx.restore();
+}
+
 function drawSelection(ctx, layer) {
-  const x = layer.x * editor.zoom;
-  const y = layer.y * editor.zoom;
-  const w = layer.width * editor.zoom;
-  const h = layer.height * editor.zoom;
+  const z = editor.zoom;
+  const x = layer.x * z;
+  const y = layer.y * z;
+  const w = layer.width * z;
+  const h = layer.height * z;
+  const cx = (layer.x + layer.width / 2) * z;
+  const cy = (layer.y + layer.height / 2) * z;
+  const rad = ((layer.rotation || 0) * Math.PI) / 180;
+
+  // 1) 旋转后的描边矩形
   ctx.save();
   ctx.strokeStyle = '#1d7ef3';
   ctx.lineWidth = 2;
+  if (rad) {
+    ctx.translate(cx, cy);
+    ctx.rotate(rad);
+    ctx.translate(-cx, -cy);
+  }
   ctx.strokeRect(x, y, w, h);
+  ctx.restore();
+
+  // 2) 4 个角句柄 + rot 圆形手柄（屏幕坐标，不受 ctx 旋转影响）
+  ctx.save();
   ctx.fillStyle = '#1d7ef3';
-  Object.values(handles(layer)).forEach(handle => ctx.fillRect(handle.x, handle.y, handle.s, handle.s));
+  ctx.strokeStyle = '#1d7ef3';
+  ctx.lineWidth = 2;
+  const map = handles(layer);
+  for (const [key, handle] of Object.entries(map)) {
+    if (key === 'rot') {
+      // 从顶部中点到 rot 手柄的引导线
+      const topX = (layer.x + layer.width / 2) * z;
+      const topY = layer.y * z;
+      ctx.beginPath();
+      ctx.moveTo(topX, topY);
+      ctx.lineTo(handle.x + handle.s / 2, handle.y + handle.s / 2);
+      ctx.stroke();
+      // 圆形 rot 手柄
+      ctx.beginPath();
+      ctx.arc(handle.x + handle.s / 2, handle.y + handle.s / 2, handle.s / 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.fillRect(handle.x, handle.y, handle.s, handle.s);
+    }
+  }
   ctx.restore();
 }
 
@@ -337,16 +443,24 @@ async function drawImageLayer(ctx, layer, scale) {
   const y = layer.y * scale;
   const w = layer.width * scale;
   const h = layer.height * scale;
+  const cx = (layer.x + layer.width / 2) * scale;
+  const cy = (layer.y + layer.height / 2) * scale;
+  const rad = ((layer.rotation || 0) * Math.PI) / 180;
   const ratio = Math.min(w / image.width, h / image.height);
   const dw = image.width * ratio;
   const dh = image.height * ratio;
   ctx.save();
   ctx.globalAlpha = layer.opacity;
+  if (rad) {
+    ctx.translate(cx, cy);
+    ctx.rotate(rad);
+    ctx.translate(-cx, -cy);
+  }
   ctx.drawImage(image, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
   ctx.restore();
 }
 
-function drawRevealMask(ctx, layers, scale, globalColor, globalOpacity) {
+function drawRevealMask(ctx, layers, scale, globalColor, globalOpacity, globalBlur = 0) {
   const revealLayers = layers.filter(layer => layer.fillMode === 'reveal');
   if (!revealLayers.length) return;
 
@@ -361,12 +475,27 @@ function drawRevealMask(ctx, layers, scale, globalColor, globalOpacity) {
 
   maskCtx.globalCompositeOperation = 'destination-out';
   maskCtx.globalAlpha = 1;
+  // 注意：blur 半径按 scale 缩放，使 exportPng (scale=1) 与画布预览 (scale=zoom) 视觉一致
+  const blurPx = Math.max(0, Number(globalBlur) || 0) * scale;
 
   for (const layer of revealLayers) {
+    const cx = (layer.x + layer.width / 2) * scale;
+    const cy = (layer.y + layer.height / 2) * scale;
+    const rad = ((layer.rotation || 0) * Math.PI) / 180;
+    maskCtx.save();
+    if (rad) {
+      maskCtx.translate(cx, cy);
+      maskCtx.rotate(rad);
+      maskCtx.translate(-cx, -cy);
+    }
+    if (blurPx > 0) {
+      // 在 destination-out 椭圆 fill 前应用 blur filter，让挖出的洞边缘有软过渡
+      maskCtx.filter = `blur(${blurPx}px)`;
+    }
     maskCtx.beginPath();
     maskCtx.ellipse(
-      (layer.x + layer.width / 2) * scale,
-      (layer.y + layer.height / 2) * scale,
+      cx,
+      cy,
       (layer.width / 2) * scale,
       (layer.height / 2) * scale,
       0,
@@ -374,6 +503,7 @@ function drawRevealMask(ctx, layers, scale, globalColor, globalOpacity) {
       Math.PI * 2
     );
     maskCtx.fill();
+    maskCtx.restore();
   }
 
   ctx.drawImage(maskCanvas, 0, 0);
@@ -391,12 +521,13 @@ async function render() {
   for (const layer of editor.layers) {
     if (layer.fillMode === 'stripe') drawStripe(ctx, layer, editor.zoom);
     else if (layer.fillMode === 'image') await drawImageLayer(ctx, layer, editor.zoom);
+    else if (layer.fillMode === 'solid') drawSolid(ctx, layer, editor.zoom);
     else if (layer.fillMode === 'mosaic') {
       drawMosaic(ctx, layer, editor.zoom);
     }
   }
 
-  drawRevealMask(ctx, editor.layers, editor.zoom, editor.revealColor, editor.revealOpacity);
+  drawRevealMask(ctx, editor.layers, editor.zoom, editor.revealColor, editor.revealOpacity, editor.revealBlur);
 
   if (editor.fillMode === 'reveal' && editor.mode === 'draw' && editor.start && editor.current) {
     const dx = editor.current.x - editor.start.x;
@@ -468,13 +599,31 @@ function deleteSelected() {
 const selectionBox = computed(() => {
   const layer = editor.layers.find(item => item.id === editor.selectedId);
   if (!layer) return null;
+  // 显式访问用到的字段，确保 Vue reactivity 跟踪到 layer.x/y/width/height/rotation 的变化
+  // （find 只读了 item.id，会让 computed 漏掉其他字段，导致 × 按钮位置滞后）
+  const lx = layer.x;
+  const ly = layer.y;
+  const lw = layer.width;
+  const lh = layer.height;
+  const lrot = layer.rotation || 0;
   const z = editor.zoom;
-  return {
-    left: layer.x * z,
-    top: layer.y * z,
-    right: (layer.x + layer.width) * z,
-    bottom: (layer.y + layer.height) * z
-  };
+  const cx = (lx + lw / 2) * z;
+  const cy = (ly + lh / 2) * z;
+  const w = lw * z;
+  const h = lh * z;
+  const rad = (lrot * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [px, py] of [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]]) {
+    const rx = px * cos - py * sin + cx;
+    const ry = px * sin + py * cos + cy;
+    if (rx < minX) minX = rx;
+    if (ry < minY) minY = ry;
+    if (rx > maxX) maxX = rx;
+    if (ry > maxY) maxY = ry;
+  }
+  return { left: minX, top: minY, right: maxX, bottom: maxY };
 });
 
 function onEditorKeyDown(event) {
@@ -495,6 +644,14 @@ function onEditorKeyDown(event) {
       event.preventDefault();
       deleteSelected();
     }
+  } else if (editor.selectedId != null && (event.key === ']' || event.key === '[' || event.key === 'ArrowRight' || event.key === 'ArrowLeft')) {
+    event.preventDefault();
+    const layer = selectedLayer();
+    if (!layer) return;
+    const dir = (event.key === ']' || event.key === 'ArrowRight') ? 1 : -1;
+    const step = event.shiftKey ? 1 : 15;
+    layer.rotation = (((layer.rotation || 0) + dir * step) % 360 + 360) % 360;
+    render();
   } else if (event.key === 'Escape' && editor.selectedId != null) {
     editor.selectedId = null;
     render();
@@ -611,6 +768,11 @@ async function loadPresets() {
   })));
 }
 
+// 贴图展示只显示名称、去掉文件后缀（.png/.webp 等）；不改 item.name 本身，避免影响其它逻辑。
+function presetLabel(name) {
+  return String(name || '').replace(/\.[^./\\]+$/, '');
+}
+
 async function usePreset(item) {
   editor.imageDataUrl = await window.desktopAPI.file.toLocalUrl(item.path);
   editor.imageOverlayName = item.name;
@@ -638,11 +800,12 @@ async function exportPng({ maxEdgeOverride } = {}) {
   for (const layer of editor.layers) {
     if (layer.fillMode === 'stripe') drawStripe(ctx, layer, scale);
     else if (layer.fillMode === 'image') await drawImageLayer(ctx, layer, scale);
+    else if (layer.fillMode === 'solid') drawSolid(ctx, layer, scale);
     else if (layer.fillMode === 'mosaic') {
       drawMosaic(ctx, layer, scale);
     }
   }
-  drawRevealMask(ctx, editor.layers, scale, editor.revealColor, editor.revealOpacity);
+  drawRevealMask(ctx, editor.layers, scale, editor.revealColor, editor.revealOpacity, editor.revealBlur);
   // maxEdgeOverride 优先：原图复制时传 0 即可跳过缩放
   const maxEdge = maxEdgeOverride !== undefined
     ? (Number(maxEdgeOverride) || 0)
@@ -717,11 +880,22 @@ function usePostUrlText() {
 function onMouseDown(event) {
   if (!editor.image) return;
   const point = canvasPoint(event);
-  
+
   // 1. Check if user clicked a handle of the currently selected layer
   const active = selectedLayer();
   if (active) {
     const handle = findHandle(point, active);
+    if (handle === 'rot') {
+      editor.handle = 'rot';
+      editor.mode = 'rotate';
+      editor.start = imagePoint(point);
+      const cx = active.x + active.width / 2;
+      const cy = active.y + active.height / 2;
+      editor.startAngle = Math.atan2(editor.start.y - cy, editor.start.x - cx) * 180 / Math.PI;
+      editor.startRotation = active.rotation || 0;
+      if (canvasRef.value) canvasRef.value.style.cursor = 'grabbing';
+      return;
+    }
     if (handle) {
       editor.handle = handle;
       editor.mode = 'resize';
@@ -735,7 +909,11 @@ function onMouseDown(event) {
   if (hit) {
     if (editor.selectedId !== hit.id) selectLayer(hit.id);
     editor.handle = null;
-    editor.mode = 'move';
+    // 关键修复：mousedown 命中码块时不要立即进入 move 模式。
+    // 只记录 pendingMove + 起始位置，等 mousemove 超过 3px 阈值才正式激活。
+    // 这样 click + 微小移动不会让 layer.x/y 变化，避免 selectionBox 跟随后 × 按钮"跳动"。
+    editor.pendingMove = true;
+    editor.moveStart = imagePoint(point);
     editor.start = imagePoint(point);
     return;
   }
@@ -752,8 +930,20 @@ function onMouseDown(event) {
 }
 
 function onMouseMove(event) {
-  if (!editor.mode || !editor.image) return;
+  if (!editor.image) return;
   const point = imagePoint(canvasPoint(event));
+  // pendingMove 激活：mousedown 命中码块后，鼠标移动超过 3px 才正式进入 move 模式
+  if (editor.pendingMove && !editor.mode) {
+    const dx = point.x - editor.moveStart.x;
+    const dy = point.y - editor.moveStart.y;
+    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+      editor.mode = 'move';
+      editor.start = { ...editor.moveStart };
+    } else {
+      return;  // 还没跨过阈值，不做任何事
+    }
+  }
+  if (!editor.mode) return;
   if (editor.mode === 'draw' && editor.fillMode === 'reveal') {
     editor.current = point;
     render();
@@ -788,10 +978,43 @@ function onMouseMove(event) {
     editor.start = point;
     normalizeLayer(layer);
     render();
+    return;
+  }
+  if (editor.mode === 'rotate') {
+    if (!layer) return;
+    const cx = layer.x + layer.width / 2;
+    const cy = layer.y + layer.height / 2;
+    const curAngle = Math.atan2(point.y - cy, point.x - cx) * 180 / Math.PI;
+    const delta = curAngle - (editor.startAngle || 0);
+    let rot = (editor.startRotation || 0) + delta;
+    if (!event.shiftKey) {
+      // 优先吸附到 0/45/90/.../315（±5° 内），否则按 15° 步进
+      const snap = Math.round(rot / 45) * 45;
+      if (Math.abs(rot - snap) < 5) rot = snap;
+      else rot = Math.round(rot / 15) * 15;
+    }
+    layer.rotation = ((rot % 360) + 360) % 360;
+    render();
   }
 }
 
-function onMouseUp() {
+function onMouseUp(event) {
+  // 撤销"click + 微小拖动"：如果 mousedown 到 mouseup 总位移 < 5px，
+  // 视为纯 click，撤销整段 move，保证 × 按钮位置不会因为手抖而跳动。
+  // 真正的拖动（总位移 ≥ 5px）不受影响。
+  if (editor.mode === 'move' && editor.moveStart && event) {
+    const movedLayer = selectedLayer();
+    if (movedLayer) {
+      const upPoint = imagePoint(canvasPoint(event));
+      const totalDx = upPoint.x - editor.moveStart.x;
+      const totalDy = upPoint.y - editor.moveStart.y;
+      if (Math.abs(totalDx) < 5 && Math.abs(totalDy) < 5) {
+        movedLayer.x -= totalDx;
+        movedLayer.y -= totalDy;
+      }
+    }
+  }
+
   if (editor.mode === 'draw') {
     if (editor.fillMode === 'reveal' && editor.start && editor.current) {
       const dx = editor.current.x - editor.start.x;
@@ -817,6 +1040,11 @@ function onMouseUp() {
   editor.start = null;
   editor.current = null;
   editor.draft = null;
+  editor.pendingMove = false;
+  editor.moveStart = null;
+  editor.startAngle = 0;
+  editor.startRotation = 0;
+  if (canvasRef.value) canvasRef.value.style.cursor = 'default';
   render();
 }
 
@@ -825,8 +1053,17 @@ watch(() => props.sourceItem, async (item) => {
   await loadImageFromPath(item.localPath, item);
 }, { immediate: true });
 
+// 切换打码方式时，强制清空选中码块，避免误操作
+// （之前会让右侧控件值直接覆盖到选中码块上，用户切换 fillMode 通常是想画新码块）
+watch(() => editor.fillMode, (newVal, oldVal) => {
+  if (newVal === oldVal) return;
+  if (editor.selectedId != null) {
+    editor.selectedId = null;
+    render();
+  }
+});
+
 watch(() => [
-  editor.fillMode,
   editor.opacity,
   editor.mosaicBlockSize,
   editor.stripeText,
@@ -835,7 +1072,9 @@ watch(() => [
   editor.stripeAutoFit,
   editor.stripeOrientation,
   editor.revealColor,
-  editor.revealOpacity
+  editor.revealOpacity,
+  editor.revealBlur,
+  editor.solidColor
 ], () => {
   const layer = selectedLayer();
   if (layer) applyControlsToLayer(layer);
@@ -945,7 +1184,7 @@ onBeforeUnmount(() => {
 
       <div class="editor-workflow-hint" :class="{ active: editor.selectedId != null }">
         <strong>{{ editor.selectedId != null ? `正在编辑第 ${editor.selectedId} 个码块` : '拖拽图片空白处创建码块' }}</strong>
-        <span>拖动码块可移动，拖动四角可缩放；Delete 删除，Esc 取消选中，Ctrl+Z 撤销。</span>
+        <span>拖动码块可移动，拖动四角可缩放，拖动上方圆点可旋转；按 ] 或 → 顺时针 15°（Shift=1°），按 [ 或 ← 逆时针 15°（Shift=1°），自动吸附 0/45/90°；Delete 删除，Esc 取消选中，Ctrl+Z 撤销。</span>
       </div>
 
       <label class="field-full">
@@ -954,13 +1193,14 @@ onBeforeUnmount(() => {
           <option value="mosaic">真实像素马赛克</option>
           <option value="stripe">自适应文本水印</option>
           <option value="image">贴图填充</option>
+          <option value="solid">纯色条（黑/白条）</option>
           <option value="reveal">显示遮罩</option>
         </select>
       </label>
 
       <label class="field-full">
         <span>透明度 {{ Math.round(editor.opacity * 100) }}%</span>
-        <input v-model.number="editor.opacity" type="range" min="0.1" max="1" step="0.05" />
+        <input v-model.number="editor.opacity" type="range" min="0" max="1" step="0.05" />
       </label>
 
       <label v-if="editor.fillMode === 'mosaic'" class="field-full">
@@ -1012,8 +1252,19 @@ onBeforeUnmount(() => {
         <div class="preset-grid">
           <button v-for="item in presets" :key="item.path" class="preset-btn" @click="usePreset(item)">
             <img :src="item.thumbUrl" :alt="item.name" />
-            <span>{{ item.name }}</span>
+            <span>{{ presetLabel(item.name) }}</span>
           </button>
+        </div>
+      </template>
+
+      <template v-if="editor.fillMode === 'solid'">
+        <label class="field-full">
+          <span>填充颜色</span>
+          <input v-model="editor.solidColor" type="color" />
+        </label>
+        <div class="button-row compact">
+          <button class="ghost" @click="editor.solidColor = '#000000'">黑条</button>
+          <button class="ghost" @click="editor.solidColor = '#ffffff'">白条</button>
         </div>
       </template>
 
@@ -1025,6 +1276,10 @@ onBeforeUnmount(() => {
         <label class="field-full">
           <span>遮罩透明度 {{ Math.round(editor.revealOpacity * 100) }}%</span>
           <input v-model.number="editor.revealOpacity" type="range" min="0.1" max="1" step="0.05" />
+        </label>
+        <label class="field-full">
+          <span>边缘模糊 {{ editor.revealBlur }}px{{ editor.revealBlur === 0 ? '（锐利）' : '' }}</span>
+          <input v-model.number="editor.revealBlur" type="range" min="0" max="100" step="1" />
         </label>
       </template>
 

@@ -1,12 +1,10 @@
 # danbooru_hot.py
 import os
-import json
-import datetime
 from time import sleep
 import danbooru_api
 from danbooru_data import DanbooruData
 
-def grabber(db_data, page_num, log_callback=None, filter_tags=['furry', 'futanari']):
+def grabber(db_data, page_num, log_callback=None, filter_tags=['furry', 'futanari','guro']):
     def custom_print(msg):
         print(msg)
         if log_callback: log_callback(msg)

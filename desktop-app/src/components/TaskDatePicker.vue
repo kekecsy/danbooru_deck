@@ -244,14 +244,14 @@ function imageCountLabel(count) {
 function dateCellTitle(cell) {
   if (!cell.hasFolder) return cell.date;
   if (!cell.countKnown) return `${cell.date} · 已有日期文件夹`;
-  return cell.hasImages ? `${cell.date} · ${cell.imageCount} 张图片` : `${cell.date} · 文件夹为空`;
+  return cell.hasImages ? `${cell.date} · 有图片` : `${cell.date} · 文件夹为空`;
 }
 
 function periodTitle(label, item) {
   if (!item.folderCount) return label;
   if (!item.countKnown) return `${label} · ${item.folderCount} 个日期文件夹`;
   return item.hasImages
-    ? `${label} · ${item.folderCount} 个日期 · ${item.imageCount} 张图片`
+    ? `${label} · ${item.folderCount} 个日期`
     : `${label} · ${item.folderCount} 个日期 · 文件夹为空`;
 }
 
@@ -403,7 +403,6 @@ onBeforeUnmount(() => {
           @click="pickMonth(item.month)"
         >
           <span>{{ item.label }}</span>
-          <small v-if="item.countKnown">{{ imageCountLabel(item.imageCount) }}图</small>
         </button>
       </div>
 
@@ -424,7 +423,6 @@ onBeforeUnmount(() => {
             @click="pickYear(item.year)"
           >
             <span>{{ item.year }}</span>
-            <small v-if="item.countKnown">{{ imageCountLabel(item.imageCount) }}图</small>
           </button>
         </div>
       </div>
@@ -467,7 +465,7 @@ onBeforeUnmount(() => {
 }
 
 .task-date-trigger.empty {
-  background: linear-gradient(135deg, #fbf4eb, #f2e8db);
+  background: var(--surface-muted);
   color: var(--accent-deep);
   font-weight: 500;
 }
@@ -516,7 +514,7 @@ onBeforeUnmount(() => {
   height: 24px;
   min-width: 0;
   padding: 0 8px;
-  border: 1px solid rgba(74, 53, 25, 0.16);
+  border: 1px solid rgba(30, 41, 82, 0.16);
   border-radius: 7px;
   background: rgba(255, 252, 246, 0.86);
   color: var(--accent-deep);
@@ -526,7 +524,7 @@ onBeforeUnmount(() => {
 }
 
 .date-heading-btn:hover {
-  background: rgba(243, 223, 212, 0.8);
+  background: rgba(99, 102, 241, 0.12);
 }
 
 .task-date-quickbar {
@@ -540,7 +538,7 @@ onBeforeUnmount(() => {
   height: 24px;
   min-width: 0;
   padding: 0 5px;
-  border: 1px solid rgba(74, 53, 25, 0.14);
+  border: 1px solid rgba(30, 41, 82, 0.14);
   border-radius: 7px;
   background: rgba(255, 252, 246, 0.78);
   color: var(--muted);
@@ -550,7 +548,7 @@ onBeforeUnmount(() => {
 }
 
 .date-quick:hover:not(:disabled) {
-  background: rgba(243, 223, 212, 0.75);
+  background: rgba(99, 102, 241, 0.11);
   color: var(--accent-deep);
 }
 
@@ -606,7 +604,7 @@ onBeforeUnmount(() => {
 .year-cell {
   height: 30px;
   min-width: 0;
-  border: 1px solid rgba(74, 53, 25, 0.16);
+  border: 1px solid rgba(30, 41, 82, 0.16);
   border-radius: 7px;
   background: rgba(255, 252, 246, 0.86);
   color: var(--ink);
@@ -646,20 +644,20 @@ onBeforeUnmount(() => {
 .month-cell.empty-folder:not(.selected),
 .year-cell.empty-folder:not(.selected) {
   background: rgba(230, 224, 214, 0.58);
-  border-color: rgba(74, 53, 25, 0.1);
+  border-color: rgba(30, 41, 82, 0.1);
   color: #a99684;
 }
 
 .month-cell:not(.has-folder):not(.selected),
 .year-cell:not(.has-folder):not(.selected) {
   background: rgba(230, 224, 214, 0.42);
-  border-color: rgba(74, 53, 25, 0.08);
+  border-color: rgba(30, 41, 82, 0.08);
   color: #b8aa99;
 }
 
 .month-cell:hover,
 .year-cell:hover {
-  background: rgba(243, 223, 212, 0.8);
+  background: rgba(99, 102, 241, 0.12);
 }
 
 .month-cell.selected,
@@ -704,14 +702,34 @@ onBeforeUnmount(() => {
   height: 26px;
   margin-top: 8px;
   padding: 0 8px;
-  border: 1px solid rgba(74, 53, 25, 0.12);
+  border: 1px solid rgba(30, 41, 82, 0.12);
   border-radius: 7px;
-  background: rgba(182, 84, 52, 0.1);
+  background: rgba(79, 118, 224, 0.1);
   color: var(--accent-deep);
   font-size: 11px;
 }
 
 .task-date-clear:hover {
-  background: rgba(182, 84, 52, 0.18);
+  background: rgba(79, 118, 224, 0.18);
 }
+
+/* Lightweight anime theme */
+.task-date-trigger { background: var(--accent-gradient); box-shadow: 0 4px 10px rgba(var(--accent-rgb), 0.16); }
+.task-date-trigger.empty,
+.date-heading-btn,
+.date-quick,
+.month-cell,
+.year-cell { border-color: var(--line); background: var(--surface-muted); color: var(--ink); }
+.date-heading-btn { color: var(--accent-deep); }
+.date-heading-btn:hover,
+.date-quick:hover:not(:disabled),
+.month-cell:hover,
+.year-cell:hover { background: var(--soft-violet); color: var(--accent-deep); }
+.day-cell:not(.has-folder):not(.selected),
+.month-cell:not(.has-folder):not(.selected),
+.year-cell:not(.has-folder):not(.selected) { background: #f1f0f6; border-color: var(--line); color: #aaa6b7; }
+.month-cell.selected,
+.year-cell.selected { background: var(--accent-gradient); }
+.task-date-clear { border-color: rgba(var(--violet-rgb), 0.12); background: var(--soft-violet); color: var(--accent-deep); }
+.task-date-clear:hover { background: #e8e4ff; }
 </style>

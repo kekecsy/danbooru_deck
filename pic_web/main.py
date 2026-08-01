@@ -20,10 +20,16 @@ INDEX_PATH = BASE_DIR / "index.html"
 STATIC_DIR = BASE_DIR / "static"
 STATIC_DIR.mkdir(exist_ok=True)
 
-PRESET_DIRS = [
-    BASE_DIR / "present",
-    PROJECT_ROOT / "mosaic_qt" / "present",
-]
+# 预设贴图目录：dev 用源码 pic_web/present，打包分发用 danbooru_DATA/present（见 runtime_paths.PRESET_DIR）。
+try:
+    from runtime_paths import PRESET_DIR
+except ImportError:  # pic_web 单独运行（python pic_web/main.py）时的回退
+    import sys as _sys
+
+    _sys.path.insert(0, str(PROJECT_ROOT))
+    from runtime_paths import PRESET_DIR
+
+PRESET_DIRS = [PRESET_DIR]
 
 FONT_CANDIDATES = {
     "Arial": [
@@ -299,20 +305,23 @@ def get_presets(request: Request) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
     root_path = request.scope.get("root_path", "").rstrip("/")
     for path in list_preset_files():
-        relative = path.relative_to(PROJECT_ROOT).as_posix()
-        items.append({"name": path.name, "url": f"{root_path}/api/preset-file/{relative}"})
+        items.append({"name": path.name, "url": f"{root_path}/api/preset-file/{path.name}"})
     return items
 
 
-@app.get("/api/preset-file/{relative_path:path}")
-def get_preset_file(relative_path: str) -> FileResponse:
-    target = (PROJECT_ROOT / relative_path).resolve()
-    allowed = [directory.resolve() for directory in PRESET_DIRS if directory.exists()]
-    if not any(str(target).startswith(str(directory)) for directory in allowed):
-        raise HTTPException(status_code=404, detail="preset not found")
-    if not target.exists():
-        raise HTTPException(status_code=404, detail="preset not found")
-    return FileResponse(target)
+@app.get("/api/preset-file/{filename:path}")
+def get_preset_file(filename: str) -> FileResponse:
+    # 只按文件名在预设目录里查找，避免路径穿越；PRESET_DIR 可能位于 danbooru_DATA 之下。
+    safe_name = Path(filename).name
+    for directory in PRESET_DIRS:
+        target = (directory / safe_name).resolve()
+        try:
+            target.relative_to(directory.resolve())
+        except ValueError:
+            continue
+        if target.exists() and target.is_file():
+            return FileResponse(target)
+    raise HTTPException(status_code=404, detail="preset not found")
 
 
 @app.post("/api/render")

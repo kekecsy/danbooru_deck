@@ -2,6 +2,8 @@ import os
 import re
 import sys
 import uuid
+import hashlib
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import sleep
@@ -36,7 +38,6 @@ from my_utils import (
     load_json,
     merge_daily_viewer_data,
     save_runtime_snapshot,
-    get_proxies_for_url,
     sanitize_tag_folder,
     is_tag_folder,
     tag_folder_display,
@@ -341,22 +342,58 @@ class DownloadJob:
     started_at: object = None
     tag_query: str = ""                                   # tags 模式：供「重试失败页」重建请求
     tag_source: str = "danbooru"                          # tags 模式：danbooru / gelbooru
-    failed_pages: list = field(default_factory=list)      # [{"folder":..., "page":...}]，自动重试后仍失败的页
+    failed_pages: list = field(default_factory=list)      # [{"folder":..., "page":...}]，页面列表抓取失败（页级）
+    failed_ids: dict = field(default_factory=dict)        # {ids: folder}，图片下载失败（图级），供前端按 id 重试
+    pending_ids: set = field(default_factory=set)         # 当前 folder 的 ids_data.json 内存镜像：下载前写入、成功后移除
     outcome: str = "pending"                              # pending / running / completed / completed_with_failures / stopped / error
     error_message: str = ""                               # 仅记录任务自身的致命异常，不混用服务 stderr
 
     def __post_init__(self):
         if not self.play_event.is_set():
             self.play_event.set()
+        # 载入当前 folder 已收集的 ids 作为「待下载队列」镜像。收集id / 失败残留的 id 都在这里。
+        try:
+            self.pending_ids = set(str(x) for x in (self.db.load_ids_data() or []))
+        except Exception:
+            self.pending_ids = set()
 
     def record_failed_page(self, page):
-        """记录一个自动重试后仍失败的页（按 folder+page 去重），供前端一键重试。"""
+        """记录一个页面列表抓取失败的页（按 folder+page 去重），供前端一键重试。"""
         entry = {"folder": self.target_folder, "page": int(page)}
         with self.viewer_lock:
             for e in self.failed_pages:
                 if e.get("folder") == entry["folder"] and e.get("page") == entry["page"]:
                     return
             self.failed_pages.append(entry)
+
+    def queue_pending_id(self, ids):
+        """下载某张图片前先把它的 id 记入 folder 的 ids_data.json（性质同「收集id」）。
+        无论以何种方式下载，都先落盘 id，保证中断/失败后该 id 仍在文件里可被重试。"""
+        ids = str(ids)
+        with self.viewer_lock:
+            if ids in self.pending_ids:
+                return
+            self.pending_ids.add(ids)
+            self.db.save_ids_data(sorted(self.pending_ids))
+
+    def resolve_pending_id(self, ids):
+        """一张图片处理完毕（下载成功 / 已存在 / 永久不可用）后，把它从待下载队列移除并落盘。
+        同时清掉失败标记 —— 重试成功后该 id 不应再出现在失败横幅里。"""
+        ids = str(ids)
+        with self.viewer_lock:
+            changed = False
+            if ids in self.pending_ids:
+                self.pending_ids.discard(ids)
+                changed = True
+            if ids in self.failed_ids:
+                self.failed_ids.pop(ids, None)
+            if changed:
+                self.db.save_ids_data(sorted(self.pending_ids))
+
+    def record_failed_id(self, ids):
+        """图片下载瞬时失败（已内部重试耗尽）：id 保留在 ids_data.json 里，并记入失败表供前端按 id 重试。"""
+        with self.viewer_lock:
+            self.failed_ids[str(ids)] = self.target_folder
 
 
     @property
@@ -441,6 +478,11 @@ class DownloadJob:
             self.snapshot_path = os.path.join(self.save_dir, "_runtime_snapshot.json")
             self.viewer_data = self.db.load_viewer_data()
             self.sent_image_count = len(self.viewer_data)
+            # 换 folder 后待下载队列也要跟着换成新 folder 的 ids_data.json 镜像。
+            try:
+                self.pending_ids = set(str(x) for x in (self.db.load_ids_data() or []))
+            except Exception:
+                self.pending_ids = set()
 
 
 class JobRegistry:
@@ -560,6 +602,22 @@ def count_gallery_media_files(folder: Path) -> int:
     return count
 
 
+def _count_pending_ids(folder: Path) -> int:
+    """读 folder/ids_data.json 里待下载的 id 数量。文件不存在 / 解析失败 / 空列表都按 0 计。
+    给日历标出「有 id 待下载」的日期（按 id 下载 / 收集id 模式的产物）。"""
+    ids_file = folder / "ids_data.json"
+    if not ids_file.is_file():
+        return 0
+    try:
+        with open(ids_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(data, list):
+        return 0
+    return len(data)
+
+
 def get_available_date_folder_details():
     date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     folders = {}
@@ -579,10 +637,12 @@ def get_available_date_folder_details():
                 "image_count": 0,
                 "source_count": 0,
                 "has_images": False,
+                "pending_ids": 0,
             })
             rec["source_count"] += 1
             rec["image_count"] += count_gallery_media_files(item)
             rec["has_images"] = rec["image_count"] > 0
+            rec["pending_ids"] += _count_pending_ids(item)
     return sorted(folders.values(), key=lambda x: x["date"], reverse=True)
 
 
@@ -623,9 +683,34 @@ def get_available_tag_folders():
     folders.sort(key=lambda x: x["folder"].lower())
     return folders
 
+def _create_empty_date_folder(date_str: str):
+    """用户主动选中一个还没有文件夹的日期 → 在 default 根目录下建空文件夹。
+    路径越界 / 非法日期 / 写盘失败时返回 None，上层继续回退到 today 行为。
+    这样前端选了什么日期就进入什么日期，不会被 resolve_selected_date 偷偷改写成 today。"""
+    try:
+        datetime.datetime.strptime(date_str, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+    roots = get_library_roots()
+    if not roots:
+        return None
+    base_root = Path(roots[0]["path"]).resolve()
+    target_dir = (base_root / date_str).resolve()
+    try:
+        # 防路径穿越：解析后必须仍在 default 根目录下
+        target_dir.relative_to(base_root)
+    except ValueError:
+        return None
+    try:
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return target_dir
+    except OSError:
+        return None
+
+
 def resolve_selected_date(requested_date=None):
     """兼容日期 (YYYY-MM-DD) 和 tag 文件夹 (tag_xxx)：
-    - 日期：按已有列表过滤
+    - 日期：按已有列表过滤；未命中时若格式合法则建空文件夹并放行（用户主动选择优先于回退到 today）
     - tag 文件夹：只要 hot_pic/<name> 存在就接受
     - 其它情况：fallback 到 today / 列表首项"""
     available_dates = get_available_date_folders()
@@ -639,6 +724,11 @@ def resolve_selected_date(requested_date=None):
             datetime.datetime.strptime(requested_date, "%Y-%m-%d")
             if requested_date in available_dates:
                 return requested_date, available_dates
+            # 用户主动选中一个还没有文件夹的日期 → 建空文件夹并进入，
+            # 避免后端回退到 today 之后前端又被「被改写的 selected_date」拽回去。
+            if _create_empty_date_folder(requested_date) is not None:
+                # 重新扫盘，让响应里的 available_dates / available_date_folders 包含新建的文件夹
+                return requested_date, get_available_date_folders()
         except ValueError:
             pass
 
@@ -789,14 +879,71 @@ app.mount("/mosaic", mosaic_editor_app)
 # 原图常是数 MB ~ 几十 MB，但卡片只显示 ~200px，缩到磁盘缓存后体积可降到 30KB 量级。
 # ==========================================
 _THUMB_CACHE_DIR = HOT_PIC_DIR / ".thumb_cache"
-_THUMB_VALID_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
+_THUMB_VALID_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif",
+                     ".mp4", ".webm", ".avi", ".mov", ".mkv"}
+_THUMB_VIDEO_EXTS = {".mp4", ".webm", ".avi", ".mov", ".mkv"}
 _THUMB_ALLOWED_SIZES = (200, 400, 800)
 _THUMB_LOCK = threading.Lock()
 
 
+def _generate_video_thumbnail(src_path: Path, dst_path: Path, max_dim: int) -> bool:
+    """取视频首帧 -> Pillow 缩放 -> 存 JPEG。
+    拆成两步：ffmpeg 只负责"解出 1 帧"（最简单最稳的调用，避开不同版本
+    ffmpeg 在 scale filter / force_original_aspect_ratio 上的语法差异）；
+    缩放和 JPEG 编码统一交给 Pillow，跟普通图片缩略图走同一条路径。
+    ffmpeg 不可用或解码失败返回 False，由前端走 NO PREVIEW 占位。"""
+    import tempfile
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(src_path),
+                "-vframes", "1",
+                "-an",                  # 不解音频，省时间
+                "-f", "image2",         # 显式 image2 muxer
+                str(tmp_path),
+            ],
+            capture_output=True, text=True, check=False, timeout=30,
+        )
+        if result.returncode != 0 or not tmp_path.exists() or tmp_path.stat().st_size == 0:
+            err = (result.stderr or "").strip().splitlines()
+            tail = err[-3:] if err else ["(no stderr)"]
+            print(f"[thumb] ffmpeg 首帧失败 {src_path.name}: {' | '.join(tail)[:300]}")
+            return False
+        from PIL import Image
+        with Image.open(tmp_path) as im:
+            im = im.convert("RGB") if im.mode != "RGB" else im.copy()
+            im.thumbnail((max_dim, max_dim), Image.LANCZOS)
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            im.save(dst_path, "JPEG", quality=80, optimize=True, progressive=True)
+        return True
+    except FileNotFoundError:
+        print(f"[thumb] ffmpeg 不在 PATH，跳过视频缩略图 {src_path.name}（请参考教程安装 ffmpeg）")
+        return False
+    except subprocess.TimeoutExpired:
+        print(f"[thumb] ffmpeg 取首帧超时 {src_path.name}")
+        return False
+    except Exception as e:
+        print(f"[thumb] 视频缩略图生成异常 {src_path.name}: {e}")
+        return False
+    finally:
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
 def _generate_thumbnail(src_path: Path, dst_path: Path, max_dim: int) -> bool:
     """生成 JPEG 缩略图到 dst_path。返回是否成功。Pillow 是 thread-safe 的，
-    但同一文件并发生成会浪费 CPU——外层 _THUMB_LOCK 串行保护。"""
+    但同一文件并发生成会浪费 CPU——外层 _THUMB_LOCK 串行保护。
+    视频走 ffmpeg 取首帧（见 _generate_video_thumbnail）。"""
+    ext = src_path.suffix.lower()
+    if ext in _THUMB_VIDEO_EXTS:
+        return _generate_video_thumbnail(src_path, dst_path, max_dim)
     try:
         from PIL import Image
         with Image.open(src_path) as im:
@@ -837,9 +984,11 @@ def api_thumbnail(date_str: str, filename: str, w: int = 400):
     cache_path = _THUMB_CACHE_DIR / str(w) / date_str / (filename + ".jpg")
 
     # 命中缓存且不比源文件旧 -> 直接返回
+    # 注意：0 字节文件视为无效（之前失败尝试可能留下的残骸），不命中
     if cache_path.exists():
         try:
-            if cache_path.stat().st_mtime >= src_path.stat().st_mtime:
+            if (cache_path.stat().st_size > 0
+                    and cache_path.stat().st_mtime >= src_path.stat().st_mtime):
                 return FileResponse(
                     cache_path,
                     media_type="image/jpeg",
@@ -852,6 +1001,7 @@ def api_thumbnail(date_str: str, filename: str, w: int = 400):
     with _THUMB_LOCK:
         # 双重检查：拿到锁后可能别人刚生成完
         if not (cache_path.exists()
+                and cache_path.stat().st_size > 0
                 and cache_path.stat().st_mtime >= src_path.stat().st_mtime):
             if not _generate_thumbnail(src_path, cache_path, w):
                 return PlainTextResponse("thumb error", status_code=500)
@@ -861,6 +1011,54 @@ def api_thumbnail(date_str: str, filename: str, w: int = 400):
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=86400"},
     )
+
+
+def _purge_thumb_cache_dirs() -> dict:
+    """清空本地磁盘上的两个缩略图缓存：.thumb_cache（/thumb/ 端点）和
+    .browse_thumb_cache（/api/proxy_thumb）。返回各类删除的文件数。
+    路径必须在 _THUMB_CACHE_DIR / _BROWSE_THUMB_CACHE_DIR 之内，防越界。"""
+    summary = {}
+    for label, base in [
+        ("thumb_cache", _THUMB_CACHE_DIR),
+        ("browse_thumb_cache", _BROWSE_THUMB_CACHE_DIR),
+    ]:
+        deleted = 0
+        try:
+            base_resolved = base.resolve()
+            for path in base_resolved.rglob("*"):
+                try:
+                    # 二次校验：解析后必须仍在 base 之下
+                    path.resolve().relative_to(base_resolved)
+                except ValueError:
+                    continue
+                if path.is_file():
+                    try:
+                        path.unlink()
+                        deleted += 1
+                    except OSError:
+                        pass
+            # 顺手清掉空目录
+            for path in sorted(base_resolved.rglob("*"), reverse=True):
+                if path.is_dir():
+                    try:
+                        path.rmdir()
+                    except OSError:
+                        pass
+        except FileNotFoundError:
+            pass
+        summary[label] = deleted
+    return summary
+
+
+@app.delete("/api/thumb_cache")
+def api_thumb_cache_clear():
+    """清空 .thumb_cache 和 .browse_thumb_cache 两个磁盘缓存目录。
+    用途：之前 ffmpeg 失败留下的残骸、MD5 旧格式残留、或单纯想腾空间。"""
+    with _THUMB_LOCK:
+        with _BROWSE_THUMB_LOCK:
+            summary = _purge_thumb_cache_dirs()
+    total = sum(summary.values())
+    return {"ok": True, "deleted": total, "by_dir": summary}
 
 
 class StartRequest(BaseModel):
@@ -884,6 +1082,11 @@ class TranslationImportRequest(BaseModel):
 
 class ConvertLocalZipRequest(BaseModel):
     local_path: str
+
+
+class ConvertAllZipsRequest(BaseModel):
+    date: str
+    overwrite: bool = False          # True 时强制覆盖已存在的 .gif
 
 
 class RefreshVisibleRequest(BaseModel):
@@ -991,6 +1194,7 @@ def _process_post(post, job, do_download=True):
         if peek_name and os.path.exists(os.path.join(job.save_dir, peek_name)):
             saved_filename = peek_name
             log_store.record(ids, image_url)
+            job.resolve_pending_id(ids)
             job.write_snapshot()
             return ids, artist, saved_filename
 
@@ -998,18 +1202,26 @@ def _process_post(post, job, do_download=True):
         if not job.is_running:
             return None
 
+        # 无论以何种方式要下载图片，都先把 id 写入 folder 的 ids_data.json（待下载队列）。
+        # 这样中断 / 失败后该 id 仍留在文件里，可被「按 id 重试」直接消费。
+        job.queue_pending_id(ids)
+
         download_fn = gelbooru_api.download_image if source == "gelbooru" else danbooru_api.download_image
         try:
             saved_filename = download_fn(image_url, job.save_dir, job.append_log, raise_on_transient=True)
         except (danbooru_api.TransientImageError, gelbooru_api.TransientImageError) as e:
-            # 瞬时网络失败（已内部重试耗尽）：返回哨兵，让 grabber 把本页记入「失败页」供重试
-            job.append_log(f"图片下载失败(网络)，ID {ids} 将计入失败页: {e}")
+            # 瞬时网络失败（已内部重试耗尽）：id 保留在 ids_data.json，记入失败表供前端按 id 重试
+            job.record_failed_id(ids)
+            job.append_log(f"图片下载失败(网络)，ID {ids} 已留在待下载队列可重试: {e}")
             return "__TRANSIENT__"
         if saved_filename:
             log_store.record(ids, image_url)
+            job.resolve_pending_id(ids)
             job.write_snapshot()
             sleep(1)
         else:
+            # 永久失败（404/已删除等）：id 不可重试，从待下载队列移除
+            job.resolve_pending_id(ids)
             job.append_log(f"跳过 ID {ids}，下载失败。")
             return None
 
@@ -1034,6 +1246,65 @@ def _persist_global_data():
     stats_store.save_atomic()
 
 
+# 单个下载任务内的图片并发下载度。curl_cffi 的阻塞 requests.get 在网络IO期间释放 GIL，
+# 所以线程池能真并发。Danbooru 有限流，4 是速度与撞 429 风险的平衡点。
+DOWNLOAD_CONCURRENCY = 4
+
+
+def _process_posts_concurrent(job, posts, page_need_update, new_hot_artists,
+                              max_workers=DOWNLOAD_CONCURRENCY):
+    """并发下载一页的所有 post，返回 (成功, 跳过, 失败) 计数。
+
+    分工原则（保证线程安全，无需新增锁）：
+      - 工作线程只跑 _process_post（下载 + log_store/pending_ids/viewer 的写，
+        这些全走各自的 RLock / 每文件锁，天然线程安全）；
+      - _update_artist_stats / append_viewer_entry 里会改 page_need_update、
+        new_hot_artists 这两个「未加锁的普通 list」，因此只在主线程的 as_completed
+        循环里串行调用，绝不放进工作线程。
+    暂停：投递前 play_event.wait()，且 _process_post 内部下载前还会再 wait 一次，
+         已投递的在途任务会在各自的下载点暂停。
+    停止：投递循环见 is_running=False 即停止投递；在途/排队任务 _process_post 内部
+         检测 is_running=False 直接返回 None，快速排空。"""
+    page_success = page_skipped = page_failed = 0
+    if not posts:
+        return 0, 0, 0
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_post = {}
+        for post in posts:
+            if not job.is_running:
+                break
+            job.play_event.wait()          # 暂停时不再投递新任务
+            if not job.is_running:
+                break
+            future_to_post[executor.submit(_process_post, post, job, True)] = post
+
+        for future in concurrent.futures.as_completed(future_to_post):
+            post = future_to_post[future]
+            try:
+                result = future.result()
+            except Exception as e:
+                job.append_log(f"下载线程异常: {e}")
+                page_failed += 1
+                continue
+            if result == "__TRANSIENT__":
+                page_failed += 1
+                continue
+            if result is None:
+                page_skipped += 1
+                continue
+            ids, artist, saved_filename = result
+            if saved_filename:
+                page_success += 1
+            else:
+                page_failed += 1
+            # 仅主线程改这两个未加锁的 list
+            _update_artist_stats(job, artist, page_need_update, new_hot_artists)
+            job.append_viewer_entry(ids, artist, saved_filename, post)
+
+    return page_success, page_skipped, page_failed
+
+
 # --- mode: rank ---
 def grabber_rank(job, page_num):
     page_need_update = {"1": [], "2": []}
@@ -1053,30 +1324,10 @@ def grabber_rank(job, page_num):
         job.write_snapshot()
         return [], {"1": [], "2": []}
 
-    page_success = page_skipped = page_failed = 0
-    page_had_transient = False
-    for post in posts:
-        if not job.is_running:
-            break
-        job.play_event.wait()
-        result = _process_post(post, job, do_download=True)
-        if result == "__TRANSIENT__":
-            page_failed += 1
-            page_had_transient = True
-            continue
-        if result is None:
-            page_skipped += 1
-            continue
-        ids, artist, saved_filename = result
-        if saved_filename:
-            page_success += 1
-        else:
-            page_failed += 1
-        _update_artist_stats(job, artist, page_need_update, new_hot_artists)
-        job.append_viewer_entry(ids, artist, saved_filename, post)
+    page_success, page_skipped, page_failed = _process_posts_concurrent(
+        job, posts, page_need_update, new_hot_artists
+    )
 
-    if page_had_transient:
-        job.record_failed_page(page_num)
     job.append_log(
         f"[Rank] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
@@ -1105,30 +1356,10 @@ def grabber_popular(job, page_num, target_date):
         job.record_failed_page(page_num)
         return [], {"1": [], "2": []}
 
-    page_success = page_skipped = page_failed = 0
-    page_had_transient = False
-    for post in posts:
-        if not job.is_running:
-            break
-        job.play_event.wait()
-        result = _process_post(post, job, do_download=True)
-        if result == "__TRANSIENT__":
-            page_failed += 1
-            page_had_transient = True
-            continue
-        if result is None:
-            page_skipped += 1
-            continue
-        ids, artist, saved_filename = result
-        if saved_filename:
-            page_success += 1
-        else:
-            page_failed += 1
-        _update_artist_stats(job, artist, page_need_update, new_hot_artists)
-        job.append_viewer_entry(ids, artist, saved_filename, post)
+    page_success, page_skipped, page_failed = _process_posts_concurrent(
+        job, posts, page_need_update, new_hot_artists
+    )
 
-    if page_had_transient:
-        job.record_failed_page(page_num)
     job.append_log(
         f"[Popular] {target_date} 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
@@ -1161,30 +1392,10 @@ def grabber_tags(job, page_num, tag_query, tag_source="danbooru"):
         job.record_failed_page(page_num)
         return [], {"1": [], "2": []}
 
-    page_success = page_skipped = page_failed = 0
-    page_had_transient = False
-    for post in posts:
-        if not job.is_running:
-            break
-        job.play_event.wait()
-        result = _process_post(post, job, do_download=True)
-        if result == "__TRANSIENT__":
-            page_failed += 1
-            page_had_transient = True
-            continue
-        if result is None:
-            page_skipped += 1
-            continue
-        ids, artist, saved_filename = result
-        if saved_filename:
-            page_success += 1
-        else:
-            page_failed += 1
-        _update_artist_stats(job, artist, page_need_update, new_hot_artists)
-        job.append_viewer_entry(ids, artist, saved_filename, post)
+    page_success, page_skipped, page_failed = _process_posts_concurrent(
+        job, posts, page_need_update, new_hot_artists
+    )
 
-    if page_had_transient:
-        job.record_failed_page(page_num)
     job.append_log(
         f"[Tags:{source_label}] [{tag_query}] 第 {page_num} 页完成: 成功 {page_success} / 跳过 {page_skipped} / 失败 {page_failed}"
     )
@@ -1226,6 +1437,9 @@ def grabber_collect_ids(job, page_num):
     _persist_global_data()
     daily_ids_data = list(set(daily_ids_data))
     job.db.save_ids_data(daily_ids_data)
+    # 同步内存镜像，保证同一 job 内后续（或状态查询）看到的待下载队列一致
+    with job.viewer_lock:
+        job.pending_ids = set(str(x) for x in daily_ids_data)
     job.append_log(f"[CollectIDs] 当前已收集 {len(daily_ids_data)} 个 ID")
     return new_hot_artists, page_need_update
 
@@ -1233,7 +1447,7 @@ def grabber_collect_ids(job, page_num):
 # --- mode: download_ids ---
 def task_download_ids(job, inline_ids=None):
     if inline_ids:
-        # 粘贴的 IDs：去重 + 只留纯数字串，写入当天 ids_data.json
+        # 粘贴的 IDs：去重 + 只留纯数字串，合并进 folder 的待下载队列（ids_data.json）
         cleaned = []
         seen = set()
         for raw in inline_ids:
@@ -1242,10 +1456,12 @@ def task_download_ids(job, inline_ids=None):
                 continue
             seen.add(s)
             cleaned.append(s)
-        ids_data = cleaned
-        if ids_data:
-            job.db.save_ids_data(ids_data)
-            job.append_log(f"[DownloadIDs] 已写入 {len(ids_data)} 个粘贴的 ID 到 {job.target_folder}/ids_data.json")
+        if cleaned:
+            for s in cleaned:
+                job.queue_pending_id(s)
+            job.append_log(f"[DownloadIDs] 已写入 {len(cleaned)} 个粘贴的 ID 到 {job.target_folder}/ids_data.json")
+        # 下载对象 = 队列里所有待下载 id（含粘贴的 + 之前收集/失败残留的）
+        ids_data = sorted(job.pending_ids)
     else:
         ids_data = job.db.load_ids_data()
 
@@ -1253,49 +1469,63 @@ def task_download_ids(job, inline_ids=None):
         job.append_log("[DownloadIDs] 没有可下载的 ID（既未粘贴也未先用「仅收集ID」模式收集）。")
         return
 
-    job.append_log(f"[DownloadIDs] 开始下载，共 {len(ids_data)} 个 ID")
+    job.append_log(f"[DownloadIDs] 开始下载，共 {len(ids_data)} 个 ID（并发 {DOWNLOAD_CONCURRENCY}）")
     success_count = 0
 
-    for pid_str in ids_data:
-        if not job.is_running:
-            job.append_log("任务已被强制终止。")
-            break
+    def _worker(pid_str):
+        """处理单个 id：返回 "ok" / "skip" / "fail"。所有共享写（log_store / stats_store /
+        pending_ids / viewer）都走各自的锁，故可安全并发。"""
         job.play_event.wait()
+        if not job.is_running:
+            return "skip"
 
         if pid_str in log_store:
-            continue
+            job.resolve_pending_id(pid_str)
+            return "skip"
+
+        # 确保该 id 在待下载队列里（正常情况下已在，防御性补一次）
+        job.queue_pending_id(pid_str)
 
         job.append_log(f"[DownloadIDs] 正在处理 ID: {pid_str}")
         post_data = danbooru_api.fetch_data_with_retry(pid_str)
         if not post_data:
-            job.append_log(f"ID {pid_str} 获取数据失败，跳过")
-            continue
+            # 拉取元数据失败：视为可重试，id 留在队列并记入失败表
+            job.record_failed_id(pid_str)
+            job.append_log(f"ID {pid_str} 获取数据失败，保留在待下载队列可重试")
+            return "fail"
 
         if job.filter_tags:
             tag_string = post_data.get('tag_string', '')
             if any(tag in tag_string for tag in job.filter_tags):
+                # 被过滤：不会下载，从队列移除
+                job.resolve_pending_id(pid_str)
                 job.append_log(f"跳过 ID {pid_str}，包含过滤标签。")
-                continue
+                return "skip"
 
         image_url = post_data.get('file_url') or post_data.get('large_file_url')
         if not image_url:
-            continue
+            job.resolve_pending_id(pid_str)
+            return "skip"
 
         job.play_event.wait()
         if not job.is_running:
-            break
+            return "skip"
 
         try:
             saved_filename = danbooru_api.download_image(image_url, job.save_dir, job.append_log, raise_on_transient=True)
         except danbooru_api.TransientImageError as e:
-            job.append_log(f"ID {pid_str} 下载失败(网络)，跳过: {e}")
-            continue
+            # 瞬时失败：id 留在队列并记入失败表供再次重试
+            job.record_failed_id(pid_str)
+            job.append_log(f"ID {pid_str} 下载失败(网络)，保留在待下载队列可重试: {e}")
+            return "fail"
         if not saved_filename:
+            # 永久失败（已删除等）：不可重试，从队列移除
+            job.resolve_pending_id(pid_str)
             job.append_log(f"ID {pid_str} 下载失败，跳过")
-            continue
+            return "fail"
 
         log_store.record(pid_str, image_url)
-        success_count += 1
+        job.resolve_pending_id(pid_str)
 
         artist = ""
         if 'tag_string_artist' in post_data:
@@ -1309,6 +1539,24 @@ def task_download_ids(job, inline_ids=None):
 
         job.append_viewer_entry(pid_str, artist, saved_filename, post_data)
         job.write_snapshot()
+        return "ok"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=DOWNLOAD_CONCURRENCY) as executor:
+        futures = []
+        for pid_str in ids_data:
+            if not job.is_running:
+                job.append_log("任务已被强制终止。")
+                break
+            job.play_event.wait()          # 暂停时不再投递
+            if not job.is_running:
+                break
+            futures.append(executor.submit(_worker, pid_str))
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                if future.result() == "ok":
+                    success_count += 1
+            except Exception as e:
+                job.append_log(f"下载线程异常: {e}")
 
     _persist_global_data()
     job.flush_viewer_data()
@@ -1526,6 +1774,227 @@ def set_proxy_endpoint(req: ProxyModeRequest):
 def proxy_state_endpoint():
     return {"ok": True, **danbooru_api.get_proxy_state()}
 
+
+# ==========================================
+# Tag 浏览：像 Danbooru 原网页一样按 tag 预览缩略图，勾选后再下载。
+# browse_tags 只拉 posts.json 元数据、不落盘；实际下载复用 download_ids 流程
+# （前端调 /api/start mode=download_ids）。缩略图由前端 <img> 直接指向
+# preview_file_url（直连）或经 /api/proxy_thumb 转发（走代理）。
+# ==========================================
+
+def _slim_post_for_browse(post: dict) -> dict:
+    """从 Danbooru posts.json 的单条 post 里挑出前端预览要用的字段。
+    已删除 / 无预览图的帖子（file_url 全空）返回 None 由上层过滤。"""
+    if not isinstance(post, dict):
+        return None
+    pid = post.get("id")
+    if not pid:
+        return None
+    preview = post.get("preview_file_url") or ""
+    large = post.get("large_file_url") or ""
+    full = post.get("file_url") or ""
+    # 三个 url 全空一般是被 ban / 需登录的帖子，预览不了也下不了，直接丢弃
+    if not (preview or large or full):
+        return None
+
+    artist = ""
+    artist_str = post.get("tag_string_artist") or ""
+    if artist_str:
+        drawers = [t for t in artist_str.split(" ") if t and not t.lower().endswith("(voice_actor)")]
+        if drawers:
+            artist = " ".join(drawers)
+
+    return {
+        "id": str(pid),
+        "preview_file_url": preview,
+        "large_file_url": large,
+        "file_url": full,
+        "image_width": post.get("image_width") or 0,
+        "image_height": post.get("image_height") or 0,
+        "rating": post.get("rating") or "",
+        "score": post.get("score") or 0,
+        "fav_count": post.get("fav_count") or 0,
+        "file_ext": post.get("file_ext") or "",
+        "file_size": post.get("file_size") or 0,
+        "tag_string_artist": artist,
+        "tag_string_character": post.get("tag_string_character") or "",
+        "created_at": post.get("created_at") or "",
+    }
+
+
+@app.get("/api/browse_tags")
+def browse_tags(tags: str = "", page: int = 1, limit: int = 40):
+    """按 tag 查询串拉一页 posts.json 元数据供前端预览，不下载任何图片。
+    tags 支持 Danbooru 多 tag 语法；SFW/代理开关自动跟随 danbooru_api 当前状态。"""
+    tags = (tags or "").strip()
+    if not tags:
+        return {"ok": False, "msg": "请填写 tag 查询串", "posts": []}
+    try:
+        page = max(1, int(page))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 40
+    limit = max(1, min(limit, 200))  # Danbooru 单页上限 200
+
+    try:
+        raw = danbooru_api.get_posts_by_tags(tags, page, limit=limit)
+    except Exception as e:
+        return {"ok": False, "msg": f"获取失败: {e}", "posts": []}
+
+    if not isinstance(raw, list):
+        return {"ok": False, "msg": "Danbooru 返回格式异常（可能触发限流或 tag 无效）", "posts": []}
+
+    posts = [slim for slim in (_slim_post_for_browse(p) for p in raw) if slim]
+    return {
+        "ok": True,
+        "tags": tags,
+        "page": page,
+        "limit": limit,
+        "count": len(posts),
+        "has_more": len(raw) >= limit,  # 拉满一页就假定还有下一页
+        "host": danbooru_api.get_host(),
+        "posts": posts,
+    }
+
+
+# 只允许转发 Danbooru 自家 CDN 的图片，避免 /api/proxy_thumb 变成开放 SSRF 代理
+_PROXY_THUMB_ALLOWED_HOSTS = (
+    "donmai.us",
+    "cdn.donmai.us",
+)
+
+# 在线预览图（Tag 浏览 / 收集ID 预览）的本地磁盘缓存。
+# 缩略图一张 ~20-50KB，命中缓存即免网络；超过上限按最久未访问(LRU，用文件 mtime 近似)淘汰。
+_BROWSE_THUMB_CACHE_DIR = HOT_PIC_DIR / ".browse_thumb_cache"
+_BROWSE_THUMB_MAX = 500          # 缓存文件数上限
+_BROWSE_THUMB_LOCK = threading.Lock()
+# 允许缓存落盘的图片扩展名（防止把 html 错误页之类的东西也缓存下来）
+_BROWSE_THUMB_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
+
+
+def _browse_thumb_cache_path(url: str) -> Path:
+    """用 url 的 sha1 + 原扩展名做缓存文件名。扩展名不认识时统一按 .jpg。"""
+    from urllib.parse import urlparse
+    ext = os.path.splitext(urlparse(url).path)[1].lower()
+    if ext not in _BROWSE_THUMB_EXTS:
+        ext = ".jpg"
+    digest = hashlib.sha1(url.encode("utf-8")).hexdigest()
+    return _BROWSE_THUMB_CACHE_DIR / (digest + ext)
+
+
+def _evict_browse_thumb_cache():
+    """缓存文件数超过 _BROWSE_THUMB_MAX 时，按 mtime 升序删最旧的，删到上限以内。
+    串行执行（外层持锁），避免多请求并发写时重复扫描。"""
+    try:
+        files = [
+            (f, f.stat().st_mtime)
+            for f in _BROWSE_THUMB_CACHE_DIR.iterdir()
+            if f.is_file() and not f.name.endswith(".tmp")
+        ]
+    except FileNotFoundError:
+        return
+    if len(files) <= _BROWSE_THUMB_MAX:
+        return
+    files.sort(key=lambda x: x[1])  # 最旧的在前
+    for f, _ in files[: len(files) - _BROWSE_THUMB_MAX]:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+
+
+@app.get("/api/collected_ids")
+def collected_ids(date: str = ""):
+    """读取某日期 folder 的 ids_data.json（「仅收集ID」模式的产物），
+    返回纯数字 ID 列表供前端在线预览。date 省略 = 今天。"""
+    date = (date or "").strip() or _resolve_today()
+    try:
+        db = DanbooruData(target_date=date)
+        raw = db.load_ids_data() or []
+    except Exception as e:
+        return {"ok": False, "msg": f"读取失败: {e}", "date": date, "ids": [], "count": 0}
+    # 只留纯数字串并去重，按数值稳定排序
+    seen = set()
+    ids = []
+    for x in raw:
+        s = str(x).strip()
+        if s.isdigit() and s not in seen:
+            seen.add(s)
+            ids.append(s)
+    ids.sort(key=lambda s: int(s))
+    return {"ok": True, "date": date, "ids": ids, "count": len(ids)}
+
+
+@app.get("/api/proxy_thumb")
+def proxy_thumb(url: str = ""):
+    """把 Danbooru 在线预览图经后端转发给浏览器 <img>，并落盘缓存。
+    - 直连模式下浏览器直接连 Danbooru CDN 会被防盗链/网络挡掉，统一走这里最稳。
+    - 命中本地缓存即免网络；未命中则拉取后写入缓存并做 LRU 淘汰。
+    - 带域名白名单防 SSRF。"""
+    url = (url or "").strip()
+    if not url:
+        return PlainTextResponse("missing url", status_code=400)
+
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return PlainTextResponse("bad scheme", status_code=400)
+    host = (parsed.hostname or "").lower()
+    if not any(host == h or host.endswith("." + h) for h in _PROXY_THUMB_ALLOWED_HOSTS):
+        return PlainTextResponse("host not allowed", status_code=403)
+
+    cache_path = _browse_thumb_cache_path(url)
+    # 1) 命中缓存：更新 mtime（LRU 访问时间）后直接返回
+    if cache_path.exists():
+        try:
+            now = datetime.datetime.now().timestamp()
+            os.utime(cache_path, (now, now))
+        except OSError:
+            pass
+        return FileResponse(cache_path, headers={"Cache-Control": "public, max-age=86400"})
+
+    # 2) 未命中：拉取
+    try:
+        r = danbooru_api.requests.get(
+            url,
+            headers=danbooru_api.HEADERS,
+            proxies=danbooru_api.PROXIES,
+            impersonate="chrome120",
+            timeout=20,
+        )
+    except Exception as e:
+        return PlainTextResponse(f"fetch error: {e}", status_code=502)
+
+    if r.status_code != 200:
+        return PlainTextResponse("upstream error", status_code=r.status_code)
+
+    content = r.content
+    content_type = r.headers.get("Content-Type", "image/jpeg")
+
+    # 3) 写入缓存（原子写：先写 .tmp 再 os.replace）+ 触发 LRU 淘汰
+    try:
+        _BROWSE_THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        with open(tmp_path, "wb") as f:
+            f.write(content)
+        os.replace(tmp_path, cache_path)
+        with _BROWSE_THUMB_LOCK:
+            _evict_browse_thumb_cache()
+    except OSError as e:
+        # 缓存写失败不影响本次返回，只是下次还得重新拉
+        print(f"[browse_thumb] 缓存写入失败 {url}: {e}")
+
+    return Response(
+        content=content,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+
 @app.post("/api/start")
 def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
     if not jobs.can_start():
@@ -1599,6 +2068,14 @@ def _resolve_job(job_id: str):
     return jobs.get(job_id) if job_id else jobs.primary()
 
 
+def _group_failed_ids(failed_ids: dict):
+    """把 {ids: folder} 分组成 [{folder, ids:[...]}]，供前端按 folder 一键重试。"""
+    by_folder = {}
+    for ids, folder in (failed_ids or {}).items():
+        by_folder.setdefault(folder or "", []).append(str(ids))
+    return [{"folder": folder, "ids": sorted(ids_list)} for folder, ids_list in by_folder.items()]
+
+
 @app.post("/api/pause")
 def pause_scraper(job_id: str = ""):
     job = _resolve_job(job_id)
@@ -1647,6 +2124,7 @@ def get_status(job_id: str = ""):
             "new_logs": [],
             "new_images": [],
             "failed_pages": [],
+            "failed_ids": [],
             "job_id": "",
             "outcome": "idle",
             "error_message": "",
@@ -1678,6 +2156,9 @@ def get_status(job_id: str = ""):
         "new_images": new_images,
         # 自动重试后仍失败的页（[{folder, page}]），不 drain，保留到 job 被清；前端据此弹「重试失败页」
         "failed_pages": list(job.failed_pages),
+        # 图片下载失败的 id（按 folder 分组 [{folder, ids:[...]}]），不 drain；前端据此弹「按 id 重试」。
+        # 这些 id 仍留在对应 folder 的 ids_data.json 里，重试即用 download_ids 模式消费。
+        "failed_ids": _group_failed_ids(job.failed_ids),
         "mode": job.mode,
         "tag_query": job.tag_query,
         "tag_source": job.tag_source,
@@ -1838,7 +2319,8 @@ def _backfill_orphan_entries(date_str: str, dd: DanbooruData) -> int:
                 "tag_string_character": post.get('tag_string_character', ''),
                 "tag_string_copyright": post.get('tag_string_copyright', ''),
                 "tag_string_artist": tag_artist,
-                "tag_string_meta": post.get('tag_string_meta', '')
+                "tag_string_meta": post.get('tag_string_meta', ''),
+                "rating": post.get('rating', '') or ''
             }
         })
         added += 1
@@ -1868,6 +2350,7 @@ def _run_refresh_scores(date_str: str):
             return False
         new_score = post.get("score", 0) or 0
         new_fav = post.get("fav_count", 0) or 0
+        new_rating = post.get("rating", "") or ""
         changed = item.get("score") != new_score or item.get("fav_count") != new_fav
         if changed:
             item["score"] = new_score
@@ -1878,6 +2361,12 @@ def _run_refresh_scores(date_str: str):
                     "score": new_score,
                     "fav_count": new_fav
                 })
+        # 旧图往往没有 rating（早期版本没保存），刷新时顺手补进 tags.rating
+        if new_rating:
+            tags = item.setdefault("tags", {})
+            if tags.get("rating") != new_rating:
+                tags["rating"] = new_rating
+                changed = True
         sleep(PER_TASK_SLEEP)
         return changed
 
@@ -1985,6 +2474,7 @@ def refresh_single_score(post_id: int, date: str = ""):
         return {"ok": False, "msg": "拉取失败"}
     new_score = post.get("score", 0) or 0
     new_fav = post.get("fav_count", 0) or 0
+    new_rating = post.get("rating", "") or ""
 
     if date:
         try:
@@ -1995,6 +2485,8 @@ def refresh_single_score(post_id: int, date: str = ""):
                 if _extract_post_id(item.get("post_url", "")) == str(post_id):
                     item["score"] = new_score
                     item["fav_count"] = new_fav
+                    if new_rating:
+                        item.setdefault("tags", {})["rating"] = new_rating
                     updated = True
                     break
             if updated:
@@ -2002,7 +2494,7 @@ def refresh_single_score(post_id: int, date: str = ""):
         except Exception as e:
             append_log(f"单图刷新写盘失败 {post_id}: {e}")
 
-    return {"ok": True, "post_id": post_id, "score": new_score, "fav_count": new_fav}
+    return {"ok": True, "post_id": post_id, "score": new_score, "fav_count": new_fav, "rating": new_rating}
 
 
 def _translate_characters_str(chars_str: str):
@@ -2278,7 +2770,8 @@ def refresh_visible(req: RefreshVisibleRequest):
                 "tag_string_character": chars_str,
                 "tag_string_copyright": post.get('tag_string_copyright', ''),
                 "tag_string_artist": tag_artist,
-                "tag_string_meta": post.get('tag_string_meta', '')
+                "tag_string_meta": post.get('tag_string_meta', ''),
+                "rating": post.get('rating', '') or ''
             }
 
             item = fn_to_item.get(filename)
@@ -2727,6 +3220,61 @@ def api_convert_local_zip(req: ConvertLocalZipRequest):
         return {"ok": True, "gif_path": str(output_path)}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
+
+
+@app.post("/api/convert_all_zips")
+def api_convert_all_zips(req: ConvertAllZipsRequest):
+    """批量把 hot_pic/<date>/ 下所有 .zip 转成 .gif（单 zip 转不动就跳过、不影响其他）；
+    overwrite=False（默认）会跳过已有 .gif；True 会强制覆盖。
+    返回 ok/总数/成功/跳过/失败/逐条结果，前端可据此刷新 gallery（gallery 用 .gif 优先）。"""
+    try:
+        from pic_web.main import convert_zip_to_gif
+    except Exception as e:
+        return {"ok": False, "msg": f"ffmpeg 模块加载失败: {e}"}
+
+    date = (req.date or "").strip()
+    try:
+        datetime.datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return {"ok": False, "msg": f"日期格式不正确: {req.date}"}
+
+    folder = (HOT_PIC_DIR / date).resolve()
+    try:
+        # 防路径穿越：解析后必须仍在 HOT_PIC_DIR 下
+        folder.relative_to(HOT_PIC_DIR.resolve())
+    except ValueError:
+        return {"ok": False, "msg": "日期路径越界"}
+    if not folder.is_dir():
+        return {"ok": False, "msg": f"找不到日期文件夹: {date}"}
+
+    zips = sorted(folder.glob("*.zip"))
+    results = []
+    converted = 0
+    skipped = 0
+    failed = 0
+    for zip_path in zips:
+        gif_path = zip_path.with_suffix(".gif")
+        if gif_path.exists() and not req.overwrite:
+            results.append({"zip": zip_path.name, "gif": gif_path.name, "status": "skipped"})
+            skipped += 1
+            continue
+        try:
+            convert_zip_to_gif(zip_path, gif_path)
+            results.append({"zip": zip_path.name, "gif": gif_path.name, "status": "ok"})
+            converted += 1
+        except Exception as e:
+            results.append({"zip": zip_path.name, "gif": gif_path.name, "status": "failed", "msg": str(e)})
+            failed += 1
+
+    return {
+        "ok": True,
+        "date": date,
+        "total": len(zips),
+        "converted": converted,
+        "skipped": skipped,
+        "failed": failed,
+        "results": results,
+    }
 
 
 # ---------------- Caption 手动模式：返回提示词供用户复制 ----------------

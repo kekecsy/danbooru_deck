@@ -1,4 +1,3 @@
-import sys
 from curl_cffi import requests
 from my_utils import get_proxies_for_url
 

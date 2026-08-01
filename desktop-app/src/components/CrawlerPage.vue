@@ -65,7 +65,7 @@ const form = ref({
   endPage: habits.rank_end || 16,
   // 用 typeof 判断而不是 || ：用户可能故意把过滤标签清空（=不过滤任何 tag），
   // 那种情况下应保留空串而不是回退到默认 "furry, futanari"
-  tags: typeof habits.tags === 'string' ? habits.tags : 'furry, futanari',
+  tags: typeof habits.tags === 'string' ? habits.tags : 'furry, futanari, guro',
   mode: habits.mode || 'rank',
   targetDate: '',
   startDate: '',
@@ -76,6 +76,9 @@ const form = ref({
 });
 
 watch(() => form.value.mode, (newMode) => {
+  // 切 mode 会触发 applyDefaultDatesForMode 默认填"昨天"，
+  // 这一帧内的 form 变化不应再触发 form→gallery 同步。
+  isModeSwitching = true;
   if (['rank', 'collect_ids'].includes(newMode)) {
     form.value.startPage = habits[`${newMode}_start`] || 1;
     form.value.endPage = habits[`${newMode}_end`] || 16;
@@ -89,6 +92,7 @@ watch(() => form.value.mode, (newMode) => {
   applyDefaultDatesForMode(newMode);
   recentStartPages.value = loadRecentPages(newMode, 'start');
   recentEndPages.value = loadRecentPages(newMode, 'end');
+  nextTick(() => { isModeSwitching = false; });
 });
 
 // ---------------- 日期工具 + 「默认昨天」 ----------------
@@ -210,11 +214,12 @@ const gallery = ref({
   images: [],
   search: '',
   filterFormat: 'all',
+  filterRatings: [],   // 多选：['s','q','e'] 的子集；空数组 = 不筛选（显示全部分级）
   sortBy: habits.sortBy || 'default',
   hotOnly: false,
   hotThreshold: habits.hotThreshold || 50,
-  // 固定 15/页：30/60/120 会同时渲染太多卡片，缩略图 IPC + 网格布局都会卡
-  pageSize: 15,
+  // 每页张数：默认 15（笔记本屏）；大屏可调高。过高会一次渲染很多卡片，缩略图 IPC + 网格布局会变卡
+  pageSize: habits.pageSize || 15,
   cardSize: habits.cardSize || 150,
   // 缩略图长边像素：默认 360（远小于原图，省解码/内存）；0 = 原图。点开看大图仍走原图。
   thumbSize: habits.thumbSize != null ? habits.thumbSize : 360,
@@ -224,18 +229,63 @@ const gallery = ref({
 });
 const showGalleryPanel = ref(habits.showGalleryPanel !== false);
 
-watch(() => [gallery.value.sortBy, gallery.value.hotThreshold, gallery.value.cardSize, gallery.value.thumbSize, gallery.value.refreshOnView], () => {
+watch(() => [gallery.value.sortBy, gallery.value.hotThreshold, gallery.value.cardSize, gallery.value.thumbSize, gallery.value.refreshOnView, gallery.value.pageSize], () => {
   habits.sortBy = gallery.value.sortBy;
   habits.hotThreshold = gallery.value.hotThreshold;
   habits.cardSize = gallery.value.cardSize;
   habits.thumbSize = gallery.value.thumbSize;
   habits.refreshOnView = gallery.value.refreshOnView;
+  habits.pageSize = gallery.value.pageSize;
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 });
 
 watch(showGalleryPanel, (value) => {
   habits.showGalleryPanel = value;
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+});
+
+// ---------------- form ↔ gallery 双向日期同步 ----------------
+// 目标：日期热门 / 日期范围 / 按ID下载 的目标日期 和 右侧 GalleryCalendar 当前日期 联动。
+// 选一边改，另一边跟着跳；省去"下载较早年份时两边都要选"的来回。
+//
+// 防回环：任一方向写入后，另一方向 watch 触发时先比值，值已一致就直接 return，
+// 不会出现 A→B→A→B 死循环。
+//
+// popular_range 驱动侧用 startDate（"下载较早年份" 的目标日就是区间起点）；
+// tags / rank / collect_ids 不参与同步。
+//
+// 位置注意：必须放在 gallery ref 定义之后。
+// watch 注册时会立即调一次 getter 建立依赖；若 gallery 还在 TDZ 会抛
+// "Cannot access 'gallery' before initialization"，整个组件挂载失败。
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+let isModeSwitching = false;
+
+// 右侧 GalleryCalendar → 左侧 form
+watch(() => gallery.value.selectedDate, (newDate) => {
+  if (!newDate) return;
+  const mode = form.value.mode;
+  if (mode === 'popular' || mode === 'download_ids') {
+    if (form.value.targetDate !== newDate) form.value.targetDate = newDate;
+  } else if (mode === 'popular_range') {
+    if (form.value.startDate !== newDate) form.value.startDate = newDate;
+  }
+});
+
+// 左侧 TaskDatePicker → 右侧 gallery
+watch(() => [form.value.targetDate, form.value.startDate], ([newTarget, newStart]) => {
+  if (isModeSwitching) return;
+  const mode = form.value.mode;
+  let dateToLoad = null;
+  if (mode === 'popular' || mode === 'download_ids') {
+    if (newTarget && ISO_DATE.test(newTarget) && newTarget !== gallery.value.selectedDate) {
+      dateToLoad = newTarget;
+    }
+  } else if (mode === 'popular_range') {
+    if (newStart && ISO_DATE.test(newStart) && newStart !== gallery.value.selectedDate) {
+      dateToLoad = newStart;
+    }
+  }
+  if (dateToLoad) loadGallery(dateToLoad);
 });
 
 const task = ref({
@@ -254,17 +304,19 @@ const task = ref({
   hideSuccess: true,
   expandedLogIdx: -1
 });
-// 自动重试后仍失败的页：后端 /api/status 透出 failed_pages（[{folder, page}]）。
-// 下载结束后界面弹「⚠ N 页失败 · 重试」横幅，一键定向重跑这些页，无需翻日志。
+// 下载失败横幅：后端 /api/status 透出 failed_pages（页级 [{folder, page}]）和
+// failed_ids（图级 [{folder, ids:[...]}]）。任务结束后弹横幅，一键定向重跑：
+// 页级重跑整页，图级用 download_ids 只重跑失败的 id（id 仍留在 folder 的 ids_data.json 里）。
 const failedPages = ref({
-  list: [], mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false,
+  list: [], kind: 'pages', mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false,
   signature: '', sourceQueueItemId: null
 });
 const queuedFailureReports = ref([]);
 const dismissedFailureSignatures = new Set();
 const viewer = ref({
   open: false,
-  index: 0,
+  key: '',            // 当前大图的稳定唯一键（localPath||filename）。用键而非索引锁定当前图，
+                      // 下载时新图 unshift 进画廊也不会让「正在看的图」错位（标签/复制跟着变）。
   imageUrl: '',
   zoom: 1,
   fitMode: habits.viewerFitMode === 'actual' ? 'actual' : 'fit',
@@ -274,6 +326,10 @@ const viewer = ref({
 
 const viewerToolbarVisible = computed(() => viewer.value.toolbarPinned || viewer.value.toolbarHovered);
 const viewerToolbarRef = ref(null);
+// viewer 主图淡入：src 变化时立刻置 false，@load 后置 true 触发 .is-loaded。
+// 配合 CSS opacity 0→1 过渡，避免上一张切下一张时"啪"地一下换图。
+const viewerImageLoaded = ref(false);
+watch(() => viewer.value.imageUrl, () => { viewerImageLoaded.value = false; });
 
 
 
@@ -569,18 +625,26 @@ function rebuildSortSnapshot() {
   sortSnapshot.value = { key: sortBy, positions };
 }
 
-const toast = ref({
-  show: false,
-  msg: '',
-  type: 'info'
-});
+// Toast：堆叠在程序顶部，置顶显示；多条同时挂出（不互相覆盖）。
+// 每条独立倒计时关闭（默认 4.5s），点 X 立即关。
+const toasts = ref([]);   // [{id, msg, type}]
+let toastSeq = 0;
 
 function showToast(msg, type = 'info') {
-  toast.value = { show: true, msg, type };
-  setTimeout(() => { toast.value.show = false; }, 3000);
+  const id = ++toastSeq;
+  toasts.value.push({ id, msg, type });
+  // 队列最多挂 6 条，再多就把最老的挤掉，避免遮挡程序头部太久
+  while (toasts.value.length > 6) toasts.value.shift();
+  setTimeout(() => dismissToast(id), 4500);
+}
+
+function dismissToast(id) {
+  toasts.value = toasts.value.filter(t => t.id !== id);
 }
 
 const loadingGallery = ref(false);
+const convertingZips = ref(false);   // 批量 zip→gif 进行中：避免重复点击
+const clearingThumbCache = ref(false);  // 清缩略图缓存进行中
 const galleryPendingDate = ref('');
 let galleryLoadSequence = 0;
 let committedGalleryDate = '';
@@ -613,6 +677,8 @@ const filteredLocalImages = computed(() => {
     }
 
     if (hotOnly && (item.score || 0) < threshold) return false;
+
+    if (gallery.value.filterRatings.length && !gallery.value.filterRatings.includes(item.rating || '')) return false;
 
     if (showOnlySelected.value) {
       const id = getPostId(item);
@@ -661,7 +727,16 @@ const activeItems = computed(() => pagedLocalImages.value);
 const activeCount = computed(() => filteredLocalImages.value.length);
 const activeTotalPages = computed(() => localTotalPages.value);
 const viewerItems = computed(() => filteredLocalImages.value);
-const viewerItem = computed(() => viewerItems.value[viewer.value.index] || null);
+// 稳定唯一键：同 grid 卡片的 :key。用它锁定「正在看的图」，避免下载时列表变动导致错位。
+function itemKey(item) {
+  return item ? (item.localPath || item.filename || '') : '';
+}
+// 当前大图在列表中的实时位置（供「第 N 张」计数、上/下一张边界判断）。列表变动时它会自然重算，
+// 但 viewerItem 始终由 key 决定，所以标签/复制不会跟着索引漂移。
+const viewerIndex = computed(() =>
+  viewer.value.key ? viewerItems.value.findIndex(it => itemKey(it) === viewer.value.key) : -1
+);
+const viewerItem = computed(() => viewerItems.value[viewerIndex.value] || null);
 const VIDEO_EXTS = ['mp4', 'webm', 'avi', 'mov', 'mkv'];
 function extOf(filename) {
   return (filename || '').split('.').pop().toLowerCase();
@@ -758,6 +833,13 @@ function doJump() {
 function gotoPage(n) {
   if (typeof n !== 'number') return;
   activePage.value = Math.max(1, Math.min(activeTotalPages.value, n));
+}
+// 每页张数：夹到 [1,120]，非法输入回落到当前值；改动会触发 habits 持久化 + localTotalPages 重算并夹紧 page
+function onPageSizeInput(event) {
+  const raw = Number(event.target.value);
+  const clamped = Number.isFinite(raw) ? Math.max(1, Math.min(120, Math.round(raw))) : gallery.value.pageSize;
+  gallery.value.pageSize = clamped;
+  event.target.value = clamped;
 }
 // 块导航：跳到目标块的「块首页」
 function gotoBlock(blockIndex) {
@@ -878,36 +960,75 @@ function isVideoItem(item) {
   return VIDEO_EXTS.includes(itemExtension(item));
 }
 
-function videoCardUrl(item) {
-  const folder = item?.date || gallery.value.selectedDate;
-  if (!folder || !item?.filename) return '';
-  return `http://127.0.0.1:8000/images/${encodeURIComponent(folder)}/${encodeURIComponent(item.filename)}`;
+// 卡片水印 / 缩略图首帧等地方统一走这两个判断：
+// 把"zip 旁边有已转换的 .gif"当作 gif 看待，让卡片视觉跟普通 gif 一致
+// （GIF 角标 + 「转GIF」按钮自动隐藏）。
+function isAnimatedCard(item) {
+  if (!item) return false;
+  const ext = itemExtension(item);
+  if (VIDEO_EXTS.includes(ext)) return true;
+  if (ext === 'gif') return true;
+  if (ext === 'zip' && item.hasGifCompanion) return true;
+  return false;
+}
+function cardFormatLabel(item) {
+  const ext = itemExtension(item);
+  if (ext === 'zip' && item?.hasGifCompanion) return 'gif';
+  return ext;
 }
 
-function prepareVideoThumbnail(event) {
-  const video = event.currentTarget;
-  if (!video) return;
-  try {
-    video.muted = true;
-    video.currentTime = Math.min(0.12, Math.max(0, (video.duration || 0) / 20));
-  } catch { /* 某些编码不允许 metadata 阶段 seek，保持首帧即可 */ }
+// 缩略图 <img> 真正解码完成（或失败）后才标记 loaded，触发淡入并撤下骨架屏。
+// 关键：不是在 thumbUrl 赋值时就淡入，而是等浏览器把图片解出来，避免"src 变了但像素还没到"的空白闪烁。
+function onThumbLoad(item) {
+  if (item) {
+    item.loaded = true;
+    item.thumbBroken = false;
+  }
+}
+
+// 缩略图加载失败（404 / 5xx / ffmpeg 不可用）：保留骨架屏常驻，
+// 并打 thumbBroken 标记让 CSS 走深色 NO PREVIEW 占位，避免露出 broken 图标。
+function onThumbError(item) {
+  if (!item) return;
+  item.loaded = false;         // 故意不置 true，让 skeleton 继续渲染
+  item.thumbBroken = true;
 }
 
 async function hydrateThumbs(items) {
   await Promise.all(items.map(async item => {
     if (item.thumbUrl) return;
-    
+
     const ext = (item.filename || '').split('.').pop().toLowerCase();
 
-    if (VIDEO_EXTS.includes(ext)) {
-      item.thumbUrl = '';
+    // 视频 / GIF 都走后端 /thumb/ 端点：视频走 ffmpeg 首帧、GIF 走 Pillow seek(0)，
+    // 统一拿到静态 JPEG 缩略图，避开 <video> 的 metadata seek 不稳定和 <img> 自动循环。
+    if (VIDEO_EXTS.includes(ext) || ext === 'gif') {
+      const folder = item.date || gallery.value.selectedDate;
+      const w = gallery.value.thumbSize || 400;
+      if (folder) {
+        item.thumbUrl = `http://127.0.0.1:8000/thumb/${encodeURIComponent(folder)}/${encodeURIComponent(item.filename)}?w=${w}`;
+      } else {
+        item.thumbUrl = generateFormatPlaceholder(ext);
+      }
       return;
     }
-    
+
     if (ext === 'zip' && item.localPath) {
+      // zip 旁边如果已有同名 .gif（手工转过 / 批量转过 / 之前下载时本身就带 gif），
+      // 跟普通 .gif 一样走后端 /thumb/ 端点生成首帧静态 JPEG，
+      // 避免 <img> 直接加载 .gif 在缩略图里循环播放。
       const gifPath = item.localPath.replace(/\.zip$/i, '.gif');
       if (await window.desktopAPI.file.exists(gifPath)) {
-        item.thumbUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+        const folder = item.date || gallery.value.selectedDate;
+        const w = gallery.value.thumbSize || 400;
+        const gifFilename = gifPath.split(/[\\/]/).pop();
+        if (folder) {
+          item.thumbUrl = `http://127.0.0.1:8000/thumb/${encodeURIComponent(folder)}/${encodeURIComponent(gifFilename)}?w=${w}`;
+        } else {
+          // 极端兜底：拿不到 folder 时回退到 local:// 直接读，但仍标 hasGifCompanion 让模板对齐
+          item.thumbUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+        }
+        item.hasGifCompanion = true;
         return;
       }
     }
@@ -942,13 +1063,24 @@ async function loadGallery(date, silent = false, preserveView = false) {
   try {
     const data = await window.desktopAPI.gallery.getByDate(requestedDate);
     if (requestSequence !== galleryLoadSequence) return; // 快速切换时丢弃乱序返回，避免日期回跳
-    const normalizedImages = data.images.map(item => ({
-      ...item,
-      thumbUrl: '',
-      postId: extractPostId(item),
-      artistTokens: splitTags(item.artist),
-      characterTokens: Array.isArray(item.characters) ? item.characters : splitTags(item.characters)
-    }));
+    // 保留已展示项的 thumbUrl/loaded：避免启动时第二次 loadGallery 把视频/gif 缩略图
+    // （走 HTTP /thumb/，ffmpeg 抽帧慢）整体重置成空字符串导致可感知的"闪一下就没"。
+    // hydrateThumbs 内有 `if (item.thumbUrl) return;` 守护，命中旧值就不会再走一次抽帧。
+    const oldByKey = new Map(
+      (gallery.value.images || []).map(img => [img.localPath || img.filename, img])
+    );
+    const normalizedImages = data.images.map(item => {
+      const old = oldByKey.get(item.localPath || item.filename);
+      return {
+        ...item,
+        thumbUrl: old?.thumbUrl || '',
+        loaded: old?.loaded || false,
+        postId: extractPostId(item),
+        rating: ratingFromTags(item),
+        artistTokens: splitTags(item.artist),
+        characterTokens: Array.isArray(item.characters) ? item.characters : splitTags(item.characters)
+      };
+    });
     gallery.value.selectedDate = data.selectedDate;
     committedGalleryDate = data.selectedDate;
     gallery.value.availableDates = Array.isArray(data.availableDates) ? data.availableDates : [];
@@ -967,7 +1099,16 @@ async function loadGallery(date, silent = false, preserveView = false) {
       rebuildSortSnapshot();
     }
     await hydrateThumbs(pagedLocalImages.value);
-    if (requestSequence === galleryLoadSequence) refreshCaptionedSet(data.selectedDate);
+    if (requestSequence === galleryLoadSequence) {
+      refreshCaptionedSet(data.selectedDate);
+      // 后台预热 mp4/gif 缩略图：不等用户滚到，gallery 切完就触发后端生成并写磁盘缓存
+      prewarmHeavyThumbs();
+      // 切换到新日期时，检查 folder 里的 ids_data.json 是否有待下载 ID。
+      // 只在日期真的变更时提示；reloadCurrentGallery / 静默轮询不会触发。
+      if (data.selectedDate && data.selectedDate !== previousCommittedDate) {
+        notifyPendingIds(data.selectedDate);
+      }
+    }
   } catch (error) {
     if (requestSequence === galleryLoadSequence) {
       gallery.value.selectedDate = previousCommittedDate;
@@ -979,6 +1120,125 @@ async function loadGallery(date, silent = false, preserveView = false) {
       galleryPendingDate.value = '';
       if (!silent) loadingGallery.value = false;
     }
+  }
+}
+
+// 预热缩略图：对当前日期里所有需要 ffmpeg/Pillow 处理的 mp4/gif，
+// 在 gallery 加载完第一屏后用 fetch 发请求触发后端生成。
+// 等卡片滚到视线内时，磁盘缓存已经命中，秒开。
+// 限并发上限 4，避免大文件 mp4 一次性把后端 _THUMB_LOCK 排满。
+async function prewarmHeavyThumbs() {
+  const items = gallery.value.images || [];
+  const heavy = items.filter(it => {
+    const ext = itemExtension(it);
+    return (ext === 'gif' || VIDEO_EXTS.includes(ext)) && it.thumbUrl;
+  });
+  if (!heavy.length) return;
+  const concurrency = 4;
+  let cursor = 0;
+  const workers = Array.from({ length: concurrency }, () => (async () => {
+    while (true) {
+      const idx = cursor++;
+      if (idx >= heavy.length) return;
+      try {
+        // 用 cache: 'no-store' 避免任何中间代理层把请求吞掉
+        await fetch(heavy[idx].thumbUrl, { cache: 'no-store' });
+      } catch { /* 单个失败不影响其它 */ }
+    }
+  })());
+  await Promise.all(workers);
+}
+
+// 切换到指定日期后探测 folder 的 ids_data.json：「仅收集ID」模式
+// 或 download_ids 模式尚未消费完都会留 id 在这里。count > 0 时给个轻量提示。
+async function notifyPendingIds(date) {
+  if (!date) return;
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/collected_ids?date=${encodeURIComponent(date)}`);
+    if (!res.ok) return;
+    const payload = await res.json();
+    if (payload?.ok && payload.count > 0) {
+      showToast(`${date} 还有 ${payload.count} 个 ID 未下载（用「收集ID / 下载ID」消费）`, 'info');
+    }
+  } catch {
+    // 探测失败静默，不影响图库加载主流程
+  }
+}
+
+async function clearThumbCache() {
+  if (clearingThumbCache.value) return;
+  if (!window.confirm('清空 .thumb_cache 和 .browse_thumb_cache？\n已生成的 mp4/gif 首帧 JPEG 都会清掉，下次访问会重新生成（每次冷启动较慢）。')) return;
+  clearingThumbCache.value = true;
+  showToast('正在清空缩略图缓存…', 'info');
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/thumb_cache', { method: 'DELETE' });
+    const data = await res.json();
+    if (data.ok) {
+      const detail = data.by_dir || {};
+      const parts = [];
+      if (detail.thumb_cache) parts.push(`.thumb_cache × ${detail.thumb_cache}`);
+      if (detail.browse_thumb_cache) parts.push(`.browse_thumb_cache × ${detail.browse_thumb_cache}`);
+      showToast(`已清空 ${data.deleted} 个缩略图文件${parts.length ? '（' + parts.join('，') + '）' : ''}`, 'success');
+      // 当前日期里所有图片的 thumbUrl 缓存失效，强制 hydrate 一次（不再走原 .thumb_url）
+      gallery.value.images.forEach(it => { it.thumbUrl = ''; it.loaded = false; it.thumbBroken = false; });
+      if (gallery.value.images.length) {
+        await hydrateThumbs(pagedLocalImages.value);
+        prewarmHeavyThumbs();
+      }
+    } else {
+      showToast('清缓存失败', 'error');
+    }
+  } catch (err) {
+    showToast(`清缓存失败: ${err.message}`, 'error');
+  } finally {
+    clearingThumbCache.value = false;
+  }
+}
+
+async function convertAllZipsToGif() {
+  const date = gallery.value.selectedDate;
+  if (!date) {
+    showToast('请先选择日期', 'error');
+    return;
+  }
+  if (convertingZips.value) return;
+  convertingZips.value = true;
+  showToast(`正在把 ${date} 的 .zip 批量转成 .gif…`, 'info');
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/convert_all_zips', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, overwrite: false })
+    });
+    const result = await res.json();
+    if (!result.ok) {
+      showToast(`批量转 GIF 失败: ${result.msg || '未知错误'}`, 'error');
+      return;
+    }
+    const { total, converted, skipped, failed } = result;
+    if (total === 0) {
+      showToast(`${date} 没有 .zip 可转换`, 'info');
+      return;
+    }
+    const parts = [`共 ${total} 个 .zip`];
+    if (converted) parts.push(`成功 ${converted}`);
+    if (skipped) parts.push(`跳过 ${skipped}（已有 .gif）`);
+    if (failed) parts.push(`失败 ${failed}`);
+    const type = failed > 0 ? 'warning' : 'success';
+    showToast(parts.join(' · '), type);
+    // 失败详情打一行到日志面板，方便排查
+    if (failed > 0) {
+      const failedItems = (result.results || []).filter(r => r.status === 'failed');
+      failedItems.forEach(r => appendLog(`[批量转GIF] ${r.zip} 失败: ${r.msg}`));
+    }
+    // 刷新图库，让新的 .gif 替换 .zip 的缩略图
+    if (converted > 0) {
+      await reloadCurrentGallery();
+    }
+  } catch (err) {
+    showToast(`请求失败: ${err.message}`, 'error');
+  } finally {
+    convertingZips.value = false;
   }
 }
 
@@ -1048,11 +1308,12 @@ function hasCaption(item) {
 }
 
 function failureReportSignature(report) {
-  const pages = (report.list || [])
-    .map(item => `${item.folder || ''}:${Number(item.page) || 0}`)
+  const kind = report.kind || 'pages';
+  const items = (report.list || [])
+    .map(item => `${item.folder || ''}:${kind === 'ids' ? (item.id || '') : (Number(item.page) || 0)}`)
     .sort()
     .join('|');
-  return [report.jobId || '', report.mode || '', report.tagSource || '', report.tagQuery || '', pages].join('::');
+  return [kind, report.jobId || '', report.mode || '', report.tagSource || '', report.tagQuery || '', items].join('::');
 }
 
 function showNextFailureReport() {
@@ -1078,18 +1339,11 @@ function enqueueFailureReport(report, currentQueueItem) {
 }
 
 function captureFailureReport(status) {
-  if (status.is_running || status.is_stopping || !Array.isArray(status.failed_pages) || !status.failed_pages.length) return;
+  if (status.is_running || status.is_stopping) return;
   const currentQueueItem = queueRunning.value && queueIndex.value >= 0
     ? taskQueue.value[queueIndex.value]
     : null;
-  const byFolder = new Map();
-  for (const item of status.failed_pages) {
-    const folder = item?.folder || '';
-    if (!byFolder.has(folder)) byFolder.set(folder, []);
-    byFolder.get(folder).push({ ...item });
-  }
-  for (const list of byFolder.values()) enqueueFailureReport({
-    list,
+  const commonMeta = {
     jobId: status.job_id || '',
     mode: status.mode || '',
     tagQuery: status.tag_query || '',
@@ -1097,7 +1351,29 @@ function captureFailureReport(status) {
     retrying: false,
     signature: '',
     sourceQueueItemId: currentQueueItem?.id ?? null,
-  }, currentQueueItem);
+  };
+
+  // 页级失败（页面列表抓取失败）：按 folder 分组，重试整页
+  if (Array.isArray(status.failed_pages) && status.failed_pages.length) {
+    const byFolder = new Map();
+    for (const item of status.failed_pages) {
+      const folder = item?.folder || '';
+      if (!byFolder.has(folder)) byFolder.set(folder, []);
+      byFolder.get(folder).push({ ...item });
+    }
+    for (const list of byFolder.values()) {
+      enqueueFailureReport({ ...commonMeta, kind: 'pages', list }, currentQueueItem);
+    }
+  }
+
+  // 图级失败（图片下载失败）：后端已按 folder 分组 [{folder, ids:[...]}]，重试对应的 id
+  if (Array.isArray(status.failed_ids) && status.failed_ids.length) {
+    for (const group of status.failed_ids) {
+      const folder = group?.folder || '';
+      const list = (group?.ids || []).map(id => ({ folder, id: String(id) }));
+      if (list.length) enqueueFailureReport({ ...commonMeta, kind: 'ids', list }, currentQueueItem);
+    }
+  }
 }
 
 let statusSyncInFlight = null;
@@ -1146,6 +1422,7 @@ async function syncStatusOnce() {
         const appended = status.new_images.map(item => ({
           ...item,
           thumbUrl: '',
+          loaded: false,
           postId: extractPostId(item),
           artistTokens: splitTags(item.artist),
           characterTokens: Array.isArray(item.characters) ? item.characters : splitTags(item.characters)
@@ -1249,9 +1526,11 @@ async function startTask() {
   }
 }
 
-// 一键重试失败页：把 failedPages 按 folder 分组（用户场景单日期=单组），用对应 mode
-// 拼 payload 并带 pages 定向重跑。因后端 MAX_CONCURRENT=1，多组时先跑第一组，
-// 剩余组在该 job 结束后横幅会再次出现（仅 popular_range 多日期才会出现多组）。
+// 一键重试失败项：区分「页级失败」和「图级失败」。
+// - kind='pages'：页面列表抓取失败，用对应 mode + pages 定向重跑整页。
+// - kind='ids'：图片下载失败，用 download_ids 模式对该 folder 只重跑这些 id
+//   （这些 id 仍留在该 folder 的 ids_data.json 里，成功后后端会自动移除）。
+// 因后端 MAX_CONCURRENT=1，多组时先跑第一组，剩余组在该 job 结束后横幅会再次出现。
 async function retryFailedPages() {
   if (failedPages.value.retrying || task.value.isRunning || task.value.isStopping) {
     showToast('请等待当前任务结束后再重试', 'info');
@@ -1260,39 +1539,64 @@ async function retryFailedPages() {
   const list = failedPages.value.list || [];
   if (!list.length) return;
   const retrySignature = failedPages.value.signature;
+  const kind = failedPages.value.kind || 'pages';
 
-  // 按 folder 分组
-  const byFolder = new Map();
-  for (const it of list) {
-    const folder = it.folder || '';
-    if (!byFolder.has(folder)) byFolder.set(folder, []);
-    byFolder.get(folder).push(Number(it.page));
-  }
-  const [folder, pages] = byFolder.entries().next().value;
-  const uniqPages = [...new Set(pages)].sort((a, b) => a - b);
-  const mode = failedPages.value.mode || 'popular';
-
-  const payload = {
-    start_page: Math.min(...uniqPages),
-    end_page: Math.max(...uniqPages),
-    tags: form.value.tags || '',
-    mode,
-    pages: uniqPages,
-  };
-  // tag 文件夹以 "tag_" 开头；日期文件夹是 YYYY-MM-DD
-  const isTagFolder = typeof folder === 'string' && folder.startsWith('tag_');
-  if (mode === 'tags' || isTagFolder) {
-    payload.mode = 'tags';
-    payload.tag_query = failedPages.value.tagQuery || '';
-    payload.tag_source = failedPages.value.tagSource || form.value.tagSource || 'danbooru';
-    if (!payload.tag_query.trim()) {
-      showToast('缺少 tag 查询串，无法重试该 tag 任务', 'error');
-      return;
+  let payload;
+  let retryDesc;
+  if (kind === 'ids') {
+    // 按 folder 分组（用户场景单 folder=单组），取第一组
+    const byFolder = new Map();
+    for (const it of list) {
+      const folder = it.folder || '';
+      if (!byFolder.has(folder)) byFolder.set(folder, []);
+      byFolder.get(folder).push(String(it.id));
     }
-  } else if (mode === 'popular' || mode === 'popular_range') {
-    payload.mode = 'popular';
-    payload.target_date = folder;
-  } // rank: 无需 folder
+    const [folder, ids] = byFolder.entries().next().value;
+    const uniqIds = [...new Set(ids)];
+    payload = {
+      start_page: 1,
+      end_page: 1,
+      tags: form.value.tags || '',
+      mode: 'download_ids',
+      target_date: folder,
+      ids: uniqIds,
+    };
+    retryDesc = `${uniqIds.length} 张图片`;
+  } else {
+    // 页级失败：按 folder 分组
+    const byFolder = new Map();
+    for (const it of list) {
+      const folder = it.folder || '';
+      if (!byFolder.has(folder)) byFolder.set(folder, []);
+      byFolder.get(folder).push(Number(it.page));
+    }
+    const [folder, pages] = byFolder.entries().next().value;
+    const uniqPages = [...new Set(pages)].sort((a, b) => a - b);
+    const mode = failedPages.value.mode || 'popular';
+
+    payload = {
+      start_page: Math.min(...uniqPages),
+      end_page: Math.max(...uniqPages),
+      tags: form.value.tags || '',
+      mode,
+      pages: uniqPages,
+    };
+    // tag 文件夹以 "tag_" 开头；日期文件夹是 YYYY-MM-DD
+    const isTagFolder = typeof folder === 'string' && folder.startsWith('tag_');
+    if (mode === 'tags' || isTagFolder) {
+      payload.mode = 'tags';
+      payload.tag_query = failedPages.value.tagQuery || '';
+      payload.tag_source = failedPages.value.tagSource || form.value.tagSource || 'danbooru';
+      if (!payload.tag_query.trim()) {
+        showToast('缺少 tag 查询串，无法重试该 tag 任务', 'error');
+        return;
+      }
+    } else if (mode === 'popular' || mode === 'popular_range') {
+      payload.mode = 'popular';
+      payload.target_date = folder;
+    } // rank: 无需 folder
+    retryDesc = `${uniqPages.length} 页：${uniqPages.join(', ')}`;
+  }
 
   failedPages.value.retrying = true;
   try {
@@ -1302,11 +1606,11 @@ async function retryFailedPages() {
       showToast(result.msg || '重试发起失败', 'error');
       return;
     }
-    appendLog(result.msg || `已发起重试 ${uniqPages.length} 页：${uniqPages.join(', ')}`);
-    showToast(`正在重试 ${uniqPages.length} 页`, 'info');
+    appendLog(result.msg || `已发起重试 ${retryDesc}`);
+    showToast(`正在重试 ${retryDesc}`, 'info');
     // 移除的是本次已处理的报告；其他队列项的失败报告继续排队，不会被刷新掉。
     if (failedPages.value.signature === retrySignature) {
-      failedPages.value = { list: [], mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false, signature: '', sourceQueueItemId: null };
+      failedPages.value = { list: [], kind: 'pages', mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false, signature: '', sourceQueueItemId: null };
       showNextFailureReport();
     }
     await syncStatus();
@@ -1320,7 +1624,7 @@ async function retryFailedPages() {
 
 function dismissFailedPages() {
   if (failedPages.value.signature) dismissedFailureSignatures.add(failedPages.value.signature);
-  failedPages.value = { list: [], mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false, signature: '', sourceQueueItemId: null };
+  failedPages.value = { list: [], kind: 'pages', mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false, signature: '', sourceQueueItemId: null };
   showNextFailureReport();
 }
 
@@ -1364,6 +1668,7 @@ const queueRunning = ref(false);    // 整个队列是否在跑
 const queueAbort = ref(false);      // 停止队列的中断旗标
 const queueSkipItemId = ref(null);  // 仅跳过当前项；与停止整个队列严格分开
 const queueIndex = ref(-1);         // 当前正在跑的项下标（-1 = 没在跑）
+const justAddedId = ref(null);      // 刚加入队列的项 id：驱动一次入场高亮脉冲
 // 多任务队列面板折叠态：默认折叠省左栏空间，记住用户偏好
 const queuePanelOpen = ref(habits.queuePanelOpen ?? false);
 function toggleQueuePanel() {
@@ -1419,13 +1724,39 @@ function addCurrentToQueue() {
     showToast('标签下载需要先填 tag 查询串', 'error');
     return;
   }
-  if (f.mode === 'download_ids' && !parsePastedIds(f.idsText || '').length) {
-    showToast('按ID下载需要先粘贴有效的 ID', 'error');
-    return;
+  if (f.mode === 'download_ids') {
+    // 空 idsText：先看 folder 自己的 ids_data.json 是否有待下载 ID
+    // （「仅收集ID」/上次 download_ids 未消费完的产物），有就灌回 textarea，
+    // 让用户看到具体多少个、也能编辑后再入队；没有再报错。
+    if (!parsePastedIds(f.idsText || '').length) {
+      const date = (f.targetDate || '').trim();
+      fetch(`http://127.0.0.1:8000/api/collected_ids?date=${encodeURIComponent(date)}`)
+        .then(r => r.json())
+        .then(payload => {
+          if (!payload?.ok || !payload.ids?.length) {
+            showToast('folder 里没有待下载 ID，请先「仅收集ID」或在文本框粘贴', 'error');
+            return;
+          }
+          f.idsText = payload.ids.join('\n');
+          const item = snapshotFormToItem();
+          item.label = queueItemLabel(item);
+          taskQueue.value.push(item);
+          queuePanelOpen.value = true;
+          justAddedId.value = item.id;
+          setTimeout(() => { if (justAddedId.value === item.id) justAddedId.value = null; }, 1100);
+          showToast(`已加入队列：消费 folder 的 ${payload.ids.length} 个待下载 ID`, 'success');
+        })
+        .catch(err => showToast(`读取 folder ID 失败：${err.message}`, 'error'));
+      return;
+    }
   }
   const item = snapshotFormToItem();
   item.label = queueItemLabel(item);
   taskQueue.value.push(item);
+  // 加入反馈：自动展开面板（折叠时用户看不到新项）+ 短暂高亮脉冲
+  queuePanelOpen.value = true;
+  justAddedId.value = item.id;
+  setTimeout(() => { if (justAddedId.value === item.id) justAddedId.value = null; }, 1100);
   showToast(`已加入队列：${item.label}`, 'success');
 }
 
@@ -1439,24 +1770,87 @@ function removeQueueItem(i) {
   taskQueue.value.splice(i, 1);
   if (queueRunning.value && i < queueIndex.value) queueIndex.value -= 1;
 }
-function moveQueueItem(i, dir) {
-  if (!canMoveQueueItem(i, dir)) return;
-  const j = i + dir;
-  const arr = taskQueue.value;
-  [arr[i], arr[j]] = [arr[j], arr[i]];
-  if (queueRunning.value) {
-    if (i === queueIndex.value) queueIndex.value = j;
-    else if (j === queueIndex.value) queueIndex.value = i;
+// 队列项拖拽重排：直接 splice + 插入，保留 queueIndex 指向正在跑的那一项
+const dragIndex = ref(-1);
+const dragOverIndex = ref(-1);
+const dragPosition = ref(null); // 'top' | 'bottom'，决定插入到目标的上方还是下方
+
+function onQueueDragStart(i, event) {
+  const item = taskQueue.value[i];
+  if (!item || item.status === 'running') {
+    // 正在跑的项不能被拖走（包括冒泡到子元素时）
+    event.preventDefault();
+    return;
+  }
+  dragIndex.value = i;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    // Firefox 必须 setData 才会触发后续 drop
+    event.dataTransfer.setData('text/plain', String(i));
   }
 }
-function canMoveQueueItem(i, dir) {
-  const j = i + dir;
-  if (j < 0 || j >= taskQueue.value.length) return false;
-  const a = taskQueue.value[i];
-  const b = taskQueue.value[j];
-  if (!a || !b) return false;
-  return a.status !== 'running' && b.status !== 'running';
+
+function onQueueDragOver(i, event) {
+  if (dragIndex.value < 0) return;
+  event.preventDefault(); // 阻止默认才能触发 drop
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+  const rect = event.currentTarget.getBoundingClientRect();
+  const mid = rect.top + rect.height / 2;
+  dragOverIndex.value = i;
+  // 光标在上半 → 插到目标上方；下半 → 插到目标下方
+  dragPosition.value = event.clientY < mid ? 'top' : 'bottom';
 }
+
+function onQueueDragLeave(i) {
+  // 只有当真是离开当前高亮项才清掉，避免子元素触发的 leave 把指示器擦掉
+  if (dragOverIndex.value === i) {
+    dragOverIndex.value = -1;
+    dragPosition.value = null;
+  }
+}
+
+function onQueueDrop(i) {
+  if (dragIndex.value < 0) return;
+  const from = dragIndex.value;
+  let to = i;
+  if (dragPosition.value === 'bottom') to += 1;
+  if (to > from) to -= 1; // 同一列表内 splice 之后位置回退 1
+  reorderQueueItem(from, to);
+  resetQueueDragState();
+}
+
+function onQueueDragEnd() {
+  // 拖到非 drop 区域（取消）也要清掉视觉状态
+  resetQueueDragState();
+}
+
+function resetQueueDragState() {
+  dragIndex.value = -1;
+  dragOverIndex.value = -1;
+  dragPosition.value = null;
+}
+
+function reorderQueueItem(from, to) {
+  if (from === to) return;
+  if (from < 0 || from >= taskQueue.value.length) return;
+  if (to < 0 || to >= taskQueue.value.length) return;
+  const arr = taskQueue.value;
+  const [item] = arr.splice(from, 1);
+  arr.splice(to, 0, item);
+  if (queueRunning.value && queueIndex.value >= 0) {
+    if (from === queueIndex.value) {
+      // 正在跑的就是被拖的那一项：跟随它到新位置
+      queueIndex.value = to;
+    } else if (from < queueIndex.value && to >= queueIndex.value) {
+      // 跑的那项在 from 之后、移到 from 之前 → 索引前移
+      queueIndex.value -= 1;
+    } else if (from > queueIndex.value && to <= queueIndex.value) {
+      // 跑的那项在 from 之前、移到 from 之后 → 索引后移
+      queueIndex.value += 1;
+    }
+  }
+}
+
 function clearQueue() {
   if (queueRunning.value) {
     taskQueue.value = taskQueue.value.filter(item => item.status === 'running');
@@ -1551,8 +1945,16 @@ async function runQueue() {
           failCount += 1;
         } else if (item.failureReports?.length) {
           item.status = 'warning';
-          const failedPageCount = item.failureReports.reduce((sum, report) => sum + report.list.length, 0);
-          item.error = `${failedPageCount} 页等待重试`;
+          const pageCount = item.failureReports
+            .filter(r => (r.kind || 'pages') !== 'ids')
+            .reduce((sum, report) => sum + report.list.length, 0);
+          const idCount = item.failureReports
+            .filter(r => r.kind === 'ids')
+            .reduce((sum, report) => sum + report.list.length, 0);
+          const parts = [];
+          if (pageCount) parts.push(`${pageCount} 页`);
+          if (idCount) parts.push(`${idCount} 张图片`);
+          item.error = `${parts.join(' + ') || '若干项'}等待重试`;
           warningCount += 1;
         } else {
           item.status = 'done';
@@ -1580,11 +1982,14 @@ async function runQueue() {
   }
 }
 
-async function stopQueue() {
-  if (!queueRunning.value) return;
-  queueAbort.value = true;
-  queueSkipItemId.value = null;
-  showToast('正在停止队列...', 'info');
+// 控制行「停止」按钮统一走这里：单任务时只停任务，队列中时同时停整个队列。
+// 原来队列面板里有一个重复的「停止」按钮，行为是这个的子集，已删。
+async function stopTaskOrQueue() {
+  if (queueRunning.value) {
+    queueAbort.value = true;
+    queueSkipItemId.value = null;
+    showToast('正在停止队列...', 'info');
+  }
   if (task.value.isRunning) await stopTask();
 }
 
@@ -1707,6 +2112,9 @@ function applyRefreshUpdate(target, u) {
     target.characterTokens = u.characters;
   }
   if (u.tags) target.tags = { ...(target.tags || {}), ...u.tags };
+  // 刷新可能补回/更新 rating（旧图之前没有），同步到用于筛选/徽章的 item.rating
+  const newRating = ratingFromTags({ tags: u.tags || (u.rating ? { rating: u.rating } : {}) });
+  if (newRating) target.rating = newRating;
 }
 
 // ---------------- 刷新指定范围页的热度 ----------------
@@ -1919,6 +2327,21 @@ function onDocClickForTranslateMenu(e) {
     translateMenu.value.open = false;
   }
 }
+
+// 「显示 ▾」下拉菜单：把纯显示偏好（排序/格式筛选/卡片大小/缩略图分辨率/每页张数/
+// 高分/看图刷新）收进一个入口，避免工具栏一排 ~11 个控件在常规窗口宽度下参差换行。
+// 这些都绑定 gallery.*，已有 habits watcher 持久化，菜单只是换个容器展示同样的 v-model。
+const displayMenu = ref({ open: false });
+function toggleDisplayMenu() {
+  displayMenu.value.open = !displayMenu.value.open;
+}
+function onDocClickForDisplayMenu(e) {
+  if (!displayMenu.value.open) return;
+  const dropdown = document.querySelector('.display-dropdown');
+  if (dropdown && !dropdown.contains(e.target)) {
+    displayMenu.value.open = false;
+  }
+}
 function onDocClickForPagePicker(e) {
   if (!pagePicker.value.open) return;
   const host = document.querySelector('.pg-picker-host');
@@ -1946,14 +2369,29 @@ async function refreshSinglePost(item) {
   } catch (_) { /* 静默失败 */ }
 }
 
-const hostsModal = ref({ open: false });
+const tutorialsModal = ref({ open: false });
 
-function openHostsHint() {
-  hostsModal.value.open = true;
+function openTutorials() {
+  tutorialsModal.value.open = true;
 }
 
 async function openHostsFolder() {
   await window.desktopAPI.external.open('file:///C:/Windows/System32/drivers/etc/');
+}
+
+async function openFfmpegTutorial() {
+  // 知乎 ffmpeg 安装教程；在系统默认浏览器打开
+  await window.desktopAPI.external.open('https://zhuanlan.zhihu.com/p/662421567');
+}
+
+async function copyHostsSnippet() {
+  const text = safeMode ? '104.26.11.39 safebooru.donmai.us' : '104.26.11.39 danbooru.donmai.us';
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('已复制 hosts 内容', 'success');
+  } catch (e) {
+    showToast('复制失败：' + (e.message || e), 'error');
+  }
 }
 
 // ---------------- 角色增量翻译 ----------------
@@ -1986,6 +2424,301 @@ const translateDetail = ref({
     translated_description_zh: '',
   },
 });
+
+// ---------------- Tag 浏览：像 Danbooru 原网页一样按 tag 预览缩略图，勾选后下载 ----------------
+// 只拉 posts.json 元数据（/api/browse_tags），缩略图 <img> 直连 preview_file_url（直连模式）
+// 或经 /api/proxy_thumb 转发（走代理模式）。下载复用 download_ids 走 /api/start。
+const browse = ref({
+  open: false,
+  source: 'tags',      // 'tags' = 按 tag 查询；'collected' = 查看「仅收集ID」结果的在线预览
+  query: '',           // 不再记忆上次搜索：每次打开都是空的
+  page: 1,
+  limit: 40,
+  loading: false,
+  posts: [],            // [{id, preview_file_url, ...}]
+  selected: new Set(),  // 选中的 post id 字符串
+  hasMore: false,
+  error: '',
+  targetDate: '',       // 空 = 今天
+  minScore: 0,          // 客户端筛选：最低分
+  sortBy: 'default',    // 当前页排序：default(收集/搜索顺序) | score
+  downloading: false,
+  collectedIds: [],     // collected 模式：当前日期收集到的全部 ID（按页切片后再拉预览）
+  collectedDate: '',    // collected 模式：正在查看哪个日期的收集结果
+});
+
+// 缩略图 URL：统一走后端 /api/proxy_thumb（落盘缓存 + 防盗链转发）。
+// 直连模式下浏览器 <img> 直接连 Danbooru CDN 会被防盗链挡掉，所以两种模式都走代理最稳。
+function browseThumbUrl(post) {
+  const raw = post.preview_file_url || post.large_file_url || post.file_url || '';
+  if (!raw) return '';
+  return `http://127.0.0.1:8000/api/proxy_thumb?url=${encodeURIComponent(raw)}`;
+}
+
+// rating 首字母：Danbooru 返回 g/s/q/e，g(general) 归入 s 档
+function ratingBucket(post) {
+  const r = (post.rating || '').toLowerCase();
+  if (r === 'e') return 'e';
+  if (r === 'q') return 'q';
+  return 's'; // s / g / 空
+}
+
+// 从本地图片条目的 tags.rating 归档成 s/q/e；无 rating 信息时返回 ''（区别于 s）
+function ratingFromTags(item) {
+  const r = ((item?.tags?.rating) || '').toLowerCase();
+  if (!r) return '';
+  if (r === 'e') return 'e';
+  if (r === 'q') return 'q';
+  return 's'; // s / g
+}
+
+const browseFiltered = computed(() => {
+  const b = browse.value;
+  const minScore = Number(b.minScore) || 0;
+  let list = minScore > 0 ? b.posts.filter(p => (Number(p.score) || 0) >= minScore) : b.posts;
+  if (b.sortBy === 'score') {
+    list = [...list].sort((a, b2) => (Number(b2.score) || 0) - (Number(a.score) || 0));
+  }
+  return list;
+});
+
+// 在默认浏览器打开 Danbooru 原帖（跟随 SFW 开关走 safebooru / danbooru）
+function browsePostUrl(post) {
+  const host = safeMode.value ? 'safebooru.donmai.us' : 'danbooru.donmai.us';
+  return `https://${host}/posts/${post.id}`;
+}
+async function openBrowsePost(post) {
+  if (!post?.id) return;
+  await window.desktopAPI.external.open(browsePostUrl(post));
+}
+
+// 刷新当前页的 score：重拉当前页（id: / tag 查询返回的就是最新数值），保留已勾选
+function refreshBrowsePage() {
+  if (browse.value.loading) return;
+  if (browse.value.source === 'collected') {
+    loadCollectedPage(browse.value.page, true);
+  } else {
+    runBrowseSearch(browse.value.page, true);
+  }
+}
+
+const browseSelectedCount = computed(() => browse.value.selected.size);
+
+function openBrowse() {
+  browse.value.source = 'tags';
+  browse.value.open = true;
+  if (!browse.value.targetDate) browse.value.targetDate = todayString();
+  // 不再记忆上次搜索：每次打开都清空，等用户主动输入
+  browse.value.query = '';
+  browse.value.posts = [];
+  browse.value.error = '';
+  browse.value.page = 1;
+  browse.value.selected = new Set();
+}
+
+// 打开「查看收集ID」的在线预览：复用同一个 browse 弹窗，source 切到 collected
+function openCollectedBrowse() {
+  browse.value.source = 'collected';
+  browse.value.open = true;
+  browse.value.posts = [];
+  browse.value.error = '';
+  browse.value.page = 1;
+  browse.value.selected = new Set();
+  browse.value.collectedIds = [];
+  // 默认看今天收集的；targetDate 也指向它，下载时落到同一天
+  const d = todayString();
+  browse.value.collectedDate = d;
+  browse.value.targetDate = d;
+  loadCollectedIds(d, 1);
+}
+
+function closeBrowse() {
+  browse.value.open = false;
+}
+
+// collected 模式：先拉某日期收集到的全部 ID，再切片拉第 page 页的在线预览
+async function loadCollectedIds(date, page = 1) {
+  browse.value.loading = true;
+  browse.value.error = '';
+  browse.value.collectedDate = date || todayString();
+  browse.value.targetDate = browse.value.collectedDate;
+  try {
+    const res = await fetch(`http://127.0.0.1:8000/api/collected_ids?date=${encodeURIComponent(browse.value.collectedDate)}`);
+    const data = await res.json();
+    if (!data.ok) {
+      browse.value.collectedIds = [];
+      browse.value.posts = [];
+      browse.value.error = data.msg || '读取收集ID失败';
+      showToast(browse.value.error, 'error');
+      return;
+    }
+    browse.value.collectedIds = data.ids || [];
+    if (!browse.value.collectedIds.length) {
+      browse.value.posts = [];
+      browse.value.page = 1;
+      browse.value.hasMore = false;
+      browse.value.error = `${browse.value.collectedDate} 还没有收集到 ID（先用「仅收集ID」模式跑一次）`;
+      return;
+    }
+    await loadCollectedPage(page);
+  } catch (e) {
+    browse.value.error = '请求失败：' + (e.message || e);
+    showToast(browse.value.error, 'error');
+  } finally {
+    browse.value.loading = false;
+  }
+}
+
+// collected 模式翻页：把收集到的 ID 按 limit 切片，用 id:1,2,3 语法批量拉预览元数据
+// keepSelection=true 时不清空已勾选（用于「刷新」当前页）
+async function loadCollectedPage(page = 1, keepSelection = false) {
+  const ids = browse.value.collectedIds;
+  const limit = browse.value.limit;
+  const total = ids.length;
+  const maxPage = Math.max(1, Math.ceil(total / limit));
+  const p = Math.min(Math.max(1, page), maxPage);
+  const slice = ids.slice((p - 1) * limit, p * limit);
+  if (!slice.length) {
+    browse.value.posts = [];
+    browse.value.hasMore = false;
+    return;
+  }
+  browse.value.loading = true;
+  browse.value.error = '';
+  try {
+    // Danbooru 支持 id:1,2,3 语法一次拉多个 post
+    const q = 'id:' + slice.join(',');
+    const url = `http://127.0.0.1:8000/api/browse_tags?tags=${encodeURIComponent(q)}&page=1&limit=${limit}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) {
+      browse.value.posts = [];
+      browse.value.error = data.msg || '获取预览失败';
+      showToast(browse.value.error, 'error');
+      return;
+    }
+    // 按收集顺序排列（Danbooru 可能不按 id: 里的顺序返回）
+    const byId = new Map((data.posts || []).map(pp => [String(pp.id), pp]));
+    browse.value.posts = slice.map(id => byId.get(String(id))).filter(Boolean);
+    browse.value.page = p;
+    browse.value.hasMore = p < maxPage;
+    if (!keepSelection) browse.value.selected = new Set();
+    if (!browse.value.posts.length) {
+      browse.value.error = '这一页的 ID 都取不到预览（可能已被删除或需登录）';
+    }
+  } catch (e) {
+    browse.value.error = '请求失败：' + (e.message || e);
+    showToast(browse.value.error, 'error');
+  } finally {
+    browse.value.loading = false;
+  }
+}
+
+async function runBrowseSearch(page = 1, keepSelection = false) {
+  const q = (browse.value.query || '').trim();
+  if (!q) {
+    showToast('请填写 tag 查询串（例如：hatsune_miku rating:safe）', 'error');
+    return;
+  }
+  browse.value.loading = true;
+  browse.value.error = '';
+  try {
+    const url = `http://127.0.0.1:8000/api/browse_tags?tags=${encodeURIComponent(q)}&page=${page}&limit=${browse.value.limit}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) {
+      browse.value.posts = [];
+      browse.value.error = data.msg || '获取失败';
+      showToast(browse.value.error, 'error');
+      return;
+    }
+    browse.value.posts = data.posts || [];
+    browse.value.page = data.page || page;
+    browse.value.hasMore = !!data.has_more;
+    if (!keepSelection) browse.value.selected = new Set(); // 换页/换搜索清空选择
+    if (!browse.value.posts.length) {
+      browse.value.error = '没有结果（tag 可能无效，或该页已到末尾）';
+    }
+  } catch (e) {
+    browse.value.error = '请求失败：' + (e.message || e);
+    showToast(browse.value.error, 'error');
+  } finally {
+    browse.value.loading = false;
+  }
+}
+
+function browseGoPage(delta) {
+  const next = browse.value.page + delta;
+  if (next < 1) return;
+  if (browse.value.source === 'collected') {
+    loadCollectedPage(next);
+  } else {
+    runBrowseSearch(next);
+  }
+}
+
+function toggleBrowseSelect(post) {
+  const s = new Set(browse.value.selected);
+  if (s.has(post.id)) s.delete(post.id);
+  else s.add(post.id);
+  browse.value.selected = s;
+}
+
+function browseSelectAllVisible() {
+  const s = new Set(browse.value.selected);
+  for (const p of browseFiltered.value) s.add(p.id);
+  browse.value.selected = s;
+}
+
+function browseClearSelection() {
+  browse.value.selected = new Set();
+}
+
+async function downloadBrowseSelected() {
+  const ids = Array.from(browse.value.selected);
+  if (!ids.length) {
+    showToast('请先勾选要下载的图片', 'info');
+    return;
+  }
+  if (queueRunning.value) {
+    showToast('顺序队列运行中，请先停止队列再下载', 'info');
+    return;
+  }
+  if (task.value.isRunning || task.value.isStopping) {
+    showToast('已有抓图任务在跑（同一时刻只能一个），请等它结束再下载', 'info');
+    return;
+  }
+  const targetDate = browse.value.targetDate || todayString();
+  browse.value.downloading = true;
+  try {
+    // 复用 download_ids：把选中 id 塞进 /api/start，后端下载到 hot_pic/<date>/ 并入库
+    const payload = {
+      start_page: 1,
+      end_page: 1,
+      tags: '',
+      mode: 'download_ids',
+      target_date: targetDate,
+      ids,
+    };
+    const result = await window.desktopAPI.crawler.start(payload);
+    if (result?.ok === false) {
+      showToast(result.msg || '启动下载失败', 'error');
+      return;
+    }
+    showToast(`已提交 ${ids.length} 张到 ${targetDate} 下载`, 'success');
+    appendLog(`[Tag浏览] 已提交 ${ids.length} 个 ID 下载到 ${targetDate}`);
+    browse.value.selected = new Set();
+    // 让日期切到下载目标，方便下载完在右侧图库看到
+    if (gallery.value.selectedDate !== targetDate) {
+      gallery.value.selectedDate = targetDate;
+    }
+    await syncStatus();
+  } catch (e) {
+    showToast('下载失败：' + (e.message || e), 'error');
+  } finally {
+    browse.value.downloading = false;
+  }
+}
 
 const filteredUntranslated = computed(() => {
   const keyword = translationModal.value.search.trim().toLowerCase();
@@ -2046,20 +2779,73 @@ async function openCharacterDictionary(rawTag = '') {
   translationModal.value.targetTag = tag;
   // 去掉皮肤/作品括号后搜索，可一次看到同名角色和多皮肤条目。
   translationModal.value.search = tag ? tag.replace(/_\([^)]*\)/g, '').replace(/_+$/, '') : '';
-  if (viewer.value.open) closeViewer();
+  // 不要关 viewer：translationModal 跟 viewer 都用 .viewer-overlay，z-index 同为 10000，
+  // 但 modal 在模板里后渲染，会自然盖在 viewer 上面。保存后用户关掉 modal 就能直接看到
+  // 翻译刷新过的 chip，不必再点一次缩略图重开。
   await searchCharacterDictionary();
 }
 
+// 角色 chip 右键弹出的迷你菜单：编辑词条 / 复制
+// 旧版本直接打开字典弹窗，缺点是用户看不到 rawTag，搜索或复制原名要去翻字典。
+// 现在固定弹一个 2 项菜单，菜单上仅显示 rawTag（英文原 tag），让用户认得当前是哪个。
+const charContextMenu = ref({ open: false, x: 0, y: 0, rawTag: '' });
+
 function onCharacterContextMenu(event, item, index) {
+  // 调试：先确认 handler 有没有真的跑到
+  console.debug('[char-ctx] onCharacterContextMenu fired', { hasItem: !!item, index, hasTags: !!item?.tags, hasTagsChar: !!item?.tags?.tag_string_character });
   event.preventDefault();
   event.stopPropagation();
   const rawTag = rawCharacterTag(item, index);
   if (!rawTag) {
+    console.debug('[char-ctx] rawTag empty, will toast');
     showToast('找不到该角色对应的原始 tag', 'warning');
     return;
   }
-  openCharacterDictionary(rawTag);
+  // 视口边界兜底：菜单宽约 180 / 高约 96，预留边距 8px
+  const MENU_W = 180, MENU_H = 96, MARGIN = 8;
+  let x = event.clientX;
+  let y = event.clientY;
+  if (x + MENU_W + MARGIN > window.innerWidth) x = window.innerWidth - MENU_W - MARGIN;
+  if (y + MENU_H + MARGIN > window.innerHeight) y = window.innerHeight - MENU_H - MARGIN;
+  if (x < MARGIN) x = MARGIN;
+  if (y < MARGIN) y = MARGIN;
+  charContextMenu.value = { open: true, x, y, rawTag };
+  console.debug('[char-ctx] menu opened', { x, y, rawTag });
 }
+
+function closeCharContextMenu() {
+  if (charContextMenu.value.open) charContextMenu.value.open = false;
+}
+
+function charMenuEditDictionary() {
+  const tag = charContextMenu.value.rawTag;
+  closeCharContextMenu();
+  if (tag) openCharacterDictionary(tag);
+}
+
+async function charMenuCopyRawTag() {
+  const tag = charContextMenu.value.rawTag;
+  closeCharContextMenu();
+  if (!tag) return;
+  try {
+    await navigator.clipboard.writeText(tag);
+    showToast(`原名已复制：${tag}`, 'success');
+  } catch (e) {
+    showToast(`复制失败：${e.message}`, 'error');
+  }
+}
+
+// 任意点击 / 滚动 / Esc 都关菜单；只挂一次，组件卸载自动解绑
+function onCharMenuDismiss(event) {
+  // 调试：看看到底什么时候会被叫、target 是什么
+  console.debug('[char-ctx] dismiss fired', { type: event?.type, open: charContextMenu.value.open, target: event?.target?.tagName, targetClass: event?.target?.className });
+  if (!charContextMenu.value.open) return;
+  // 点击发生在菜单内部时由菜单 stopPropagation，这里再判一次：点菜单里按钮不关（按钮自己会关）
+  if (event?.target && typeof event.target.closest === 'function' && event.target.closest('.char-ctx-menu')) return;
+  closeCharContextMenu();
+  console.debug('[char-ctx] menu closed by dismiss');
+}
+function onCharMenuKey(event) { if (event.key === 'Escape') closeCharContextMenu(); }
 
 function closeTranslationModal() {
   translationModal.value.open = false;
@@ -2591,10 +3377,8 @@ function onTranslationFileSelected(event) {
 }
 
 async function openViewer(item) {
-  const items = filteredLocalImages.value;
-  const index = items.findIndex(candidate => (candidate.localPath || candidate.filename) === (item.localPath || item.filename));
   viewer.value.open = true;
-  viewer.value.index = Math.max(0, index);
+  viewer.value.key = itemKey(item);   // 用稳定唯一键锁定，而非索引
   viewer.value.zoom = 1;
   viewer.value.imageUrl = '';
 
@@ -2676,7 +3460,12 @@ async function copyViewerImage() {
   }
   const result = await window.desktopAPI.caption.copyImage(imagePath, 2000);
   if (result?.ok) {
-    showToast(`已复制图片 ${result.width}×${result.height}（上限 2000px）`, 'success');
+    if (result.isGif) {
+      const kb = Math.round((result.bytes || 0) / 1024);
+      showToast(`已复制完整 GIF ${result.width}×${result.height}（${kb}KB，保留多帧动画）`, 'success');
+    } else {
+      showToast(`已复制图片 ${result.width}×${result.height}（上限 2000px）`, 'success');
+    }
   } else {
     showToast(`复制失败：${result?.error || '不支持的图片格式'}`, 'error');
   }
@@ -2710,9 +3499,11 @@ function getLogIcon(line) {
 
 async function stepViewer(offset) {
   if (!viewerItems.value.length) return;
-  const next = Math.min(Math.max(0, viewer.value.index + offset), viewerItems.value.length - 1);
-  if (next === viewer.value.index) return;
-  viewer.value.index = next;
+  const cur = viewerIndex.value;
+  if (cur < 0) return;
+  const next = Math.min(Math.max(0, cur + offset), viewerItems.value.length - 1);
+  if (next === cur) return;
+  viewer.value.key = itemKey(viewerItems.value[next]);
   await syncViewerImage();
   if (gallery.value.refreshOnView) refreshSinglePost(viewerItem.value);
 }
@@ -2783,13 +3574,22 @@ async function onViewerJump(event) {
   const n = parseInt(event.target.value, 10);
   if (Number.isNaN(n)) return;
   const idx = Math.max(0, Math.min(viewerItems.value.length - 1, n - 1));
-  if (idx === viewer.value.index) return;
-  viewer.value.index = idx;
+  if (idx === viewerIndex.value) return;
+  viewer.value.key = itemKey(viewerItems.value[idx]);
   await syncViewerImage();
 }
 
 watch(() => gallery.value.search, () => { gallery.value.page = 1; });
+// 分级筛选多选：点按钮在数组里增删该分级；空数组 = 显示全部
+function toggleRatingFilter(rating) {
+  const arr = gallery.value.filterRatings;
+  const idx = arr.indexOf(rating);
+  if (idx >= 0) arr.splice(idx, 1);
+  else arr.push(rating);
+}
+
 watch(() => gallery.value.filterFormat, () => { gallery.value.page = 1; });
+watch(() => gallery.value.filterRatings, () => { gallery.value.page = 1; }, { deep: true });
 watch(() => gallery.value.sortBy, (newSort) => {
   gallery.value.page = 1;
   if (newSort === 'score' || newSort === 'fav') {
@@ -2810,7 +3610,7 @@ watch(pagedLocalImages, async items => {
 
 // 切换缩略图分辨率：清掉已生成的 thumbUrl，按新尺寸重建当前页（其余页翻到时惰性重建）
 watch(() => gallery.value.thumbSize, () => {
-  gallery.value.images.forEach(it => { it.thumbUrl = ''; });
+  gallery.value.images.forEach(it => { it.thumbUrl = ''; it.loaded = false; });
   hydrateThumbs(pagedLocalImages.value);
 });
 
@@ -2829,7 +3629,15 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeyDown);
   document.addEventListener('click', onDocClickForRefreshMenu);
   document.addEventListener('click', onDocClickForTranslateMenu);
+  document.addEventListener('click', onDocClickForDisplayMenu);
   document.addEventListener('click', onDocClickForPagePicker);
+  // 角色 chip 右键菜单的全局 dismiss 监听
+  console.debug('[char-ctx] register dismiss listeners');
+  document.addEventListener('mousedown', onCharMenuDismiss, true);
+  document.addEventListener('scroll', onCharMenuDismiss, true);
+  window.addEventListener('blur', onCharMenuDismiss);
+  window.addEventListener('resize', onCharMenuDismiss);
+  window.addEventListener('keydown', onCharMenuKey);
 });
 
 onBeforeUnmount(() => {
@@ -2838,9 +3646,16 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown);
   document.removeEventListener('click', onDocClickForRefreshMenu);
   document.removeEventListener('click', onDocClickForTranslateMenu);
+  document.removeEventListener('click', onDocClickForDisplayMenu);
   document.removeEventListener('click', onDocClickForPagePicker);
   window.removeEventListener('resize', positionPagePicker);
   window.removeEventListener('scroll', positionPagePicker, true);
+  // 角色 chip 右键菜单清理
+  document.removeEventListener('mousedown', onCharMenuDismiss, true);
+  document.removeEventListener('scroll', onCharMenuDismiss, true);
+  window.removeEventListener('blur', onCharMenuDismiss);
+  window.removeEventListener('resize', onCharMenuDismiss);
+  window.removeEventListener('keydown', onCharMenuKey);
 });
 
 const modeDescription = computed(() => {
@@ -2880,19 +3695,29 @@ const tagFolderPreview = computed(() => {
           <p class="inline-note">{{ modeDescription }}</p>
         </div>
         <div class="crawler-head-actions">
-          <button class="ghost hosts-btn" @click="openHostsHint" title="无法连接 Danbooru / Safebooru 时，按此教程改 hosts">🛠 Hosts</button>
+          <button class="ghost hosts-btn" @click="openTutorials" title="教程：修改 hosts 直连 Danbooru / 安装 ffmpeg（用于 zip→gif）">教程</button>
           <button
             class="ghost safe-mode-btn"
             :class="{ 'is-safe': safeMode, 'is-unsafe': !safeMode }"
             @click="toggleSafeMode"
             :title="safeMode ? '当前走 safebooru.donmai.us（无 R-18）。点击切换为完整 danbooru' : '当前走 danbooru.donmai.us（含 NSFW）。点击切回 SFW'"
-          >{{ safeMode ? '🛡 SFW' : '🌶 全部内容' }}</button>
+          >{{ safeMode ? 'SFW' : '全部内容' }}</button>
           <button
             class="ghost proxy-mode-btn"
             :class="{ 'is-proxy': useProxy, 'is-direct': !useProxy }"
             @click="toggleProxy"
             :title="useProxy ? '当前走代理下载。关掉代理软件后请点这里切到「直连」，否则下载会连不上死代理端口' : '当前直连下载（不走代理）。开了代理软件可点这里切回「走代理」'"
           >{{ useProxy ? '走代理' : '直连' }}</button>
+          <button
+            class="ghost"
+            @click="openBrowse"
+            title="按 tag 像 Danbooru 原网页一样预览缩略图，勾选后下载到指定日期"
+          >Tag 浏览</button>
+          <button
+            class="ghost"
+            @click="openCollectedBrowse"
+            title="查看「仅收集ID」模式收集到的 ID 的在线预览图，勾选后下载"
+          >查看收集ID</button>
           <button
             class="ghost gallery-toggle-btn"
             @click="showGalleryPanel = !showGalleryPanel"
@@ -3040,21 +3865,26 @@ const tagFolderPreview = computed(() => {
       </label>
 
       <div class="button-row">
-        <button @click="addCurrentToQueue" title="把当前配置追加到顺序队列">加入队列</button>
+        <button class="tq-add-btn" @click="addCurrentToQueue" title="把当前配置追加到顺序队列">入队</button>
         <button class="secondary" @click="pauseTask" :disabled="!task.isRunning || task.isPaused">暂停</button>
         <button class="secondary" @click="resumeTask" :disabled="!task.isRunning || !task.isPaused">继续</button>
-        <button v-if="!queueRunning" class="ghost" @click="stopTask" :disabled="!task.isRunning">停止当前任务</button>
+        <button class="ghost" @click="stopTaskOrQueue" :disabled="!task.isRunning" :title="queueRunning ? '结束当前任务并停止整个顺序队列' : '结束当前任务'">停止</button>
       </div>
 
-      <!-- 失败页横幅：自动重试后仍失败的页，一键定向重跑，无需翻日志 -->
+      <!-- 失败横幅：页级=页面抓取失败重跑整页；图级=图片下载失败按 id 重跑，一键定向重试 -->
       <div v-if="failedPages.list.length" class="failed-pages-banner">
         <span class="fpb-text">
-          ⚠ 有 {{ failedPages.list.length }} 页抓取失败（已自动重试）：第 {{ failedPages.list.map(p => p.page).join(', ') }} 页
+          <template v-if="failedPages.kind === 'ids'">
+            ⚠ 有 {{ failedPages.list.length }} 张图片下载失败（已自动重试）：ID {{ failedPages.list.slice(0, 20).map(p => p.id).join(', ') }}{{ failedPages.list.length > 20 ? ' …' : '' }}
+          </template>
+          <template v-else>
+            ⚠ 有 {{ failedPages.list.length }} 页抓取失败（已自动重试）：第 {{ failedPages.list.map(p => p.page).join(', ') }} 页
+          </template>
           <small v-if="queuedFailureReports.length"> · 另有 {{ queuedFailureReports.length }} 份待处理报告</small>
         </span>
         <div class="fpb-actions">
           <button class="fpb-retry" @click="retryFailedPages" :disabled="failedPages.retrying || task.isRunning || task.isStopping">
-            {{ failedPages.retrying ? '重试中…' : (task.isRunning || task.isStopping ? '任务结束后可重试' : '重试这些页') }}
+            {{ failedPages.retrying ? '重试中…' : (task.isRunning || task.isStopping ? '任务结束后可重试' : (failedPages.kind === 'ids' ? '重试这些图片' : '重试这些页')) }}
           </button>
           <button class="fpb-dismiss" @click="dismissFailedPages" title="忽略这份报告，且不再重复弹出">✕</button>
         </div>
@@ -3071,33 +3901,41 @@ const tagFolderPreview = computed(() => {
         </div>
 
         <div v-show="queuePanelOpen">
-        <div v-if="taskQueue.length" class="tq-list">
+        <TransitionGroup v-if="taskQueue.length" name="tq" tag="div" class="tq-list">
           <div
             v-for="(it, i) in taskQueue"
             :key="it.id"
             class="tq-item"
-            :class="[it.status, { current: queueRunning && i === queueIndex }]"
+            :class="[it.status, {
+              current: queueRunning && i === queueIndex,
+              'just-added': it.id === justAddedId,
+              'tq-dragging': dragIndex === i,
+              'tq-drop-above': dragOverIndex === i && dragPosition === 'top' && dragIndex !== i,
+              'tq-drop-below': dragOverIndex === i && dragPosition === 'bottom' && dragIndex !== i
+            }]"
             :title="it.error || queueItemLabel(it)"
+            :draggable="it.status !== 'running'"
+            @dragstart="onQueueDragStart(i, $event)"
+            @dragover="onQueueDragOver(i, $event)"
+            @dragleave="onQueueDragLeave(i)"
+            @drop="onQueueDrop(i)"
+            @dragend="onQueueDragEnd"
           >
             <span class="tq-item-status">{{ queueStatusIcon(it) }}</span>
-            <span class="tq-item-idx">{{ i + 1 }}</span>
             <span class="tq-item-label">{{ it.label }}</span>
             <span class="tq-item-ops">
-              <button class="tq-mini" @click="moveQueueItem(i, -1)" :disabled="!canMoveQueueItem(i, -1)" title="上移">↑</button>
-              <button class="tq-mini" @click="moveQueueItem(i, 1)" :disabled="!canMoveQueueItem(i, 1)" title="下移">↓</button>
               <button class="tq-mini tq-del" @click="removeQueueItem(i)" :disabled="it.status === 'running'" title="移除">×</button>
             </span>
           </div>
-        </div>
+        </TransitionGroup>
         <div v-else class="tq-empty">
           上方“加入队列”会把当前配置追加到这里，任务按列表顺序依次执行。
         </div>
 
         <div v-if="taskQueue.length" class="tq-actions">
-          <button class="tq-run" @click="runQueue" :disabled="queueRunning || task.isRunning || task.isStopping || !pendingQueueCount" title="按顺序依次执行队列里的待执行任务">运行待执行（{{ pendingQueueCount }}）</button>
-          <button class="secondary" @click="skipCurrentQueueItem" :disabled="!queueRunning || queueIndex < 0 || !task.isRunning || task.isStopping || queueSkipItemId !== null" title="结束当前任务，但保留队列并继续下一项">跳过当前</button>
-          <button class="ghost" @click="stopQueue" :disabled="!queueRunning" title="结束当前任务并停止整个顺序队列">停止队列</button>
-          <button class="ghost" @click="clearQueue" :disabled="queueRunning && taskQueue.every(item => item.status === 'running')">{{ queueRunning ? '清除未运行' : '清空' }}</button>
+          <button class="tq-run" @click="runQueue" :disabled="queueRunning || task.isRunning || task.isStopping || !pendingQueueCount" :title="`按顺序依次执行队列里的待执行任务（${pendingQueueCount} 项）`">运行</button>
+          <button class="secondary" @click="skipCurrentQueueItem" :disabled="!queueRunning || queueIndex < 0 || !task.isRunning || task.isStopping || queueSkipItemId !== null" title="结束当前任务，但保留队列并继续下一项">跳过</button>
+          <button class="ghost" @click="clearQueue" :disabled="queueRunning && taskQueue.every(item => item.status === 'running')" :title="queueRunning ? '清除尚未执行的项（不影响正在跑的任务）' : '清空整个队列'">清除</button>
         </div>
         </div>
         <!-- /v-show queuePanelOpen -->
@@ -3186,7 +4024,18 @@ const tagFolderPreview = computed(() => {
     <section v-if="showGalleryPanel" class="panel card gallery-panel">
       <div class="gallery-head">
         <div class="gallery-title-row">
-          <h2>{{ gallery.selectedDate || '本地图库' }}</h2>
+          <!-- 统一选择器：日期日历 + tag 文件夹列表（搜索 + 最近使用置顶）。
+               提到第 1 行：触发按钮本身已显示当前日期，替代原 H2，省掉单独一行。
+               内部根据 selectedDate 是否以 'tag_' 开头决定默认 tab -->
+          <GalleryCalendar
+            class="title-row-calendar"
+            :available-dates="gallery.availableDates"
+            :date-folders="gallery.availableDateFolders"
+            :available-tags="gallery.availableTags"
+            :selected-date="gallery.selectedDate"
+            :today="gallery.today"
+            @select="loadGallery"
+          />
           <span class="gallery-stats-inline">
             共 {{ galleryStats.total }} 张<span v-if="galleryStats.filtered !== galleryStats.total"> · 已筛选 {{ galleryStats.filtered }} 张</span><span v-if="galleryStats.avg > 0"> · 平均 ★ {{ galleryStats.avg }} · 中位 ★ {{ galleryStats.median }}</span>
           </span>
@@ -3199,48 +4048,114 @@ const tagFolderPreview = computed(() => {
             title="重新读取当前日期目录，显示下载任务刚写入的新图片，并保留当前页"
           >{{ loadingGallery ? '刷新中…' : '↻ 刷新图库' }}</button>
           <button
+            class="secondary tool-btn"
+            @click="convertAllZipsToGif"
+            :disabled="!gallery.selectedDate || loadingGallery || convertingZips"
+            title="用 ffmpeg 把当前日期文件夹里的所有 .zip 动画批量转成 .gif（已存在 .gif 的会自动跳过），完成后自动刷新图库"
+            style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;"
+          >{{ convertingZips ? '转 GIF 中…' : '批量转 GIF' }}</button>
+          <button
+            class="secondary tool-btn"
+            @click="clearThumbCache"
+            :disabled="clearingThumbCache"
+            title="清空 .thumb_cache 和 .browse_thumb_cache：清掉旧的 MD5 残骸、ffmpeg 失败留下的 0 字节缩略图，或单纯想腾空间。已生成的 mp4/gif 首帧 JPEG 会全部重新生成"
+          >{{ clearingThumbCache ? '清缓存中…' : '清缩略图缓存' }}</button>
+          <button
             class="secondary tool-btn select-mode-btn"
             :class="{ active: selection.enabled }"
             @click="setSelectionEnabled(!selection.enabled)"
             :title="selection.enabled ? '退出选择模式（已选记录会保留）' : '进入选择模式：可勾选多张图片分享；也可按 Ctrl+点击图片快速选择'"
           >{{ selection.enabled ? `✓ 选择中 (${selection.ids.size})` : (selection.ids.size ? `☐ 选择模式 (${selection.ids.size})` : '☐ 选择模式') }}</button>
-          <select v-model="gallery.sortBy" class="search-input gallery-sort-select" style="width: auto;" title="排序方式">
-            <option value="default">默认抓取顺序</option>
-            <option value="score">按 score 排序</option>
-            <option value="fav">按收藏数排序</option>
-          </select>
           <button
             v-if="gallery.sortBy === 'score' || gallery.sortBy === 'fav'"
             class="secondary tool-btn"
             @click="rebuildSortSnapshot"
             title="按当前最新 score / 收藏数 重新排序（默认锁定排序，避免点开卡片刷新热度时位置乱跳）"
           >🔃 排序</button>
-          <select v-model="gallery.filterFormat" class="search-input" style="width: auto;">
-            <option value="all">全部格式</option>
-            <option value="image">图片</option>
-            <option value="video">视频</option>
-            <option value="zip">动图ZIP</option>
-            <option value="favorited">仅收藏画师/角色</option>
-            <option value="captioned">仅已生成 Caption</option>
-            <option value="not_captioned">仅未生成 Caption</option>
-          </select>
-          <select v-model.number="gallery.cardSize" class="search-input" style="width: auto;" title="卡片大小">
-            <option :value="120">紧凑</option>
-            <option :value="150">小</option>
-            <option :value="180">默认</option>
-            <option :value="220">大</option>
-          </select>
-          <select v-model.number="gallery.thumbSize" class="search-input" style="width: auto;" title="缩略图分辨率：越低越省内存、翻页越流畅；点开看大图仍是原图">
-            <option :value="240">省流</option>
-            <option :value="360">标准</option>
-            <option :value="540">高清</option>
-            <option :value="0">原图</option>
-          </select>
-          <button
-            :class="['hot-toggle', { active: gallery.hotOnly }]"
-            @click="gallery.hotOnly = !gallery.hotOnly"
-            :title="`只看 score ≥ ${gallery.hotThreshold}`"
-          >高分</button>
+          <div class="display-dropdown">
+            <button
+              class="secondary tool-btn"
+              :class="{ 'menu-open': displayMenu.open }"
+              @click.stop="toggleDisplayMenu"
+              title="显示设置：排序 / 筛选 / 卡片大小 / 缩略图 / 每页张数 / 高分 / 看图刷新"
+            >显示 ▾</button>
+            <div v-if="displayMenu.open" class="display-menu" @click.stop>
+              <div class="display-menu-row" title="排序方式">
+                <span class="display-menu-label">排序</span>
+                <div class="seg-group">
+                  <button type="button" class="seg-btn" :class="{ active: gallery.sortBy === 'default' }" @click="gallery.sortBy = 'default'">默认</button>
+                  <button type="button" class="seg-btn" :class="{ active: gallery.sortBy === 'score' }" @click="gallery.sortBy = 'score'">Score</button>
+                  <button type="button" class="seg-btn" :class="{ active: gallery.sortBy === 'fav' }" @click="gallery.sortBy = 'fav'">收藏数</button>
+                </div>
+              </div>
+              <label class="display-menu-row" title="按格式 / 收藏 / Caption 筛选">
+                <span class="display-menu-label">筛选</span>
+                <select v-model="gallery.filterFormat" class="display-menu-control">
+                  <option value="all">全部格式</option>
+                  <option value="image">图片</option>
+                  <option value="video">视频</option>
+                  <option value="zip">动图ZIP</option>
+                  <option value="favorited">仅收藏画师/角色</option>
+                  <option value="captioned">仅已生成 Caption</option>
+                  <option value="not_captioned">仅未生成 Caption</option>
+                </select>
+              </label>
+              <div class="display-menu-row" title="按 Danbooru 分级筛选（可多选）。S 安全含 general / Q 存疑 / E 限制。全部不选 = 显示全部。旧图需先刷新热度补全分级">
+                <span class="display-menu-label">分级</span>
+                <div class="seg-group">
+                  <button type="button" class="seg-btn" :class="{ active: gallery.filterRatings.includes('s') }" @click="toggleRatingFilter('s')">S · 安全</button>
+                  <button type="button" class="seg-btn" :class="{ active: gallery.filterRatings.includes('q') }" @click="toggleRatingFilter('q')">Q · 存疑</button>
+                  <button type="button" class="seg-btn" :class="{ active: gallery.filterRatings.includes('e') }" @click="toggleRatingFilter('e')">E · 限制</button>
+                </div>
+              </div>
+              <label class="display-menu-row" title="卡片大小">
+                <span class="display-menu-label">卡片大小</span>
+                <select v-model.number="gallery.cardSize" class="display-menu-control">
+                  <option :value="120">紧凑</option>
+                  <option :value="150">小</option>
+                  <option :value="180">默认</option>
+                  <option :value="220">大</option>
+                </select>
+              </label>
+              <label class="display-menu-row" title="缩略图分辨率：越低越省内存、翻页越流畅；点开看大图仍是原图">
+                <span class="display-menu-label">缩略图</span>
+                <select v-model.number="gallery.thumbSize" class="display-menu-control">
+                  <option :value="240">省流</option>
+                  <option :value="360">标准</option>
+                  <option :value="540">高清</option>
+                  <option :value="0">原图</option>
+                </select>
+              </label>
+              <label class="display-menu-row" title="每页显示张数（大屏可调高，默认 15）。过高会一次渲染很多卡片，翻页变卡">
+                <span class="display-menu-label">每页张数</span>
+                <input
+                  type="number" min="1" max="120" step="1"
+                  class="display-menu-control page-size-input"
+                  :value="gallery.pageSize"
+                  @change="onPageSizeInput"
+                  @keyup.enter="onPageSizeInput"
+                />
+              </label>
+              <button
+                class="display-menu-row display-menu-toggle"
+                :class="{ active: gallery.hotOnly }"
+                @click="gallery.hotOnly = !gallery.hotOnly"
+                :title="`只看 score ≥ ${gallery.hotThreshold}`"
+              >
+                <span class="display-menu-label">只看高分</span>
+                <span class="display-menu-state">{{ gallery.hotOnly ? '开' : '关' }}</span>
+              </button>
+              <button
+                class="display-menu-row display-menu-toggle"
+                :class="{ active: gallery.refreshOnView }"
+                @click="gallery.refreshOnView = !gallery.refreshOnView"
+                title="开启后，点开 / 切换大图会联网刷新该图 score / 收藏数；离线时建议保持关闭"
+              >
+                <span class="display-menu-label">看图刷新热度</span>
+                <span class="display-menu-state">{{ gallery.refreshOnView ? '开' : '关' }}</span>
+              </button>
+            </div>
+          </div>
           <div class="refresh-dropdown">
             <button
               :class="['refresh-btn', { active: refresh.isRunning, 'menu-open': refreshMenu.open }]"
@@ -3308,25 +4223,13 @@ const tagFolderPreview = computed(() => {
               </button>
             </div>
           </div>
-          <button
-            :class="['hot-toggle', { active: gallery.refreshOnView }]"
-            @click="gallery.refreshOnView = !gallery.refreshOnView"
-            title="开启后，点开 / 切换大图会联网刷新该图 score / 收藏数；离线时建议保持关闭"
-          >{{ gallery.refreshOnView ? '刷新：开' : '刷新：关' }}</button>
           <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
         </div>
       </div>
 
       <!-- 统一选择器：日期日历 + tag 文件夹列表（搜索 + 最近使用置顶），
            内部根据 selectedDate 是否以 'tag_' 开头决定默认 tab -->
-      <GalleryCalendar
-        :available-dates="gallery.availableDates"
-        :date-folders="gallery.availableDateFolders"
-        :available-tags="gallery.availableTags"
-        :selected-date="gallery.selectedDate"
-        :today="gallery.today"
-        @select="loadGallery"
-      />
+      <!-- 旧位置：第 3 行；现已在第 1 行 .gallery-title-row 顶部和 H2 合并，省一行。 -->
 
       <div v-if="selection.enabled" class="selection-bar inline-bar">
         <span class="selection-count">已选 <strong>{{ selection.ids.size }}</strong> 张</span>
@@ -3357,19 +4260,30 @@ const tagFolderPreview = computed(() => {
       </div>
       <div v-else-if="activeItems.length" class="gallery-grid" :class="{ 'is-switching': loadingGallery }" :style="`--card-min-w: ${gallery.cardSize}px`" :aria-busy="loadingGallery">
         <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item), 'has-caption': hasCaption(item) }">
-          <div class="thumb-wrap">
-            <video
-              v-if="isVideoItem(item)"
-              class="thumb clickable-thumb video-card-thumb"
-              :src="videoCardUrl(item)"
-              muted
-              playsinline
-              preload="metadata"
-              @loadedmetadata="prepareVideoThumbnail"
+          <div class="thumb-wrap" :class="{ 'is-broken': item.thumbBroken }">
+            <img
+              class="thumb clickable-thumb"
+              :class="{ 'is-loaded': item.loaded }"
+              :src="item.thumbUrl"
+              :alt="item.filename"
+              loading="lazy"
+              decoding="async"
+              @load="onThumbLoad(item)"
+              @error="onThumbError(item)"
               @click="onThumbClick($event, item)"
-            ></video>
-            <img v-else class="thumb clickable-thumb" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @click="onThumbClick($event, item)" />
-            <span v-if="isVideoItem(item)" class="video-format-watermark">{{ itemExtension(item).toUpperCase() }}</span>
+            />
+            <div v-if="!item.loaded" class="thumb-skeleton" aria-hidden="true"></div>
+            <span
+              v-if="isAnimatedCard(item)"
+              class="video-format-watermark"
+              :class="`format-${cardFormatLabel(item)}`"
+              :aria-label="cardFormatLabel(item).toUpperCase()"
+            >
+              <svg v-if="isVideoItem(item)" class="format-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M8 5v14l11-7z"/>
+              </svg>
+              <span v-else class="format-text">GIF</span>
+            </span>
             <button
               v-if="selection.enabled"
               class="img-select-toggle"
@@ -3378,6 +4292,7 @@ const tagFolderPreview = computed(() => {
               :title="isItemSelected(item) ? '取消选择' : '加入选择'"
             >{{ isItemSelected(item) ? '✓' : '' }}</button>
             <span v-if="hasCaption(item)" class="caption-badge" title="已生成 Caption，点击查看/编辑">📝</span>
+            <span v-if="item.rating" class="rating-badge" :class="`rating-${item.rating}`" :title="`Danbooru 分级：${item.rating.toUpperCase()}`">{{ item.rating.toUpperCase() }}</span>
           </div>
           <button
             class="img-fav-toggle"
@@ -3393,7 +4308,7 @@ const tagFolderPreview = computed(() => {
             <button class="secondary" @click="openOriginal(item)" :disabled="!item.postUrl" title="打开 Danbooru 原帖">原帖</button>
             <button class="secondary" @click="openLocal(item)" :disabled="!item.localPath" title="打开本地文件">本地</button>
             <button @click="editItem(item)" title="编辑打码">编辑</button>
-            <button v-if="item.filename?.toLowerCase().endsWith('.zip')" class="secondary" @click="convertGif(item)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;" title="ZIP 动画转 GIF">转GIF</button>
+            <button v-if="item.filename?.toLowerCase().endsWith('.zip') && !item.hasGifCompanion" class="secondary" @click="convertGif(item)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;" title="ZIP 动画转 GIF">转GIF</button>
           </div>
         </article>
       </div>
@@ -3457,6 +4372,23 @@ const tagFolderPreview = computed(() => {
         </span>
       </div>
     </section>
+
+    <!-- 角色 chip 右键弹出的迷你菜单：编辑词条 / 复制
+         Teleport 到 body 避免被 viewer overlay / translate modal 的 z-index 遮住。
+         mousedown / scroll / Esc / blur / resize 都已在 onMounted 里 dismiss。 -->
+    <Teleport to="body">
+      <div
+        v-if="charContextMenu.open"
+        class="char-ctx-menu"
+        :style="{ left: charContextMenu.x + 'px', top: charContextMenu.y + 'px' }"
+        @click.stop
+        @contextmenu.prevent
+      >
+        <div class="char-ctx-raw" :title="charContextMenu.rawTag">{{ charContextMenu.rawTag }}</div>
+        <button class="char-ctx-item" @click="charMenuEditDictionary">编辑词条</button>
+        <button class="char-ctx-item" @click="charMenuCopyRawTag">复制</button>
+      </div>
+    </Teleport>
 
     <div v-if="selectionListOpen" class="viewer-overlay" @click.self="selectionListOpen = false" style="z-index: 10000; display: flex; justify-content: center; align-items: center; padding: 24px;">
       <div class="selection-list-card">
@@ -3582,7 +4514,7 @@ const tagFolderPreview = computed(() => {
                 :class="{ 'is-favorited-chip': favoritedCharacterSet.has(token) }"
                 @click="applySearch(token); closeViewer();"
                 @contextmenu="onCharacterContextMenu($event, viewerItem, charIndex)"
-                :title="`左键搜索同角色作品；右键编辑角色字典：${token}`"
+                :title="`左键搜索同角色；右键弹出菜单（编辑词条 / 复制）：${token}`"
               >{{ token.includes(' [') ? token.split(' [')[0] : token }}</button>
               <button
                 class="meta-link author-fav-btn viewer-fav-star"
@@ -3593,8 +4525,8 @@ const tagFolderPreview = computed(() => {
           </div>
         </div>
         <div class="button-row compact viewer-actions">
-          <button class="secondary" @click="stepViewer(-1)" :disabled="viewer.index <= 0">上一张</button>
-          <button class="secondary" @click="stepViewer(1)" :disabled="viewer.index >= viewerItems.length - 1">下一张</button>
+          <button class="secondary" @click="stepViewer(-1)" :disabled="viewerIndex <= 0">上一张</button>
+          <button class="secondary" @click="stepViewer(1)" :disabled="viewerIndex >= viewerItems.length - 1">下一张</button>
           <button
             class="viewer-fav-btn"
             :class="{ active: viewerItem && isImageFavorited(viewerItem) }"
@@ -3602,7 +4534,7 @@ const tagFolderPreview = computed(() => {
             :disabled="!viewerItem"
             :title="viewerItem && isImageFavorited(viewerItem) ? '取消图片收藏' : '加入图片收藏'"
           >{{ viewerItem && isImageFavorited(viewerItem) ? '♥ 已收藏' : '♡ 收藏' }}</button>
-          <button v-if="viewerItem?.filename?.toLowerCase().endsWith('.zip')" class="secondary" @click="convertGif(viewerItem)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
+          <button v-if="viewerItem?.filename?.toLowerCase().endsWith('.zip') && !viewerItem?.hasGifCompanion" class="secondary" @click="convertGif(viewerItem)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
           <button class="secondary" @click="copyViewerImage" :disabled="!viewerItem?.localPath" title="复制图片到剪贴板，最长边不超过 2000px（Ctrl+C）">复制图片</button>
           <button
             @click="viewerItem && emit('caption-image', viewerItem)"
@@ -3626,7 +4558,7 @@ const tagFolderPreview = computed(() => {
             type="number"
             min="1"
             :max="viewerItems.length"
-            :value="viewer.index + 1"
+            :value="viewerIndex + 1"
             @keyup.enter="onViewerJump($event)"
             @change="onViewerJump($event)"
             title="输入并回车跳转到指定张数"
@@ -3650,7 +4582,7 @@ const tagFolderPreview = computed(() => {
 
       <!-- 左右切换箭头：默认半透明，悬浮变明显；在边界自动隐藏 -->
       <button
-        v-show="viewer.index > 0"
+        v-show="viewerIndex > 0"
         class="viewer-nav-arrow viewer-nav-prev"
         @click.stop="stepViewer(-1)"
         title="上一张 (←)"
@@ -3661,7 +4593,7 @@ const tagFolderPreview = computed(() => {
         </svg>
       </button>
       <button
-        v-show="viewer.index < viewerItems.length - 1"
+        v-show="viewerIndex < viewerItems.length - 1"
         class="viewer-nav-arrow viewer-nav-next"
         @click.stop="stepViewer(1)"
         title="下一张 (→)"
@@ -3677,36 +4609,194 @@ const tagFolderPreview = computed(() => {
           <video
             v-if="viewer.imageUrl && viewerIsVideo"
             class="viewer-image"
+            :class="{ 'is-loaded': viewerImageLoaded }"
             :src="viewer.imageUrl"
             controls
             autoplay
             preload="metadata"
+            @loadeddata="viewerImageLoaded = true"
           />
           <img
             v-else-if="viewer.imageUrl"
             class="viewer-image"
+            :class="{ 'is-loaded': viewerImageLoaded }"
             :src="viewer.imageUrl"
             :alt="viewerItem?.filename || 'preview'"
+            @load="viewerImageLoaded = true"
           />
         </div>
       </div>
     </div>
 
-    <div v-if="toast.show" class="toast-overlay" :class="toast.type">
-      {{ toast.msg }}
+    <div class="toast-stack" aria-live="polite">
+      <div
+        v-for="t in toasts"
+        :key="t.id"
+        class="toast-overlay"
+        :class="t.type"
+      >
+        <span class="toast-msg">{{ t.msg }}</span>
+        <button class="toast-close" type="button" @click="dismissToast(t.id)" aria-label="关闭提示">×</button>
+      </div>
     </div>
 
-    <!-- Hosts Modal -->
-    <div v-if="hostsModal.open" class="viewer-overlay" @click.self="hostsModal.open = false" style="z-index: 10000; display: flex; justify-content: center; align-items: center;">
-      <div class="card panel" style="width: 480px; max-width: 90vw; background: rgba(255, 255, 255, 0.95); box-shadow: 0 20px 50px rgba(0,0,0,0.3); display: flex; flex-direction: column; gap: 14px;">
-        <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">修复连接问题 (修改 Hosts)</h3>
-        <p style="margin: 0; font-size: 13px;">请在记事本中打开以下路径的文件：</p>
-        <code style="background: rgba(0,0,0,0.05); padding: 6px 10px; border-radius: 6px; font-size: 12px; user-select: all;">C:\Windows\System32\drivers\etc\hosts</code>
-        <p style="margin: 0; font-size: 13px;">并在文件最末尾添加以下内容（可直接全选复制）：</p>
-        <textarea readonly style="width: 100%; height: 60px; font-family: Consolas, monospace; font-size: 13px; resize: none; background: rgba(0,0,0,0.03); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 10px; outline: none; cursor: text;" onfocus="this.select()">{{ safeMode ? '104.26.11.39 safebooru.donmai.us' : '104.26.11.39 danbooru.donmai.us' }}</textarea>
-        <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
-          <button @click="openHostsFolder" class="secondary">打开目录</button>
-          <button @click="hostsModal.open = false" style="min-width: 80px;">确定</button>
+    <!-- 教程 Modal -->
+    <div v-if="tutorialsModal.open" class="viewer-overlay" @click.self="tutorialsModal.open = false" style="z-index: 10000; display: flex; justify-content: center; align-items: center;">
+      <div class="card panel" style="width: 540px; max-width: 92vw; background: rgba(255, 255, 255, 0.96); box-shadow: 0 20px 50px rgba(0,0,0,0.3); display: flex; flex-direction: column; gap: 16px; padding: 22px 24px;">
+        <div style="display: flex; align-items: center; justify-content: space-between;">
+          <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">教程 / Tutorials</h3>
+          <button class="ghost" @click="tutorialsModal.open = false" style="min-width: 36px;">×</button>
+        </div>
+
+        <div class="tutorial-card">
+          <div class="tutorial-card-head">
+            <span class="tutorial-card-index">1</span>
+            <div>
+              <div class="tutorial-card-title">修改 hosts · 让 Danbooru 可直连</div>
+              <div class="tutorial-card-desc">当 Danbooru / Safebooru 走默认 DNS 解析失败时，把下列 IP 写进 hosts 即可直连。</div>
+            </div>
+          </div>
+          <ol class="tutorial-steps">
+            <li>用记事本（管理员）打开：<code>C:\Windows\System32\drivers\etc\hosts</code></li>
+            <li>在文件末尾添加下面这一行（按你当前模式选一条）：</li>
+          </ol>
+          <textarea readonly style="width: 100%; height: 56px; font-family: Consolas, monospace; font-size: 13px; resize: none; background: rgba(0,0,0,0.04); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 10px; outline: none; cursor: text;" onfocus="this.select()">{{ safeMode ? '104.26.11.39 safebooru.donmai.us' : '104.26.11.39 danbooru.donmai.us' }}</textarea>
+          <div style="display: flex; gap: 10px; margin-top: 10px; justify-content: flex-end;">
+            <button class="secondary" @click="openHostsFolder">打开 hosts 所在目录</button>
+            <button @click="copyHostsSnippet">复制 hosts 内容</button>
+          </div>
+        </div>
+
+        <div class="tutorial-card">
+          <div class="tutorial-card-head">
+            <span class="tutorial-card-index">2</span>
+            <div>
+              <div class="tutorial-card-title">安装 ffmpeg · 让 zip 动画能转 GIF、MP4 缩略图能取首帧</div>
+              <div class="tutorial-card-desc">没装 ffmpeg 时，"批量转 GIF" 按钮和 MP4 卡片缩略图会失效。点下面按钮看知乎图文教程。</div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 10px; margin-top: 8px; justify-content: flex-end;">
+            <a
+              href="https://zhuanlan.zhihu.com/p/662421567"
+              target="_blank"
+              rel="noopener"
+              class="tutorial-link-btn"
+              @click.prevent="openFfmpegTutorial"
+            >打开知乎 ffmpeg 教程 →</a>
+          </div>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
+          <button @click="tutorialsModal.open = false" style="min-width: 80px;">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tag Browse Overlay: 按 tag 预览缩略图，勾选后下载 -->
+    <div v-if="browse.open" class="viewer-overlay browse-overlay" @click.self="closeBrowse">
+      <div class="browse-card">
+        <div class="browse-head">
+          <div class="browse-head-title">
+            <h3>{{ browse.source === 'collected' ? '查看收集ID' : 'Tag 浏览' }}</h3>
+            <span class="muted compact-text">
+              {{ browse.source === 'collected'
+                ? `${browse.collectedDate} · 收集 ${browse.collectedIds.length} 个 ID`
+                : '缩略图经后端缓存转发' }} · {{ safeMode ? 'SFW' : '全部内容' }}
+            </span>
+          </div>
+          <button class="ghost" @click="closeBrowse" style="color: var(--muted);">×</button>
+        </div>
+
+        <div class="browse-searchbar">
+          <template v-if="browse.source === 'collected'">
+            <span class="muted compact-text" style="align-self: center;">查看日期</span>
+            <TaskDatePicker :model-value="browse.collectedDate" @update:model-value="d => loadCollectedIds(d, 1)" placeholder="默认今天" />
+            <button class="secondary" :disabled="browse.loading" @click="loadCollectedIds(browse.collectedDate, 1)">
+              {{ browse.loading ? '加载中…' : '刷新' }}
+            </button>
+          </template>
+          <template v-else>
+            <input
+              v-model="browse.query"
+              class="search-input"
+              type="text"
+              placeholder="tag 查询串，例如：hatsune_miku rating:safe -comic"
+              @keyup.enter="runBrowseSearch(1)"
+            />
+          <button class="secondary" :disabled="browse.loading" @click="runBrowseSearch(1)">
+            {{ browse.loading ? '搜索中…' : '搜索' }}
+          </button>
+          </template>
+        </div>
+
+        <div class="browse-filters">
+          <label class="browse-filter-item">
+            最低分
+            <input v-model.number="browse.minScore" type="number" min="0" class="browse-score-input" />
+          </label>
+          <label class="browse-filter-item">
+            排序
+            <select v-model="browse.sortBy" class="browse-score-input" style="width: auto;">
+              <option value="default">默认顺序</option>
+              <option value="score">按 score</option>
+            </select>
+          </label>
+          <button class="ghost" :disabled="browse.loading || !browseFiltered.length" @click="refreshBrowsePage" title="重新拉取当前页，更新 score（保留已勾选）">刷新分数</button>
+          <span class="browse-filter-spacer"></span>
+          <button class="ghost" @click="browseSelectAllVisible">全选当前</button>
+          <button class="ghost" @click="browseClearSelection">清空选择</button>
+        </div>
+
+        <div class="browse-grid-wrap">
+          <div v-if="browse.loading" class="gallery-empty" style="min-height: 200px;">正在获取…</div>
+          <div v-else-if="browse.error" class="gallery-empty" style="min-height: 200px;">{{ browse.error }}</div>
+          <div v-else-if="!browseFiltered.length" class="gallery-empty" style="min-height: 200px;">
+            没有符合筛选条件的结果
+          </div>
+          <div v-else class="browse-grid">
+            <div
+              v-for="post in browseFiltered"
+              :key="post.id"
+              class="browse-cell"
+              :class="{ selected: browse.selected.has(post.id) }"
+              @click="toggleBrowseSelect(post)"
+            >
+              <img
+                :src="browseThumbUrl(post)"
+                class="browse-thumb"
+                loading="lazy"
+                referrerpolicy="no-referrer"
+                :alt="post.id"
+              />
+              <div class="browse-cell-check" :class="{ on: browse.selected.has(post.id) }">✓</div>
+              <button class="browse-open-post" @click.stop="openBrowsePost(post)" title="在浏览器打开 Danbooru 原帖">↗</button>
+              <div class="browse-cell-meta">
+                <span class="browse-badge" :class="`rating-${ratingBucket(post)}`">{{ (post.rating || '?').toUpperCase() }}</span>
+                <span class="browse-badge">▲{{ post.score }}</span>
+                <span class="browse-badge" v-if="post.image_width">{{ post.image_width }}×{{ post.image_height }}</span>
+                <span class="browse-badge browse-ext">{{ (post.file_ext || '').toUpperCase() }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="browse-foot">
+          <div class="browse-foot-left">
+            <button class="ghost" :disabled="browse.page <= 1 || browse.loading" @click="browseGoPage(-1)">‹ 上一页</button>
+            <span class="browse-page-label">第 {{ browse.page }} 页</span>
+            <button class="ghost" :disabled="!browse.hasMore || browse.loading" @click="browseGoPage(1)">下一页 ›</button>
+          </div>
+          <div class="browse-foot-right">
+            <span class="muted compact-text">下载到</span>
+            <TaskDatePicker v-model="browse.targetDate" placeholder="默认今天" />
+            <button
+              class="browse-download-btn"
+              :disabled="!browseSelectedCount || browse.downloading"
+              @click="downloadBrowseSelected"
+            >
+              {{ browse.downloading ? '提交中…' : `下载选中 (${browseSelectedCount})` }}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -4025,14 +5115,19 @@ const tagFolderPreview = computed(() => {
   grid-template-columns: 300px minmax(0, 1fr);
 }
 .crawler-layout.gallery-hidden {
-  grid-template-columns: minmax(270px, 360px);
+  /* 隐藏图库后只剩左栏一列。用 justify-content: center 把这一列在整行里居中，
+     两侧留白对称，看起来像刻意留白而不是「右边空荡荡」；同时把列宽收在
+     合理区间，避免独占整行时被拉得过宽。 */
+  grid-template-columns: minmax(320px, 440px);
+  justify-content: center;
 }
 @media (max-width: 1400px) {
   .crawler-layout {
     grid-template-columns: 270px minmax(0, 1fr);
   }
   .crawler-layout.gallery-hidden {
-    grid-template-columns: minmax(270px, 340px);
+    grid-template-columns: minmax(300px, 420px);
+    justify-content: center;
   }
 }
 
@@ -4040,6 +5135,18 @@ const tagFolderPreview = computed(() => {
   font-size: 12px;
   padding: 4px 9px;
   white-space: nowrap;
+  /* 与 safe-mode / proxy 按钮统一成胶囊外形，颜色保持中性一致（不随显示/隐藏切换换色，
+     只在 hover 时轻微加深），避免这颗按钮在头部按钮行里显得格格不入 */
+  border-radius: 999px;
+  font-weight: 600;
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--accent-deep);
+  transition: background 0.18s, border-color 0.18s;
+}
+.gallery-toggle-btn:hover:not(:disabled) {
+  background: rgba(var(--accent-rgb), 0.2);
+  border-color: rgba(var(--accent-rgb), 0.45);
 }
 .control-panel .compact-head {
   flex-direction: column;
@@ -4065,6 +5172,80 @@ const tagFolderPreview = computed(() => {
 }
 .crawler-head-actions .hosts-btn {
   color: #ff9800;
+}
+
+/* 教程弹窗里的卡片 */
+.tutorial-card {
+  border: 1px solid rgba(30, 41, 82, 0.16);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: rgba(255, 252, 246, 0.7);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tutorial-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+.tutorial-card-index {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+  font-weight: 800;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  margin-top: 2px;
+}
+.tutorial-card-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+  line-height: 1.4;
+}
+.tutorial-card-desc {
+  font-size: 12px;
+  color: var(--muted, #846a55);
+  margin-top: 2px;
+  line-height: 1.5;
+}
+.tutorial-steps {
+  margin: 4px 0 0;
+  padding-left: 22px;
+  font-size: 12px;
+  color: var(--ink);
+  line-height: 1.7;
+}
+.tutorial-steps code {
+  background: rgba(0, 0, 0, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: Consolas, monospace;
+  font-size: 11.5px;
+}
+.tutorial-link-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, #10b981, #059669);
+  color: #fff;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+.tutorial-link-btn:hover {
+  filter: brightness(1.08);
 }
 
 .mode-selector {
@@ -4132,8 +5313,7 @@ const tagFolderPreview = computed(() => {
    右栏 gallery-title-row 是 flex 容器（flex item 的 margin 不 collapse），
    两种容器对 h2 margin 的处理不同会导致一边比另一边低 20px。
    都归零最稳定。 */
-.control-panel .panel-head h2,
-.gallery-title-row h2 {
+.control-panel .panel-head h2 {
   margin: 0;
 }
 .gallery-panel .gallery-grid {
@@ -4159,6 +5339,17 @@ const tagFolderPreview = computed(() => {
 .image-card {
   contain-intrinsic-size: 200px 220px;
   align-self: start;
+  transition: box-shadow 0.14s ease, border-color 0.14s ease, filter 0.14s ease;
+}
+/* 卡片悬停效果对齐按钮：不做上浮位移，只用亮度 + 阴影 + 边框的轻微变化 */
+.image-card:hover {
+  transform: none;
+  filter: brightness(0.97);
+  border-color: rgba(var(--accent-rgb), 0.28);
+  box-shadow: 0 6px 16px rgba(30, 41, 82, 0.10);
+}
+.image-card:active {
+  filter: brightness(0.94);
 }
 
 /* 卡片最小宽度由 gallery.cardSize 通过 inline --card-min-w 注入，
@@ -4209,35 +5400,73 @@ const tagFolderPreview = computed(() => {
 }
 .video-format-watermark {
   position: absolute;
-  right: 7px;
-  bottom: 7px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   z-index: 4;
-  padding: 3px 7px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.62);
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  color: rgba(255, 255, 255, 0.92);
-  font-size: 10px;
-  font-weight: 800;
-  letter-spacing: 0.08em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 54px;
+  min-height: 36px;
+  padding: 6px 12px;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  color: #fff;
   pointer-events: none;
-  backdrop-filter: blur(3px);
+  backdrop-filter: blur(4px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+}
+.video-format-watermark .format-icon {
+  width: 22px;
+  height: 22px;
+  color: #fff;
+}
+.video-format-watermark .format-text {
+  font-size: 15px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  line-height: 1;
+  color: #fff;
 }
 
 /* gallery-head 改成两行竖排：
-   第 1 行 = 标题行（日期 h2 在左，统计文本贴右上角）
+   第 1 行 = 标题行（日历触发按钮在左，统计文本贴右上角）
+            —— 日历的 trigger 本身就显示当前日期，替代了原来的 h2，省一行
    第 2 行 = 工具栏（所有筛选/排序/刷新/搜索/翻译） */
 .gallery-head {
   flex-direction: column;
   align-items: stretch;
-  gap: 8px;
+  gap: 5px;
 }
 .gallery-title-row {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+/* 日历提到 title-row 内部：原 .calendar / .calendar-toolbar 各自的 margin-bottom
+   是为外置布局（toolbar 下方有日历格子 / 列表）准备的，放进 flex 行后会撑高行高，
+   这里清掉。位置由父 flex 控制，自身不需要再贡献外边距。 */
+.gallery-title-row .calendar { margin-bottom: 0; }
+.gallery-title-row .calendar-toolbar { margin-bottom: 0; gap: 6px; }
+/* 标题行里的日历：日期是这里的主元素，字号 / 高度比工具栏略大一档（12→13/14px、30→34px），
+   撑得起"主标题"的视觉重量。min-width 也加宽一档避免文字贴边。 */
+.title-row-calendar .small-btn,
+.title-row-calendar .today-btn,
+.title-row-calendar .calendar-trigger {
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 14px;
+  height: 34px;
+  min-width: 86px;
+}
+.title-row-calendar .calendar-trigger {
+  font-size: 14px;
+  font-weight: 700;
+  min-width: 184px;
 }
 /* 不要覆写 h2 margin！其他页（EditorPage/FavoritesPage）都用 h2 默认 margin。
    覆写成 margin:0 会让右栏 h2 比左栏 h2 高出约 20px（左栏 h2 有默认 margin-top），
@@ -4254,29 +5483,34 @@ const tagFolderPreview = computed(() => {
 .gallery-tools {
   gap: 6px;
   justify-content: flex-start;
-  font-size: 11.5px;
+  font-size: 12px;
+  align-items: center;
 }
 .gallery-tools select.search-input,
 .gallery-tools .search-input-with-clear,
 .gallery-tools .tool-btn,
 .gallery-tools .hot-toggle,
 .gallery-tools .refresh-btn {
-  font-size: 11.5px;
-  padding: 4px 8px;
-  height: 28px;
+  font-size: 12px;
+  padding: 5px 11px;
+  height: 30px;
+  line-height: 1;
   white-space: nowrap;
+  flex: 0 0 auto;
 }
 .gallery-tools .gallery-sort-select {
   font-weight: 600;
 }
 
-/* 搜索框默认紧凑 130，focus 拉宽以便看清完整输入 */
-.gallery-tools .search-input-wrap .search-input {
-  width: 130px;
-  transition: width 0.18s ease;
+/* 搜索框：静态宽度足够显示占位/输入，focus 再拉宽；可伸缩填充剩余空间 */
+.gallery-tools .search-input-wrap {
+  flex: 1 1 180px;
+  min-width: 150px;
+  max-width: 280px;
 }
-.gallery-tools .search-input-wrap .search-input:focus {
-  width: 180px;
+.gallery-tools .search-input-wrap .search-input {
+  width: 100%;
+  transition: none;
 }
 
 /* ---------------- 查看器顶部画师/角色 meta（从卡片挪过来的） ----------------
@@ -4347,6 +5581,57 @@ const tagFolderPreview = computed(() => {
   color: #fff;
   border-color: rgba(255, 188, 86, 0.7);
 }
+
+/* 角色 chip 右键迷你菜单：Teleport 到 body，position: fixed 走视口坐标
+   风格跟 .pg-picker-panel / .selection-list-card 一致（淡米黄卡片 + 圆角） */
+.char-ctx-menu {
+  position: fixed;
+  z-index: 10050;
+  min-width: 160px;
+  background: var(--panel, #fdf6e3);
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.12));
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.22), 0 2px 4px rgba(0, 0, 0, 0.08);
+  padding: 4px;
+  font-size: 13px;
+  user-select: none;
+  animation: char-ctx-pop 0.12s ease-out;
+}
+@keyframes char-ctx-pop {
+  from { opacity: 0; transform: translateY(-4px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.char-ctx-raw {
+  padding: 5px 10px 6px;
+  font-family: Consolas, monospace;
+  font-size: 11.5px;
+  color: var(--muted, #806a4a);
+  border-bottom: 1px solid var(--line, rgba(0, 0, 0, 0.08));
+  margin-bottom: 2px;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;  /* 截断保留尾部有意义部分 */
+  text-align: left;
+}
+.char-ctx-item {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  color: var(--ink, #2a1f10);
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: background 0.12s;
+}
+.char-ctx-item:hover {
+  background: rgba(var(--accent-rgb, 196 130 60), 0.14);
+}
+
 .viewer-counter-block {
   margin-left: auto;
   gap: 8px;
@@ -4802,7 +6087,7 @@ const tagFolderPreview = computed(() => {
   color: rgba(0, 0, 0, 0.8);
   outline: none;
 }
-.caption-tag-input:focus { border-color: rgba(99, 102, 241, 0.55); }
+.caption-tag-input:focus { border-color: rgba(99, 102, 241, 0.09); }
 .caption-hint {
   font-size: 11.5px;
   color: rgba(0, 0, 0, 0.55);
@@ -4903,6 +6188,26 @@ const tagFolderPreview = computed(() => {
   outline-offset: -2px;
 }
 
+/* Danbooru 分级角标：左下角，配色与 Tag 浏览的 rating 徽章一致 */
+.rating-badge {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 7px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+  z-index: 3;
+  user-select: none;
+}
+.rating-badge.rating-e { background: rgba(220, 50, 50, 0.9); }
+.rating-badge.rating-q { background: rgba(220, 150, 40, 0.9); }
+.rating-badge.rating-s { background: rgba(50, 160, 90, 0.9); }
+
 /* 模式切换（标记 / 输入） */
 .caption-mode-switch {
   display: inline-flex;
@@ -4974,7 +6279,7 @@ const tagFolderPreview = computed(() => {
   background: rgba(26, 20, 15, 0.96);
   border-radius: 16px;
   border: 1px solid rgba(0, 0, 0, 0.1);
-  box-shadow: 0 8px 32px rgba(87, 58, 25, 0.15);
+  box-shadow: 0 8px 32px rgba(30, 41, 82, 0.15);
   display: flex;
   flex-direction: column;
   /* 固定日志面板最大高度。之前 control-panel 解除了 max-height 后，
@@ -5279,27 +6584,57 @@ const tagFolderPreview = computed(() => {
   to { opacity: 1; transform: translateX(0); }
 }
 
-.toast-overlay {
+/* Toast 置顶：贴在程序最顶端，多条垂直堆叠，每条带 X 手动关。
+   旧版是单条 + 24px 顶距 + 3s 自动消失，新事件会盖掉旧事件，用户容易漏看。 */
+.toast-stack {
   position: fixed;
-  top: 24px;
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 12px 24px;
-  border-radius: 999px;
-  font-weight: 700;
-  font-size: 14px;
+  top: 0;
+  left: 0;
+  right: 0;
   z-index: 10000;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.15);
-  animation: fadeInDown 0.3s ease-out;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
   pointer-events: none;
 }
+.toast-overlay {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(720px, calc(100vw - 24px));
+  padding: 8px 14px;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.18);
+  animation: fadeInDown 0.25s ease-out;
+  pointer-events: auto;
+}
+.toast-overlay .toast-msg { flex: 1 1 auto; min-width: 0; }
+.toast-overlay .toast-close {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  color: inherit;
+  opacity: 0.65;
+  border-radius: 6px;
+}
+.toast-overlay .toast-close:hover { opacity: 1; background: rgba(0,0,0,0.06); }
 .toast-overlay.success { background: rgba(212, 237, 218, 0.95); color: #155724; border: 1px solid #c3e6cb; }
-.toast-overlay.error { background: rgba(248, 215, 218, 0.95); color: #721c24; border: 1px solid #f5c6cb; }
-.toast-overlay.info { background: rgba(209, 236, 241, 0.95); color: #0c5460; border: 1px solid #bee5eb; }
+.toast-overlay.error   { background: rgba(248, 215, 218, 0.95); color: #721c24; border: 1px solid #f5c6cb; }
+.toast-overlay.info    { background: rgba(209, 236, 241, 0.95); color: #0c5460; border: 1px solid #bee5eb; }
+.toast-overlay.warning { background: rgba(255, 243, 205, 0.95); color: #856404; border: 1px solid #ffeeba; }
 
 @keyframes fadeInDown {
-  from { opacity: 0; transform: translate(-50%, -15px); }
-  to { opacity: 1; transform: translate(-50%, 0); }
+  from { opacity: 0; transform: translateY(-12px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
 
 /* ---------------- 角色增量翻译弹窗 ---------------- */
@@ -5340,7 +6675,7 @@ const tagFolderPreview = computed(() => {
   width: 720px;
   max-width: 92vw;
   max-height: 86vh;
-  background: rgba(255, 250, 243, 0.98);
+  background: rgba(255, 255, 255, 0.98);
   border: 1px solid var(--line);
   border-radius: 18px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
@@ -5383,12 +6718,12 @@ const tagFolderPreview = computed(() => {
   align-items: center;
   gap: 10px;
   padding: 10px 14px;
-  border-bottom: 1px dashed rgba(74, 53, 25, 0.12);
+  border-bottom: 1px dashed rgba(30, 41, 82, 0.12);
   cursor: pointer;
   transition: background 0.15s ease;
 }
 .translation-row:hover {
-  background: rgba(243, 223, 212, 0.5);
+  background: rgba(99, 102, 241, 0.1);
 }
 .translation-row:last-child {
   border-bottom: none;
@@ -5438,7 +6773,7 @@ const tagFolderPreview = computed(() => {
 }
 .translation-detail-section-head {
   padding: 8px 12px;
-  background: rgba(243, 223, 212, 0.5);
+  background: rgba(99, 102, 241, 0.1);
   cursor: pointer;
   display: flex;
   justify-content: space-between;
@@ -5476,9 +6811,9 @@ const tagFolderPreview = computed(() => {
 }
 .translation-mode-body {
   padding: 10px 12px;
-  background: rgba(243, 223, 212, 0.25);
+  background: rgba(99, 102, 241, 0.25);
   border-radius: 12px;
-  border: 1px dashed rgba(74, 53, 25, 0.18);
+  border: 1px dashed rgba(30, 41, 82, 0.18);
 }
 .translation-paste {
   width: 100%;
@@ -5560,7 +6895,7 @@ const tagFolderPreview = computed(() => {
   padding: 2px 6px;
   font-size: 11px;
   color: #b46e16;
-  background: rgba(243, 223, 212, 0.45);
+  background: rgba(99, 102, 241, 0.45);
   border: 1px solid rgba(212, 143, 47, 0.35);
 }
 .author-fav-btn:hover {
@@ -5572,7 +6907,7 @@ const tagFolderPreview = computed(() => {
 .fav-add-modal {
   width: 440px;
   max-width: 92vw;
-  background: rgba(255, 250, 243, 0.98);
+  background: rgba(255, 255, 255, 0.98);
   border: 1px solid var(--line);
   border-radius: 18px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
@@ -5608,7 +6943,7 @@ const tagFolderPreview = computed(() => {
   font-size: 13px;
   color: var(--ink);
 }
-.fav-add-row:hover { background: rgba(243, 223, 212, 0.55); }
+.fav-add-row:hover { background: rgba(99, 102, 241, 0.09); }
 .fav-add-row input[type="checkbox"] { width: auto; margin: 0; }
 .fav-add-name { flex: 1; word-break: break-all; }
 .fav-add-count {
@@ -5643,6 +6978,127 @@ const tagFolderPreview = computed(() => {
   color: #fff;
 }
 
+/* ---------------- 「显示 ▾」下拉菜单（排序/筛选/卡片/缩略图/每页/高分/看图刷新） ---------------- */
+.display-dropdown {
+  position: relative;
+  display: inline-block;
+}
+.display-dropdown .tool-btn.menu-open {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+  border-color: transparent;
+}
+.display-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 200;
+  min-width: 300px;
+  padding: 6px;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  animation: refresh-menu-in 0.12s ease-out;
+}
+.display-menu-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  min-height: 34px;
+  padding: 5px 10px;
+  border-radius: 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+.display-menu-row:hover {
+  background: rgba(99, 102, 241, 0.09);
+}
+.display-menu-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.display-menu-control {
+  width: auto;
+  min-width: 108px;
+  height: 30px;
+  padding: 4px 8px;
+  font-size: 12.5px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.display-menu-control.page-size-input {
+  min-width: 0;
+  width: 72px;
+  text-align: center;
+}.display-menu-control.page-size-input::-webkit-outer-spin-button,
+.display-menu-control.page-size-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.display-menu-control.page-size-input[type="number"] {
+  -moz-appearance: textfield;
+}
+/* 开关行：整行是按钮，右侧「开/关」pill 反映状态 */
+.display-menu-toggle {
+  width: 100%;
+  font-family: inherit;
+}
+.display-menu-state {
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--surface-muted);
+}
+.display-menu-toggle.active {
+  background: rgba(255, 138, 61, 0.12);
+  border-color: rgba(224, 90, 23, 0.28);
+}
+.display-menu-toggle.active .display-menu-state {
+  color: #fff;
+  background: linear-gradient(135deg, #ff8a3d, #e05a17);
+}
+
+/* 分段按钮组：用于「排序」「分级」多按钮切换，替代原来的下拉框。
+   排序为单选（点哪个亮哪个）；分级为多选（可同时点亮 S/Q/E）。 */
+.seg-group {
+  display: inline-flex;
+  gap: 4px;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+}
+.seg-btn {
+  padding: 4px 8px;
+  height: 28px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--surface-muted);
+  border: 1px solid rgba(30, 41, 82, 0.1);
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.14s ease, color 0.14s ease, border-color 0.14s ease;
+}
+.seg-btn:hover {
+  border-color: rgba(var(--accent-rgb), 0.35);
+  color: var(--ink);
+}
+.seg-btn.active {
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  border-color: transparent;
+}
+
 /* ---------------- 翻译下拉菜单（合并「翻译角色」与「导入翻译字典」） ---------------- */
 .translate-dropdown {
   position: relative;
@@ -5659,7 +7115,7 @@ const tagFolderPreview = computed(() => {
   z-index: 200;
   min-width: 220px;
   padding: 4px;
-  background: rgba(255, 250, 243, 0.98);
+  background: rgba(255, 255, 255, 0.98);
   border: 1px solid var(--line);
   border-radius: 10px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
@@ -5686,7 +7142,7 @@ const tagFolderPreview = computed(() => {
   font-weight: 600;
 }
 .translate-menu-item:hover:not(:disabled) {
-  background: rgba(243, 223, 212, 0.6);
+  background: rgba(99, 102, 241, 0.1);
   color: var(--accent-deep);
 }
 .translate-menu-item:disabled {
@@ -5708,7 +7164,7 @@ const tagFolderPreview = computed(() => {
   z-index: 200;
   min-width: 200px;
   padding: 4px;
-  background: rgba(255, 250, 243, 0.98);
+  background: rgba(255, 255, 255, 0.98);
   border: 1px solid var(--line);
   border-radius: 10px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
@@ -5739,7 +7195,7 @@ const tagFolderPreview = computed(() => {
   font-weight: 600;
 }
 .refresh-menu-item:hover {
-  background: rgba(243, 223, 212, 0.6);
+  background: rgba(99, 102, 241, 0.1);
   color: var(--accent-deep);
 }
 .refresh-menu-meta {
@@ -5755,7 +7211,7 @@ const tagFolderPreview = computed(() => {
 .range-refresh-modal {
   width: 400px;
   max-width: 92vw;
-  background: rgba(255, 250, 243, 0.98);
+  background: rgba(255, 255, 255, 0.98);
   border: 1px solid var(--line);
   border-radius: 18px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
@@ -5780,23 +7236,39 @@ const tagFolderPreview = computed(() => {
 .search-clear-btn {
   position: absolute;
   right: 6px;
-  top: 50%;
-  transform: translateY(-50%);
+  /* 用 top/bottom + margin:auto 做垂直居中，避免依赖 transform，
+     从而不与全局 button:active 的 translateY(1px) 冲突导致抖动 */
+  top: 0;
+  bottom: 0;
+  margin: auto 0;
+  transform: none;
   width: 18px;
   height: 18px;
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: rgba(74, 53, 25, 0.35);
+  background: rgba(30, 41, 82, 0.35);
   color: #fff;
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
+  box-shadow: none;
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* 只过渡背景色，不过渡 transform，杜绝悬停/点击时的位移抖动 */
+  transition: background-color 0.14s ease;
 }
-.search-clear-btn:hover { background: rgba(157, 44, 44, 0.7); }
+.search-clear-btn:hover:not(:disabled) {
+  background: rgba(157, 44, 44, 0.7);
+  filter: none;
+  box-shadow: none;
+  transform: none;
+}
+.search-clear-btn:active:not(:disabled) {
+  transform: none;
+  filter: none;
+}
 
 /* 单张图片收藏 ♥ 按钮，固定在缩略图右上角 */
 .image-card { position: relative; }
@@ -5853,7 +7325,62 @@ const tagFolderPreview = computed(() => {
 .thumb-wrap {
   position: relative;
   width: 100%;
+  aspect-ratio: 1 / 1;          /* 容器自身锁 1:1；图片未到也不塌 */
   line-height: 0;
+  overflow: hidden;
+}
+.thumb-wrap > .thumb {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+/* 缩略图淡入：thumbUrl 是异步逐张回填的，若不做过渡就会一张张"啪"地蹦出来，
+   多张同时到达时更像画面撕裂。先透明，图片真正解码完成(@load)后加 .is-loaded 淡入。 */
+.thumb-wrap .thumb {
+  opacity: 0;
+  transition: opacity 0.32s ease;
+}
+.thumb-wrap .thumb.is-loaded {
+  opacity: 1;
+}
+/* 骨架屏：图片解出来之前铺一层轻微流光的占位；
+   容器已有 aspect-ratio 1:1，骨架屏铺满即可。 */
+.thumb-skeleton {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+  background: linear-gradient(100deg,
+    #eef1f8 30%,
+    #f6f8fd 50%,
+    #eef1f8 70%);
+  background-size: 220% 100%;
+  animation: thumb-shimmer 1.25s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 1;
+}
+/* MP4 / GIF thumb 失败（ffmpeg 不可用、404、5xx）时保持骨架屏常驻，避免露出 broken icon */
+.thumb-wrap.is-broken .thumb-skeleton {
+  animation: none;
+  background: linear-gradient(135deg, #2a2f3a, #1a1d24);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  font-weight: 700;
+}
+.thumb-wrap.is-broken .thumb-skeleton::after {
+  content: 'NO PREVIEW';
+}
+@keyframes thumb-shimmer {
+  0% { background-position: 140% 0; }
+  100% { background-position: -40% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .thumb-skeleton { animation: none; }
+  .thumb-wrap .thumb { transition: none; }
 }
 .img-select-toggle:hover { background: rgba(0, 0, 0, 0.7); transform: scale(1.08); }
 .img-select-toggle.active {
@@ -5898,10 +7425,10 @@ const tagFolderPreview = computed(() => {
   margin: 6px 0 4px;
   padding: 8px 14px;
   border-radius: 12px;
-  background: linear-gradient(135deg, rgba(243, 223, 212, 0.85), rgba(235, 208, 192, 0.85));
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(168, 85, 247, 0.1));
   color: var(--ink);
-  border: 1px solid rgba(182, 84, 52, 0.2);
-  box-shadow: 0 2px 10px rgba(74, 53, 25, 0.08);
+  border: 1px solid rgba(79, 118, 224, 0.2);
+  box-shadow: 0 2px 10px rgba(30, 41, 82, 0.08);
   backdrop-filter: none;
   flex-wrap: wrap;
 }
@@ -5920,7 +7447,7 @@ const tagFolderPreview = computed(() => {
 }
 .selection-bar.inline-bar .ghost {
   color: var(--muted);
-  border: 1px solid rgba(74, 53, 25, 0.18);
+  border: 1px solid rgba(30, 41, 82, 0.18);
   background: rgba(255, 255, 255, 0.5);
 }
 .selection-bar.inline-bar .ghost:hover:not(:disabled) {
@@ -5971,7 +7498,7 @@ const tagFolderPreview = computed(() => {
   position: fixed;
   z-index: 9000;
   background: #fff;
-  border: 1px solid rgba(74, 53, 25, 0.18);
+  border: 1px solid rgba(30, 41, 82, 0.18);
   border-radius: 12px;
   box-shadow: 0 18px 40px rgba(0, 0, 0, 0.18);
   padding: 10px 12px;
@@ -6008,9 +7535,9 @@ const tagFolderPreview = computed(() => {
   font-size: 12px;
   font-weight: 600;
   border-radius: 8px;
-  background: linear-gradient(135deg, #fbf4eb, #f2e8db);
+  background: var(--surface-muted);
   color: var(--ink);
-  border: 1px solid rgba(74, 53, 25, 0.12);
+  border: 1px solid rgba(30, 41, 82, 0.12);
   cursor: pointer;
 }
 .pg-picker-block-select {
@@ -6051,19 +7578,19 @@ const tagFolderPreview = computed(() => {
   font-size: 12px;
   font-weight: 600;
   border-radius: 6px;
-  background: linear-gradient(135deg, #fbf4eb, #f2e8db);
+  background: var(--surface-muted);
   color: var(--ink);
-  border: 1px solid rgba(74, 53, 25, 0.08);
+  border: 1px solid rgba(30, 41, 82, 0.08);
   cursor: pointer;
   transition: background 0.15s, transform 0.1s;
 }
 .pg-picker-cell:hover {
-  background: linear-gradient(135deg, #f3dfd4, #ebd0c0);
+  background: var(--soft-violet);
 }
 .pg-picker-cell.active {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   color: #fff;
-  box-shadow: 0 2px 6px rgba(182, 84, 52, 0.25);
+  box-shadow: 0 2px 6px rgba(79, 118, 224, 0.25);
 }
 
 /* 已选清单弹窗 */
@@ -6108,8 +7635,8 @@ const tagFolderPreview = computed(() => {
   align-items: center;
   gap: 10px;
   padding: 8px;
-  background: rgba(243, 223, 212, 0.4);
-  border: 1px solid rgba(182, 84, 52, 0.14);
+  background: rgba(99, 102, 241, 0.4);
+  border: 1px solid rgba(79, 118, 224, 0.14);
   border-radius: 10px;
 }
 .selection-list-thumb {
@@ -6152,8 +7679,8 @@ const tagFolderPreview = computed(() => {
   gap: 4px;
   padding: 4px 8px 4px 10px;
   border-radius: 999px;
-  background: rgba(243, 223, 212, 0.5);
-  border: 1px solid rgba(182, 84, 52, 0.18);
+  background: rgba(99, 102, 241, 0.1);
+  border: 1px solid rgba(79, 118, 224, 0.18);
   font-family: Consolas, monospace;
   font-size: 12px;
   color: var(--ink);
@@ -6225,7 +7752,7 @@ const tagFolderPreview = computed(() => {
   background: rgba(255, 255, 255, 0.6);
 }
 .crypto-tool-textarea[readonly] {
-  background: rgba(243, 223, 212, 0.25);
+  background: rgba(99, 102, 241, 0.25);
 }
 .crypto-tool-actions {
   display: flex;
@@ -6356,13 +7883,15 @@ const tagFolderPreview = computed(() => {
 /* ---------------- 顺序任务队列 ---------------- */
 .task-queue-panel {
   margin-top: 12px;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  background: rgba(0, 0, 0, 0.025);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(var(--accent-rgb), 0.05), rgba(var(--accent-rgb), 0));
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.5);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 /* 失败页横幅 */
@@ -6431,21 +7960,28 @@ const tagFolderPreview = computed(() => {
   user-select: none;
 }
 .tq-chevron {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
   font-size: 11px;
-  color: var(--muted);
-  transition: transform 0.18s ease;
+  color: var(--accent-deep);
+  background: rgba(var(--accent-rgb), 0.1);
+  transition: transform 0.2s ease, background 0.2s ease;
 }
+.tq-header:hover .tq-chevron { background: rgba(var(--accent-rgb), 0.18); }
 .tq-chevron.open {
   transform: rotate(90deg);
 }
 .tq-count-badge {
   font-weight: 600;
   font-size: 11px;
-  color: var(--muted);
-  background: rgba(0, 0, 0, 0.06);
+  color: var(--accent-deep);
+  background: rgba(var(--accent-rgb), 0.12);
   border-radius: 999px;
-  padding: 1px 8px;
+  padding: 1px 9px;
 }
 .tq-title {
   font-weight: 700;
@@ -6454,96 +7990,199 @@ const tagFolderPreview = computed(() => {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  letter-spacing: 0.2px;
 }
 .tq-running-badge {
   font-weight: 600;
   font-size: 11px;
-  color: #2a6f8e;
-  background: rgba(59, 130, 160, 0.15);
-  border: 1px solid rgba(59, 130, 160, 0.4);
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   border-radius: 999px;
-  padding: 1px 8px;
+  padding: 2px 9px;
+  box-shadow: 0 1px 4px rgba(var(--accent-rgb), 0.35);
 }
-.tq-add { font-size: 12px; padding: 3px 10px; }
+.tq-running-badge::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: #fff;
+  vertical-align: middle;
+}
+@keyframes tq-pulse-dot {
+  0%, 100% { opacity: 0.45; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+
+/* 入队按钮：功能入口，做成柔和主色描边 + 悬停填充 */
+.tq-add-btn {
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 5px 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
 .tq-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  /* 最多显示约 2 行任务，再多用滚轮纵向收纳，避免把下方日志挤出去 */
-  max-height: 72px;
+  gap: 5px;
+  /* 最多显示约 3 行任务，再多用滚轮纵向收纳，避免把下方日志挤出去 */
+  max-height: 108px;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-right: 2px;
+  padding-right: 3px;
 }
 .tq-list::-webkit-scrollbar { width: 6px; }
-.tq-list::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.18); border-radius: 3px; }
+.tq-list::-webkit-scrollbar-thumb { background: rgba(var(--accent-rgb), 0.25); border-radius: 3px; }
 .tq-list::-webkit-scrollbar-track { background: transparent; }
 .tq-item {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
-  border-radius: 7px;
-  background: #fff;
+  gap: 9px;
+  padding: 6px 9px;
+  border-radius: 9px;
+  background: var(--surface);
   border: 1px solid var(--line);
   font-size: 12.5px;
   flex-shrink: 0;            /* 在滚动容器里保持每行高度，不被压扁 */
+  cursor: grab;              /* 提示整行可拖动 */
+  user-select: none;         /* 拖动时不要选中文字 */
+  -webkit-user-drag: element;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease, background 0.18s ease, opacity 0.18s ease;
 }
-.tq-item.current { box-shadow: 0 0 0 2px rgba(59, 130, 160, 0.35); }
-.tq-item.running { border-color: rgba(59, 130, 160, 0.5); background: rgba(59, 130, 160, 0.06); }
-.tq-item.done { border-color: rgba(16, 185, 129, 0.5); background: rgba(16, 185, 129, 0.06); }
-.tq-item.warning { border-color: rgba(216, 140, 27, 0.55); background: rgba(216, 140, 27, 0.08); }
-.tq-item.skipped { border-color: rgba(100, 116, 139, 0.42); background: rgba(100, 116, 139, 0.07); }
-.tq-item.error { border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.06); }
-.tq-item-status { width: 16px; flex: 0 0 auto; text-align: center; }
+/* 左侧状态色条：默认透明，各状态点亮 */
+.tq-item::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: transparent;
+  transition: background 0.18s ease;
+}
+.tq-item:hover { border-color: rgba(var(--accent-rgb), 0.4); box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06); }
+.tq-item.current {
+  border-color: rgba(var(--accent-rgb), 0.55);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.16);
+}
+.tq-item.running { border-color: rgba(var(--accent-rgb), 0.5); background: rgba(var(--accent-rgb), 0.06); }
+.tq-item.running::before { background: var(--accent); }
+.tq-item.done { border-color: rgba(16, 185, 129, 0.45); background: rgba(16, 185, 129, 0.05); }
+.tq-item.done::before { background: #10b981; }
+.tq-item.warning { border-color: rgba(216, 140, 27, 0.5); background: rgba(216, 140, 27, 0.07); }
+.tq-item.warning::before { background: #e0982a; }
+.tq-item.skipped { border-color: rgba(100, 116, 139, 0.4); background: rgba(100, 116, 139, 0.06); }
+.tq-item.skipped::before { background: #94a3b8; }
+.tq-item.error { border-color: rgba(239, 68, 68, 0.45); background: rgba(239, 68, 68, 0.05); }
+.tq-item.error::before { background: #ef4444; }
+.tq-item-status { width: 16px; flex: 0 0 auto; text-align: center; font-size: 13px; }
+.tq-item.running .tq-item-status { display: inline-block; }
 .tq-item.done .tq-item-status { color: #059669; }
 .tq-item.warning .tq-item-status { color: #b46b08; }
 .tq-item.skipped .tq-item-status { color: #64748b; }
 .tq-item.error .tq-item-status { color: #dc2626; }
-.tq-item-idx {
-  min-width: 18px;
-  height: 18px;
-  line-height: 18px;
-  text-align: center;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.06);
-  font-size: 11px;
-  color: var(--muted);
-  flex: 0 0 auto;
+/* 拖拽中：原位半透明，光标切换为 grabbing */
+.tq-item.tq-dragging {
+  cursor: grabbing;
+  opacity: 0.45;
+  border-style: dashed;
+  border-color: rgba(var(--accent-rgb), 0.5);
 }
+/* 落点指示：在目标项的上沿 / 下沿画一条主题色高亮线 */
+.tq-item.tq-drop-above::after,
+.tq-item.tq-drop-below::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  box-shadow: 0 0 4px rgba(var(--accent-rgb), 0.45);
+  pointer-events: none;
+}
+.tq-item.tq-drop-above::after { top: -1px; }
+.tq-item.tq-drop-below::after { bottom: -1px; }
 .tq-item-label {
   flex: 1;
   min-width: 0;             /* 允许收缩到比内容更窄，才能触发横向滚动 */
   color: var(--ink);
+  font-weight: 500;
   white-space: nowrap;      /* 每个任务只占一行，不再换行撑高 */
   overflow-x: auto;         /* 文字过长时左右滚动查看 */
   overflow-y: hidden;
 }
 .tq-item-label::-webkit-scrollbar { height: 5px; }
-.tq-item-label::-webkit-scrollbar-thumb { background: rgba(0, 0, 0, 0.18); border-radius: 3px; }
+.tq-item-label::-webkit-scrollbar-thumb { background: rgba(var(--accent-rgb), 0.22); border-radius: 3px; }
 .tq-item-label::-webkit-scrollbar-track { background: transparent; }
-.tq-item-ops { display: inline-flex; gap: 3px; flex: 0 0 auto; }
+.tq-item-ops { display: inline-flex; gap: 4px; flex: 0 0 auto; }
 .tq-mini {
   font-size: 12px;
   line-height: 1;
-  padding: 2px 6px;
-  border-radius: 5px;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.8);
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: rgba(var(--accent-rgb), 0.06);
   color: var(--muted);
   cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
 }
-.tq-mini:hover:not(:disabled) { background: rgba(0, 0, 0, 0.06); color: var(--ink); }
-.tq-mini:disabled { opacity: 0.4; cursor: not-allowed; }
-.tq-del:hover:not(:disabled) { color: #dc2626; border-color: rgba(239, 68, 68, 0.5); background: rgba(239, 68, 68, 0.08); }
-.tq-empty { font-size: 12px; color: var(--muted); padding: 6px 4px; line-height: 1.6; }
-.tq-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-.tq-actions button { font-size: 12px; padding: 4px 12px; }
+.tq-mini:hover:not(:disabled) { background: rgba(var(--accent-rgb), 0.14); color: var(--accent-deep); border-color: rgba(var(--accent-rgb), 0.3); }
+.tq-mini:disabled { opacity: 0.35; cursor: not-allowed; }
+.tq-del:hover:not(:disabled) { color: #dc2626; border-color: rgba(239, 68, 68, 0.4); background: rgba(239, 68, 68, 0.1); }
+.tq-empty {
+  font-size: 12px;
+  color: var(--muted);
+  padding: 12px 10px;
+  line-height: 1.6;
+  text-align: center;
+  border: 1px dashed var(--line);
+  border-radius: 9px;
+  background: rgba(var(--accent-rgb), 0.02);
+}
+.tq-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.tq-actions button {
+  font-size: 12px;
+  padding: 5px 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
 .tq-actions .tq-run {
-  background: linear-gradient(135deg, #3b82a0, #2a6f8e);
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   border: none;
   color: #fff;
   font-weight: 600;
+  box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.28);
+}
+.tq-actions .tq-run:hover:not(:disabled) { filter: brightness(1.06); box-shadow: 0 3px 12px rgba(var(--accent-rgb), 0.38); }
+.tq-actions .tq-run:disabled { opacity: 0.5; box-shadow: none; }
+
+/* ---- 队列项入场 / 离场动画（TransitionGroup name="tq"）---- */
+.tq-enter-from { opacity: 0; transform: translateY(-8px) scale(0.97); }
+.tq-enter-to { opacity: 1; transform: translateY(0) scale(1); }
+.tq-enter-active { transition: opacity 0.28s ease, transform 0.28s cubic-bezier(0.22, 1, 0.36, 1); }
+.tq-leave-active { transition: opacity 0.2s ease, transform 0.2s ease; position: absolute; width: calc(100% - 3px); }
+.tq-leave-to { opacity: 0; transform: translateX(12px); }
+.tq-move { transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1); }
+
+/* 刚加入的项：一次高亮脉冲，让用户明确看到"加进来了" */
+.tq-item.just-added { animation: tq-just-added 1.05s cubic-bezier(0.22, 1, 0.36, 1); z-index: 1; }
+@keyframes tq-just-added {
+  0% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.5); border-color: var(--accent); background: rgba(var(--accent-rgb), 0.14); }
+  60% { box-shadow: 0 0 0 6px rgba(var(--accent-rgb), 0); border-color: rgba(var(--accent-rgb), 0.5); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0); }
 }
 /* ---------------- 起始页 / 结束页：缩小输入框 + 右侧最近使用记录 ---------------- */
 /* 注意：类名不能用 .page-grid —— 全局 style.css 里 .page-grid 是应用整体布局
@@ -6595,7 +8234,7 @@ const tagFolderPreview = computed(() => {
   font-weight: 600;
   color: var(--accent-deep);
   background: var(--soft);
-  border: 1px solid rgba(74, 53, 25, 0.12);
+  border: 1px solid rgba(30, 41, 82, 0.12);
   border-radius: 999px;
   cursor: pointer;
   user-select: none;
@@ -6604,8 +8243,8 @@ const tagFolderPreview = computed(() => {
   transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 .recent-page-chip:hover {
-  background: rgba(243, 223, 212, 0.85);
-  border-color: rgba(182, 84, 52, 0.35);
+  background: rgba(99, 102, 241, 0.13);
+  border-color: rgba(79, 118, 224, 0.35);
 }
 .recent-page-chip.active {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
@@ -6622,7 +8261,7 @@ const tagFolderPreview = computed(() => {
   margin-left: 1px;
   border: none;
   border-radius: 50%;
-  background: rgba(74, 53, 25, 0.18);
+  background: rgba(30, 41, 82, 0.18);
   color: #fff;
   font-size: 10px;
   line-height: 1;
@@ -6722,8 +8361,175 @@ const tagFolderPreview = computed(() => {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   border-color: transparent;
   color: #fff;
-  box-shadow: 0 4px 16px rgba(182, 84, 52, 0.45);
+  box-shadow: 0 4px 16px rgba(79, 118, 224, 0.45);
   /* 固定状态是用户明确选择的「常驻可见」语义，保持不透明 */
   opacity: 1;
 }
+
+/* Lightweight anime theme */
+.control-panel,
+.gallery-panel { border-color: var(--line); background: rgba(255, 255, 255, 0.92); }
+.mode-chip { border-color: transparent; background: var(--surface-muted); color: var(--ink); box-shadow: none; }
+.mode-chip:hover:not(.active) { background: var(--soft-violet); }
+.mode-chip.active { background: var(--accent-gradient); box-shadow: 0 5px 12px rgba(var(--accent-rgb), 0.18); }
+.crawler-head-actions button { box-shadow: none; }
+.control-scroll { scrollbar-color: rgba(var(--violet-rgb), 0.24) transparent; }
+.task-queue-panel,
+.tq-item,
+.modern-log-wrapper,
+.failed-pages-banner { border-color: var(--line); }
+.tq-item { background: var(--surface); }
+.tq-item.current { border-color: rgba(var(--accent-rgb), 0.55); background: rgba(var(--accent-rgb), 0.06); }
+.recent-page-chip { border-color: rgba(var(--violet-rgb), 0.12); background: var(--soft-violet); color: var(--accent-deep); }
+.gallery-tools select,
+.gallery-tools input { background: rgba(255, 255, 255, 0.92); }
+.viewer-corner-btn.is-active { box-shadow: 0 4px 16px rgba(var(--accent-rgb), 0.35); }
+
+/* ---------------- Tag 浏览 overlay ---------------- */
+.browse-overlay {
+  z-index: 10000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+}
+.browse-card {
+  width: min(1200px, 94vw);
+  height: min(860px, 92vh);
+  background: var(--surface, #fff);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+.browse-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line, #eee);
+}
+.browse-head-title { display: flex; align-items: baseline; gap: 12px; }
+.browse-head-title h3 { margin: 0; color: var(--accent-deep); font-size: 18px; }
+.browse-searchbar {
+  display: flex;
+  gap: 8px;
+  padding: 12px 18px 8px;
+}
+.browse-searchbar .search-input { flex: 1; }
+.browse-filters {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 18px 12px;
+  flex-wrap: wrap;
+  border-bottom: 1px solid var(--line, #eee);
+}
+.browse-filter-item { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.browse-score-input { width: 64px; }
+.browse-filter-ratings { display: flex; gap: 12px; font-size: 13px; }
+.browse-filter-ratings label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+.browse-filter-spacer { flex: 1; }
+.browse-grid-wrap { flex: 1; overflow-y: auto; padding: 14px 18px; }
+.browse-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+}
+.browse-cell {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: pointer;
+  background: var(--surface-muted, #f0f0f0);
+  border: 2px solid transparent;
+  transition: border-color 0.12s, transform 0.12s;
+}
+.browse-cell:hover { transform: translateY(-2px); }
+.browse-cell.selected { border-color: var(--accent-deep, #7c5cff); }
+.browse-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+.browse-cell-check {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.4);
+  color: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: bold;
+  border: 2px solid rgba(255, 255, 255, 0.8);
+}
+.browse-cell-check.on { background: var(--accent-deep, #7c5cff); color: #fff; }
+.browse-open-post {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  border: 2px solid rgba(255, 255, 255, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: bold;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease;
+}
+.browse-cell:hover .browse-open-post { opacity: 1; }
+.browse-open-post:hover { background: var(--accent-deep, #7c5cff); }
+.browse-cell-meta {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 4px 6px;
+  background: linear-gradient(to top, rgba(0, 0, 0, 0.65), transparent);
+}
+.browse-badge {
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+}
+.browse-badge.rating-e { background: rgba(220, 50, 50, 0.85); }
+.browse-badge.rating-q { background: rgba(220, 150, 40, 0.85); }
+.browse-badge.rating-s { background: rgba(50, 160, 90, 0.85); }
+.browse-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line, #eee);
+  gap: 12px;
+}
+.browse-foot-left, .browse-foot-right { display: flex; align-items: center; gap: 10px; }
+.browse-page-label { font-size: 13px; color: var(--muted); min-width: 60px; text-align: center; }
+.browse-download-btn {
+  min-width: 140px;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent-deep, #7c5cff);
+  color: #fff;
+  cursor: pointer;
+  font-weight: 600;
+}
+.browse-download-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 </style>

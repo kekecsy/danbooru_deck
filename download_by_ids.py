@@ -1,7 +1,6 @@
 import os
 import sys
 import argparse
-from time import sleep
 import danbooru_api
 from danbooru_data import DanbooruData
 import json
@@ -118,8 +117,8 @@ def main():
     group.add_argument('--ids', nargs='+', help="空格分隔的 ID 列表，如 123456 789012")
     group.add_argument('--file', help="包含 ID 列表的文本文件，每行一个 ID")
     group.add_argument('--json', help="包含 ID 列表的 JSON 文件，格式如 [123, 456, 789]")
-    parser.add_argument('--filter', nargs='+', default=['furry', 'futanari'],
-                        help="过滤标签，图片包含任一标签则跳过，默认 ['furry','futanari']")
+    parser.add_argument('--filter', nargs='+', default=['furry', 'futanari','guro'],
+                        help="过滤标签，图片包含任一标签则跳过，默认 ['furry','futanari','guro']")
     parser.add_argument('--no-filter', action='store_true',
                         help="禁用过滤标签，下载所有图片")
     args = parser.parse_args()

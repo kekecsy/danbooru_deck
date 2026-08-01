@@ -50,5 +50,11 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     read: (imagePath) => ipcRenderer.invoke('pose:read', imagePath),
     save: (imagePath, entry) => ipcRenderer.invoke('pose:save', { imagePath, entry }),
     listForDate: (date) => ipcRenderer.invoke('pose:list-for-date', date)
+  },
+  // 订阅主进程"右键复制成功"事件，返回 unsubscribe 函数供 onBeforeUnmount 解绑
+  onContextCopy: (callback) => {
+    const handler = (_e, data) => callback(data);
+    ipcRenderer.on('context-menu:copied', handler);
+    return () => ipcRenderer.removeListener('context-menu:copied', handler);
   }
 });

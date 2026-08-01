@@ -1,8 +1,6 @@
 # danbooru_hot.py
 import os
 from time import sleep
-import datetime
-import json
 import danbooru_api
 from danbooru_data import DanbooruData
 
@@ -15,7 +13,7 @@ def get_frequency_level(count):
     elif count >= 4: return "Mid (中频)"
     else: return "Low (低频)"
 
-def grabber(db_data, page_num, log_callback=None, filter_tags=['furry','futanari']):
+def grabber(db_data, page_num, log_callback=None, filter_tags=['furry','futanari','guro']):
     def custom_print(msg):
             print(msg) # 控制台依然显示
             if log_callback:

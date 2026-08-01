@@ -130,6 +130,9 @@ watch(activeTab, (next) => {
 // ---------------- 图片收藏（独立列表，不复用 groups 结构） ----------------
 const images = ref([]);          // [{key, date, filename, artist, characters, score, fav_count, local_path, ...}]
 const imageThumbCache = ref({});  // key -> dataUrl，避免重渲染重复 hydrate
+// 缩略图淡入：每张图 @load 后把 key 记下来，CSS 用 .is-loaded 把 opacity 0→1。
+// 翻页或清空时整个 Set 替换为新的（保留旧 key 不变）以触发响应式
+const thumbLoaded = ref(new Set());
 const imagesSearch = ref('');
 
 async function loadImageFavorites() {
@@ -322,6 +325,9 @@ const viewer = ref({
   toolbarHovered: false
 });
 const viewerToolbarVisible = computed(() => viewer.value.toolbarPinned || viewer.value.toolbarHovered);
+// viewer 主图淡入：src 变化时置 false，@load 后置 true 触发 .is-loaded
+const viewerImageLoaded = ref(false);
+watch(() => viewer.value.imageUrl, () => { viewerImageLoaded.value = false; });
 function toggleViewerFitMode() {
   viewer.value.fitMode = viewer.value.fitMode === 'fit' ? 'actual' : 'fit';
   viewer.value.zoom = 1;
@@ -759,10 +765,12 @@ onMounted(loadFavorites);
         <article v-for="it in pagedImages" :key="it.key" class="image-card">
           <img
             class="thumb clickable-thumb"
+            :class="{ 'is-loaded': thumbLoaded.has(it.key) }"
             :src="imageThumbCache[it.key]"
             :alt="it.filename"
             loading="lazy"
             decoding="async"
+            @load="thumbLoaded.add(it.key); thumbLoaded = new Set(thumbLoaded)"
             @click="openViewer(it)"
           />
           <button
@@ -932,8 +940,10 @@ onMounted(loadFavorites);
           <img
             v-else-if="viewer.imageUrl"
             class="viewer-image"
+            :class="{ 'is-loaded': viewerImageLoaded }"
             :src="viewer.imageUrl"
             :alt="viewerItem?.filename || 'preview'"
+            @load="viewerImageLoaded = true"
           />
         </div>
       </div>
@@ -1034,7 +1044,7 @@ onMounted(loadFavorites);
   padding: 0;
   border: none;
   border-radius: 50%;
-  background: rgba(74, 53, 25, 0.35);
+  background: rgba(30, 41, 82, 0.35);
   color: #fff;
   font-size: 13px;
   line-height: 1;
@@ -1075,7 +1085,7 @@ onMounted(loadFavorites);
   cursor: pointer;
   transition: background 0.18s, color 0.18s;
 }
-.fav-tab:hover { background: rgba(243, 223, 212, 0.6); }
+.fav-tab:hover { background: rgba(99, 102, 241, 0.1); }
 .fav-tab.active {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   color: #fff;
@@ -1111,7 +1121,7 @@ onMounted(loadFavorites);
   font-size: 13px;
   cursor: pointer;
 }
-.group-item:hover { background: rgba(243, 223, 212, 0.55); }
+.group-item:hover { background: rgba(99, 102, 241, 0.09); }
 .group-item.active {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   color: #fff;
@@ -1208,7 +1218,7 @@ onMounted(loadFavorites);
 .artist-name {
   width: 100%;
   text-align: left;
-  background: linear-gradient(135deg, #fbf4eb, #f2e8db);
+  background: var(--surface-muted);
   color: var(--ink);
   font-family: Consolas, monospace;
   font-size: 13px;
@@ -1257,7 +1267,7 @@ onMounted(loadFavorites);
 .fav-modal {
   width: 480px;
   max-width: 92vw;
-  background: rgba(255, 250, 243, 0.98);
+  background: rgba(255, 255, 255, 0.98);
   border: 1px solid var(--line);
   border-radius: 18px;
   box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
@@ -1344,4 +1354,28 @@ onMounted(loadFavorites);
   .favorites-layout { grid-template-columns: 1fr; }
   .favorites-side { position: static; max-height: none; }
 }
+
+/* Lightweight anime theme */
+.fav-top-tabs {
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: 0 6px 18px rgba(30, 41, 82, 0.06);
+}
+.fav-tab { background: transparent; color: var(--muted); box-shadow: none; }
+.fav-tab:hover { background: var(--surface-muted); color: var(--ink); box-shadow: none; }
+.fav-tab.active { background: var(--accent-gradient); color: #fff; box-shadow: 0 5px 12px rgba(var(--accent-rgb), 0.18); }
+.favorites-side,
+.favorites-main,
+.favorites-images-panel { border-color: var(--line); background: rgba(255, 255, 255, 0.92); }
+.group-item,
+.artist-card { border-color: var(--line); background: var(--surface-muted); }
+.group-item:hover,
+.artist-card:hover { border-color: rgba(var(--violet-rgb), 0.24); background: #faf9ff; }
+.group-item.active { background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.14), rgba(var(--violet-rgb), 0.12)); color: var(--accent-deep); }
+.artist-name { color: var(--ink); }
+.group-tag { background: var(--soft-violet); color: var(--accent-deep); }
+.fav-modal { border: 1px solid var(--line); background: rgba(255, 255, 255, 0.98); box-shadow: 0 24px 60px rgba(39, 34, 67, 0.22); }
+.fav-checkbox-list { background: var(--surface-muted); }
 </style>

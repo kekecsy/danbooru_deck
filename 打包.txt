@@ -1,0 +1,154 @@
+构建 portable 可执行文件
+
+
+═══════════════════════════════════════════════════════════
+一、两步打包命令
+═══════════════════════════════════════════════════════════
+
+第 1 步：构建 Python 后端（PyInstaller）
+
+在项目根目录（C:\Users\kekecsy\Desktop\danbooru_deck\danbooru_deck）打开 PowerShell，执行：
+
+.\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath build\python-dist --workpath build\pyinstaller crawler-backend.spec
+
+这会生成 build\python-dist\crawler-backend\crawler-backend.exe（约 9MB）。
+它会把 crawler-backend.spec 里 datas 列出的资源一起打进 _internal\：
+static\、pic_web\、character.json（12MB 角色库），以及 6 个「种子文件」（见下文）。
+代码或这些资源更新后，必须重新跑第 1 步。
+
+第 2 步：构建 portable Electron 包
+
+cd desktop-app
+npm run dist:portable
+
+这会执行：
+  1. npm run build          → Vite 构建 Vue 前端（dist\ 目录）
+  2. electron-builder --win portable
+     → 把前端 + Electron + 第 1 步的后端打成一个 .exe
+
+输出：C:\Users\kekecsy\Desktop\danbooru_deck\danbooru_deck_exe\Danbooru-Deck-0.1.0-x64-Portable.exe
+
+
+═══════════════════════════════════════════════════════════
+二、⚠ 第 2 步遇到 EBUSY: resource busy or locked
+═══════════════════════════════════════════════════════════
+
+electron-builder 在给新生成的 "Danbooru Deck.exe" 写图标/签名时，
+可能被杀毒软件的实时扫描瞬时锁住，报：
+  ⨯ EBUSY: resource busy or locked, open '...\Danbooru Deck.exe'
+
+此时 exe 其实已经生成，锁是暂时的。解决办法：直接重跑第 2 步即可（不用改代码）：
+  cd desktop-app
+  npx electron-builder --win portable
+
+一般重跑一次就成功。若反复出现，可临时关闭杀毒实时防护，或把
+danbooru_deck_exe 目录加入杀毒白名单。
+
+
+═══════════════════════════════════════════════════════════
+三、程序资源 vs 用户数据 —— 怎么分的
+═══════════════════════════════════════════════════════════
+
+核心机制（runtime_paths.py）：靠两个环境变量把「程序自带资源」和
+「用户数据」分开，Electron 打包模式下（main.cjs）自动设置：
+  DANBOORU_DECK_RESOURCE_DIR = exe 内部同梱资源目录（只读）
+  DANBOORU_DECK_DATA_DIR     = exe 同级的 "Danbooru Deck Data\"（用户可写）
+
+首次启动时 runtime_paths.ensure_user_directories() 会：
+  1. 创建 Danbooru Deck Data\，内含 hot_pic\、drawer\
+  2. 把同梱的「种子文件」复制进去 —— 仅当该文件还不存在时，
+     所以用户后续编辑的内容永远不会被覆盖（升级换 exe 也安全）。
+
+【会随 exe 同梱 + 首次启动 seed 到用户目录的文件】（共 6 个）
+  翻译字典：
+    custom_translation.json
+    character_chinese_search.json
+    character_supplement.json
+  收藏：
+    artist_favorites.json
+    character_favorites.json
+    image_favorites.json
+  → 这 6 个在 crawler-backend.spec 的 datas 里，同时在
+    runtime_paths.py 的 _SEED_FILES 里。两处要同步增删。
+
+【同梱但不 seed（程序自带资源，从 RESOURCE_DIR 只读）】
+  character.json（12MB 角色库）—— 不是用户产物，别 seed 到用户目录。
+
+【不打包 / 不 seed 的文件】
+  library_roots.json  —— 存的是本机图库磁盘路径（D盘/E盘等），
+                          分发到别的电脑会失效。不 seed，新环境用默认 hot_pic。
+  env_config.json     —— 仅 dev 模式定位 Python 解释器用，打包后走同梱 exe。
+  magazine.json / source_hint_mapping.json / library_roots.example.json
+                      —— 全仓库无代码引用（死文件 / 示例），忽略。
+
+【首次启动由程序自动生成、不需打包的用户数据】
+  hot_pic\（下载的图片 + 每日 viewer_data.json / caption.json）
+  drawer\（disk_drawer.json 等）
+  window-state.json、app-state\（Electron 窗口状态）
+
+
+═══════════════════════════════════════════════════════════
+四、要改「打包哪些用户数据」时怎么做
+═══════════════════════════════════════════════════════════
+
+若以后想新增 / 移除一个 seed 文件，改两个地方并保持一致，然后重跑第 1、2 步：
+  1. crawler-backend.spec 的 datas 列表   —— 决定该文件是否被同梱进 exe
+  2. runtime_paths.py 的 _SEED_FILES 元组 —— 决定该文件首次启动是否被复制到用户目录
+
+
+═══════════════════════════════════════════════════════════
+五、⚠ 静态资源（贴图/图片等）打包后路径：注意 _internal
+═══════════════════════════════════════════════════════════
+
+现象：打包后编辑器「选择贴图」看不到预设贴图（pic_web/present 下的
+ban.png / koharu.png 等），但源码 dev 模式下正常。
+
+原因：PyInstaller 用 COLLECT（onedir）模式打包，spec 里 datas 声明的
+所有资源不会放在 crawler-backend\ 根目录，而是统一放进：
+  crawler-backend\_internal\...
+所以打包后贴图的真实位置是：
+  ...\resources\backend\_internal\pic_web\present\
+electron-builder 通过 extraResources 把整个 crawler-backend\ 映射到
+resources\backend\，这一层 _internal 会原样带过来。
+
+有两条独立的贴图访问链，别只修一条：
+  1. 后端链：pic_web\main.py 的 PRESET_DIRS 用 Path(__file__).parent。
+     冻结后 __file__ 指向 _MEIPASS，PyInstaller 会把 present 一并放到那，
+     所以这条链打包后能正常工作，不用改。（/mosaic/api/presets 验证 OK）
+  2. Electron 链：desktop-app\electron\main.cjs 的 presetDirs 是硬编码路径，
+     被 preset:list（列贴图）和 local:// 协议白名单（加载贴图）共用。
+     这条容易漏掉 _internal 那一层，是「看不到贴图」的真正原因。
+
+修法：presetDirs 里补上 _internal 路径（当前代码已包含，作兼容还保留了旧路径）：
+  path.join(resourceRoot, 'backend', '_internal', 'pic_web', 'present'),
+  path.join(resourceRoot, 'backend', '_internal', 'mosaic_qt', 'present'),
+
+结论：以后凡是「spec 的 datas 里声明、又要被 Electron 主进程（main.cjs）
+直接按路径读取」的静态资源，main.cjs 里都要走 backend\_internal\... 这一层。
+纯靠后端 HTTP 提供的资源（__file__ 基准）则不受影响。
+只改 main.cjs 时无需重跑第 1 步，重跑第 2 步即可。
+
+
+═══════════════════════════════════════════════════════════
+六、分发与升级
+═══════════════════════════════════════════════════════════
+
+分发：只需把 Danbooru-Deck-0.1.0-x64-Portable.exe 单个文件发出去。
+      对方放任意目录双击运行，数据自动生成在 exe 同级的 "Danbooru Deck Data\"。
+      （当前配置：会带上你打包时的字典和收藏；不会带上你的本机图库路径。）
+
+升级：换新版 exe 覆盖旧的即可，同级的 "Danbooru Deck Data\" 保持不动，
+      对方的图片、收藏、字典等全部保留（seed 只在文件不存在时发生）。
+
+
+═══════════════════════════════════════════════════════════
+七、两步一起跑（复制粘贴）
+═══════════════════════════════════════════════════════════
+
+  # 1. 项目根目录 - 构建 Python 后端
+  .\.venv\Scripts\python.exe -m PyInstaller --noconfirm --clean --distpath build\python-dist --workpath build\pyinstaller crawler-backend.spec
+
+  # 2. desktop-app 目录 - 构建 portable
+  cd desktop-app
+  npm run dist:portable
+  # 若第 2 步报 EBUSY，重跑：npx electron-builder --win portable
