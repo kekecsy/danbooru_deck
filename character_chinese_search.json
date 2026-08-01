@@ -9958,5 +9958,29 @@
     "chinese_name": "一条莉莉华",
     "source_hint": "hololive",
     "translated_description_zh": "hololive DEV_IS旗下音乐团体ReGLOSS成员，新人女社长，善于沟通并亲自处理海外业务。常服为白色毛领夹克内搭粉色荷叶边无袖衬衫，配紫色铅笔迷你裙和黑色高跟长靴，饰有腰带、腿环、金色项圈、手表和墨镜。"
+  },
+  "iws_2000_(girls'_frontline)": {
+    "has_chinese": true,
+    "chinese_name": "IWS 2000",
+    "source_hint": "girls' frontline",
+    "translated_description_zh": "代表斯泰尔IWS 2000反器材狙击步枪的战术人形，出自游戏《少女前线》。她于2017年3月9日加入游戏，是一把五星步枪（RF）角色，因其技能“巨鹰攻势”能带来极高的火力提升，在玩家社区中常被称为“格里芬木星炮”。在中文社区中，角色名通常直接使用原名“IWS 2000”，有时也音译为“爱瓦斯2000”。"
+  },
+  "bb_dubai_(fate)": {
+    "has_chinese": true,
+    "chinese_name": "BB迪拜",
+    "source_hint": "fate",
+    "translated_description_zh": "《Fate/Grand Order》中于活动“Celeb Summer Experience!”登场的从者。她本是来自异时空的AI，原名为“Last Slot”，担任“Moon Dubai”（月亮迪拜）的管理者。在判断采用BB的外貌与性格对管理AI最为合适后，她便以此形象现身。她劫持了年度夏季活动，制造了“奏章Ⅲ 新灵长继承战 原型起启”。作为从者，她的灵基再临第一阶段即为该形态，第二阶段为“BB宇宙”，第三阶段“黄金BB”则需通关奏章Ⅲ后解锁。角色设计由Wada Arco担当，声优为下屋则子。"
+  },
+  "fairy_(zenless_zone_zero)": {
+    "has_chinese": true,
+    "chinese_name": "Fairy",
+    "source_hint": "zenless zone zero",
+    "translated_description_zh": "《绝区零》中登场的高性能人工智能，开发代号为“Fairy”，官方名称为“Ⅲ型总序式集成泛用人工智能”。她作为主角“法厄同”兄妹的助手，引导他们进入空洞探索。Fairy是四大“钥匙”级AI之一，在游戏中被描绘为一只蓝色眼睛。她能力强大但说话尖酸刻薄，时常威胁主角以换取赞美。在2026年的HoYoFair二周年纪念视频中，出现了粉丝创作的Fairy拟人化形象，并在画师中流行开来。"
+  },
+  "remielle_dan_(moonlight_whispers)": {
+    "has_chinese": true,
+    "chinese_name": "蕾米埃尔·丹（月夜密语）",
+    "source_hint": "zenless zone zero",
+    "translated_description_zh": "《绝区零》中登场的一位角色，是初代“虚狩”之一，同时也是“白祇重工”的创始人。此描述为其官方换装形象，首次以“拉米尔”的化名向主角兄妹介绍自己，该造型后成为游戏内皮肤。在该服装中，她身穿黑色连衣裙，背部有镂空设计，胸前佩戴束带，穿着黑色蕾丝边过膝长袜并配有吊带，低垂的翅膀也呈黑色。头发上佩戴了多种发饰，包括X形发饰、四角星形发饰以及两条黑色丝带。该形象通常还会佩戴黑色蕾丝口罩。"
   }
 }

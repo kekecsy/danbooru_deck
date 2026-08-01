@@ -1819,6 +1819,8 @@ def _slim_post_for_browse(post: dict) -> dict:
         "tag_string_artist": artist,
         "tag_string_character": post.get("tag_string_character") or "",
         "created_at": post.get("created_at") or "",
+        # 已下载标记：log.json 里有这个 id 就给前端打点用（不命中就不带这个 key，省一点字节）
+        **({"downloaded": True} if str(pid) in log_store else {}),
     }
 
 
@@ -1869,15 +1871,22 @@ _PROXY_THUMB_ALLOWED_HOSTS = (
 # 在线预览图（Tag 浏览 / 收集ID 预览）的本地磁盘缓存。
 # 缩略图一张 ~20-50KB，命中缓存即免网络；超过上限按最久未访问(LRU，用文件 mtime 近似)淘汰。
 _BROWSE_THUMB_CACHE_DIR = HOT_PIC_DIR / ".browse_thumb_cache"
-_BROWSE_THUMB_MAX = 500          # 缓存文件数上限
+# 缩略图源走 large_file_url（720px），Pillow 服务端缩到长边 360px 落盘：单张 ~30-60KB。
+# 缓存 500 张约 ~20MB，权衡清晰度（720→360 比 150→360 upscale 清晰得多）和磁盘开销。
+_BROWSE_THUMB_MAX = 500
 _BROWSE_THUMB_LOCK = threading.Lock()
 # 允许缓存落盘的图片扩展名（防止把 html 错误页之类的东西也缓存下来）
 _BROWSE_THUMB_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif"}
 
 
-def _browse_thumb_cache_path(url: str) -> Path:
-    """用 url 的 sha1 + 原扩展名做缓存文件名。扩展名不认识时统一按 .jpg。"""
+def _browse_thumb_cache_path(url: str, size: int = 0) -> Path:
+    """用 url 的 sha1 + 原扩展名做缓存文件名。扩展名不认识时统一按 .jpg。
+    带 size 时：缩放后的版本固定按 .jpg 存（LANCZOS 输出无透明通道，PNG/WebP 全部转 JPEG
+    省字节），文件名加 -s<size> 后缀避免跟原图缓存撞名。"""
     from urllib.parse import urlparse
+    if size and size > 0:
+        digest = hashlib.sha1(f"{url}|size={size}".encode("utf-8")).hexdigest()
+        return _BROWSE_THUMB_CACHE_DIR / f"{digest}-s{size}.jpg"
     ext = os.path.splitext(urlparse(url).path)[1].lower()
     if ext not in _BROWSE_THUMB_EXTS:
         ext = ".jpg"
@@ -1928,12 +1937,38 @@ def collected_ids(date: str = ""):
     return {"ok": True, "date": date, "ids": ids, "count": len(ids)}
 
 
+@app.get("/api/downloaded_ids")
+def downloaded_ids(contains: str = ""):
+    """诊断 / 调试用：返回全局 log_store 的 post id 集合（字符串形式）。
+    ?contains=11897341 可以只查某个 id 是否在内存里（避免把几万条 id 一次返回）。
+    之前 Tag 浏览「已下载」不显示时，用这个判断后端 in-memory 状态是否正确同步。"""
+    snap = log_store.snapshot()
+    if contains:
+        s = str(contains).strip()
+        return {
+            "ok": True,
+            "contains": s,
+            "in_store": s in snap,
+            "total": len(snap),
+        }
+    # 不带 contains 时只返回总数和前 20 条，避免大 payload
+    sample = sorted(snap.keys(), key=lambda x: int(x) if x.isdigit() else 0)[:20]
+    return {
+        "ok": True,
+        "total": len(snap),
+        "sample": sample,
+    }
+
+
 @app.get("/api/proxy_thumb")
-def proxy_thumb(url: str = ""):
+def proxy_thumb(url: str = "", size: int = 0):
     """把 Danbooru 在线预览图经后端转发给浏览器 <img>，并落盘缓存。
     - 直连模式下浏览器直接连 Danbooru CDN 会被防盗链/网络挡掉，统一走这里最稳。
     - 命中本地缓存即免网络；未命中则拉取后写入缓存并做 LRU 淘汰。
-    - 带域名白名单防 SSRF。"""
+    - 带域名白名单防 SSRF。
+    - 可选 ?size=360：拉到大图后 Pillow LANCZOS 缩到长边 size 落盘 JPEG；用于 Tag 浏览想要
+      比 Danbooru preview(150) 清晰、比 large(720) 省缓存的场景。GIF 走首帧，其他格式自动
+      转 RGB / JPEG。size≤0 或缺省 = 不缩放，原图透传。"""
     url = (url or "").strip()
     if not url:
         return PlainTextResponse("missing url", status_code=400)
@@ -1946,7 +1981,17 @@ def proxy_thumb(url: str = ""):
     if not any(host == h or host.endswith("." + h) for h in _PROXY_THUMB_ALLOWED_HOSTS):
         return PlainTextResponse("host not allowed", status_code=403)
 
-    cache_path = _browse_thumb_cache_path(url)
+    try:
+        size = int(size or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size < 0:
+        size = 0
+    # 限制范围，防止有人传 99999 拖死 CPU
+    if size > 0:
+        size = max(64, min(size, 2048))
+
+    cache_path = _browse_thumb_cache_path(url, size)
     # 1) 命中缓存：更新 mtime（LRU 访问时间）后直接返回
     if cache_path.exists():
         try:
@@ -1973,13 +2018,48 @@ def proxy_thumb(url: str = ""):
 
     content = r.content
     content_type = r.headers.get("Content-Type", "image/jpeg")
+    output_bytes = content
+    output_type = content_type
+
+    # 2.5) 可选：服务端缩放。失败（Pillow 不支持该格式 / 损坏 / 动画 GIF）时降级到原图透传。
+    if size > 0:
+        try:
+            from PIL import Image
+            import io
+            with Image.open(io.BytesIO(content)) as im:
+                is_animated = getattr(im, "is_animated", False)
+                if is_animated:
+                    # 动图（GIF/WebP）：保留原图透传，不缩第一帧（避免预览图变静帧）
+                    pass
+                else:
+                    im.thumbnail((size, size), Image.Resampling.LANCZOS)
+                    if im.mode in ("RGBA", "LA", "P"):
+                        # 透明通道转白底，避免 JPEG 存成黑色
+                        bg = Image.new("RGB", im.size, (255, 255, 255))
+                        if im.mode == "P":
+                            im = im.convert("RGBA")
+                        bg.paste(im, mask=im.split()[-1] if im.mode in ("RGBA", "LA") else None)
+                        im = bg
+                    elif im.mode != "RGB":
+                        im = im.convert("RGB")
+                    buf = io.BytesIO()
+                    im.save(buf, format="JPEG", quality=85, optimize=True)
+                    output_bytes = buf.getvalue()
+                    output_type = "image/jpeg"
+        except Exception as e:
+            # 缩放失败不致命：返回原图，仍可缓存到不带 size 后缀的路径
+            print(f"[browse_thumb] 缩放失败 {url} (size={size}): {e}")
+            output_bytes = content
+            output_type = content_type
+            # 失败时改用无 size 路径作为 fallback，避免反复尝试
+            cache_path = _browse_thumb_cache_path(url, 0)
 
     # 3) 写入缓存（原子写：先写 .tmp 再 os.replace）+ 触发 LRU 淘汰
     try:
         _BROWSE_THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         tmp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
         with open(tmp_path, "wb") as f:
-            f.write(content)
+            f.write(output_bytes)
         os.replace(tmp_path, cache_path)
         with _BROWSE_THUMB_LOCK:
             _evict_browse_thumb_cache()
@@ -1988,8 +2068,8 @@ def proxy_thumb(url: str = ""):
         print(f"[browse_thumb] 缓存写入失败 {url}: {e}")
 
     return Response(
-        content=content,
-        media_type=content_type,
+        content=output_bytes,
+        media_type=output_type,
         headers={"Cache-Control": "public, max-age=86400"},
     )
 

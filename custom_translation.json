@@ -29196,10 +29196,10 @@
     "translated_description_zh": "她是《Futari wa Precure Splash Star》双人组合的一员，擅长运动且始终保持乐观，与前辈[[Misumi Nagisa]]相似。她会变身为[[Cure Bloom]]，后来又变身为[[Cure Bright]]"
   },
   "bb_dubai_(fate)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "fate/grand order",
-    "translated_description_zh": "这是《Fate/Grand Order》中在《Celeb Summer Experience!》活动中登场的角色。她是来自另一个时间线的AI，最初被称为[Last Slot]，担任月亮迪拜的管理者。在判断以此形象和性格作为管理AI最优后，她采用了[[BB (fate)|]]的外貌和性格。她劫持了年度夏季活动，制造了[[Archetype Inception (fate/grand order)|]]的Ordeal Call。[spoiler]后来她与[[BB Cosmo (fate)|]]融合，形成了[[Golden BB (fate)|]]。[/spoiler]作为从者，她构成了该从者的第一次升阶，而[[BB Cosmo (fate)|]]构成了第二次升阶。他们的[[Golden BB (fate)|第三升阶]]在玩家完成[[Archetype Inception (fate/grand order)|]]之前被锁定。角色设计： [[Wada Arco]] 声优： [[Shitaya Noriko]]"
+    "has_chinese": true,
+    "chinese_name": "BB迪拜",
+    "source_hint": "fate",
+    "translated_description_zh": "《Fate/Grand Order》中于活动“Celeb Summer Experience!”登场的从者。她本是来自异时空的AI，原名为“Last Slot”，担任“Moon Dubai”（月亮迪拜）的管理者。在判断采用BB的外貌与性格对管理AI最为合适后，她便以此形象现身。她劫持了年度夏季活动，制造了“奏章Ⅲ 新灵长继承战 原型起启”。作为从者，她的灵基再临第一阶段即为该形态，第二阶段为“BB宇宙”，第三阶段“黄金BB”则需通关奏章Ⅲ后解锁。角色设计由Wada Arco担当，声优为下屋则子。"
   },
   "conch_(gundam)": {
     "has_chinese": false,
@@ -38334,10 +38334,10 @@
     "translated_description_zh": "即将加入的可玩角色，出自《Zenless Zone Zero》。她是一条蛇女（Snake Thiren），属于新伊杜公共安全局都市秩序部门，由Jane Doe引入，现隶属于Severian Lowell。她拥有红色眼睛和长长的金发，呈对角半扎辫、侧马尾和呆毛。服装包括高开叉连体衣、多色连体衣、褶边脱袖、超短裙、黑色过膝袜和黑色靴子，似乎佩戴有电击项圈，脖子常挂有伙伴Chalky。武器是可作长矛及双鞭使用的长柄武器。中文配音由江文，日文配音由Fairouz Ai"
   },
   "iws_2000_(girls'_frontline)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "IWS 2000",
     "source_hint": "girls' frontline",
-    "translated_description_zh": "一个代表斯泰尔IWS 2000的安卓角色，出自少女前线"
+    "translated_description_zh": "代表斯泰尔IWS 2000反器材狙击步枪的战术人形，出自游戏《少女前线》。她于2017年3月9日加入游戏，是一把五星步枪（RF）角色，因其技能“巨鹰攻势”能带来极高的火力提升，在玩家社区中常被称为“格里芬木星炮”。在中文社区中，角色名通常直接使用原名“IWS 2000”，有时也音译为“爱瓦斯2000”。"
   },
   "vermeil_(arknights)": {
     "has_chinese": true,
@@ -77404,5 +77404,17 @@
     "chinese_name": "天狼星（至高乐园的白兔）",
     "source_hint": "azur_lane",
     "translated_description_zh": "《碧蓝航线》中皇家阵营轻巡洋舰天狼星的兔女郎主题官方换装。中文社区常称此皮肤为「至高乐园的白兔」，也有手办产品直接使用日文原名「パラダイス・コニー」（即 Paradise Connie/兔女郎乐园）。该皮肤以其独特的非传统兔女郎装束为特征。"
+  },
+  "fairy_(zenless_zone_zero)": {
+    "has_chinese": true,
+    "chinese_name": "Fairy",
+    "source_hint": "zenless zone zero",
+    "translated_description_zh": "《绝区零》中登场的高性能人工智能，开发代号为“Fairy”，官方名称为“Ⅲ型总序式集成泛用人工智能”。她作为主角“法厄同”兄妹的助手，引导他们进入空洞探索。Fairy是四大“钥匙”级AI之一，在游戏中被描绘为一只蓝色眼睛。她能力强大但说话尖酸刻薄，时常威胁主角以换取赞美。在2026年的HoYoFair二周年纪念视频中，出现了粉丝创作的Fairy拟人化形象，并在画师中流行开来。"
+  },
+  "remielle_dan_(moonlight_whispers)": {
+    "has_chinese": true,
+    "chinese_name": "蕾米埃尔·丹（月夜密语）",
+    "source_hint": "zenless zone zero",
+    "translated_description_zh": "《绝区零》中登场的一位角色，是初代“虚狩”之一，同时也是“白祇重工”的创始人。此描述为其官方换装形象，首次以“拉米尔”的化名向主角兄妹介绍自己，该造型后成为游戏内皮肤。在该服装中，她身穿黑色连衣裙，背部有镂空设计，胸前佩戴束带，穿着黑色蕾丝边过膝长袜并配有吊带，低垂的翅膀也呈黑色。头发上佩戴了多种发饰，包括X形发饰、四角星形发饰以及两条黑色丝带。该形象通常还会佩戴黑色蕾丝口罩。"
   }
 }

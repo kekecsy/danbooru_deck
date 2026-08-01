@@ -2,6 +2,16 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue';
 import GalleryCalendar from './GalleryCalendar.vue';
 import TaskDatePicker from './TaskDatePicker.vue';
+import TutorialsModal from './crawler/TutorialsModal.vue';
+import RefreshRangeModal from './crawler/RefreshRangeModal.vue';
+import ArtistFavoriteModal from './crawler/ArtistFavoriteModal.vue';
+import CharacterFavoriteModal from './crawler/CharacterFavoriteModal.vue';
+import BrowseOverlay from './crawler/BrowseOverlay.vue';
+import TranslationModal from './crawler/TranslationModal.vue';
+import TranslateDetailModal from './crawler/TranslateDetailModal.vue';
+import SelectionListModal from './crawler/SelectionListModal.vue';
+import CryptoToolModal from './crawler/CryptoToolModal.vue';
+import { parsePastedIds } from '../utils/idCodec.js';
 
 const emit = defineEmits(['edit-image', 'caption-image']);
 
@@ -407,38 +417,7 @@ function clearSelection() {
 }
 // 压缩 IDs：排序后保存"首 ID + 后续 delta"，每个数转 base36，点号分隔
 // 例：[11429753, 11430253] → "dbids:6tewdt.dw"（~25% 收益，多 ID 时 65%+）
-function compressIds(idStrings) {
-  const nums = Array.from(idStrings).map(s => Number(s)).filter(n => Number.isFinite(n) && n > 0);
-  if (!nums.length) return '';
-  nums.sort((a, b) => a - b);
-  const dedup = [];
-  let last = -1;
-  for (const n of nums) {
-    if (n !== last) { dedup.push(n); last = n; }
-  }
-  const parts = [dedup[0].toString(36)];
-  for (let i = 1; i < dedup.length; i++) {
-    parts.push((dedup[i] - dedup[i - 1]).toString(36));
-  }
-  return 'dbids:' + parts.join('.');
-}
-function decompressIds(text) {
-  // 返回 string[] 或 null（不是压缩格式时）
-  const m = String(text || '').match(/dbids:([0-9a-z.]+)/i);
-  if (!m) return null;
-  const parts = m[1].split('.').filter(Boolean);
-  if (!parts.length) return null;
-  const result = [];
-  let cur = 0;
-  for (let i = 0; i < parts.length; i++) {
-    const v = parseInt(parts[i], 36);
-    if (!Number.isFinite(v) || v < 0) return null;
-    cur = i === 0 ? v : cur + v;
-    if (cur <= 0) return null;
-    result.push(String(cur));
-  }
-  return result;
-}
+// parsePastedIds / compressIds / decompressIds 已抽到 src/utils/idCodec.js
 
 async function copySelectedIds() {
   const ids = Array.from(selection.value.ids);
@@ -452,64 +431,15 @@ async function copySelectedIds() {
   }
 }
 
-// ID 压缩工具（独立面板）：把任意 IDs 文本压成 dbids:... ，或反向解出明文
+// ID 压缩工具（独立面板）的开关由父组件控制；具体加/解密逻辑抽到 CryptoToolModal.vue
 const cryptoTool = ref({ open: false, input: '', output: '' });
-function openCryptoTool() {
-  cryptoTool.value.open = true;
-}
-function closeCryptoTool() {
-  cryptoTool.value.open = false;
-}
+function openCryptoTool() { cryptoTool.value.open = true; }
+function closeCryptoTool() { cryptoTool.value.open = false; }
+// 「把已选 ID 载入到输入框」是父组件才能做的（要读 selection.value.ids）
 function loadSelectionToCryptoInput() {
   const ids = Array.from(selection.value.ids);
   if (!ids.length) { showToast('当前没有已选图片', 'warning'); return; }
   cryptoTool.value.input = ids.join(',');
-}
-function cryptoEncrypt() {
-  const ids = parsePastedIds(cryptoTool.value.input);
-  if (!ids.length) { showToast('没解析到任何 ID', 'warning'); return; }
-  const out = compressIds(ids);
-  cryptoTool.value.output = out;
-  const savedPct = cryptoTool.value.input.length > 0
-    ? Math.round((1 - out.length / cryptoTool.value.input.length) * 100)
-    : 0;
-  showToast(`加密完成 · ${ids.length} 个 ID · ${out.length} 字符（比输入省 ${savedPct >= 0 ? savedPct : 0}%）`, 'success');
-}
-function cryptoDecrypt() {
-  const decoded = decompressIds(cryptoTool.value.input);
-  if (!decoded || !decoded.length) {
-    // 不是压缩格式：尝试明文解析，让用户也能用来"规范化/去重"
-    const fallback = parsePastedIds(cryptoTool.value.input);
-    if (!fallback.length) { showToast('没解析到任何 ID', 'warning'); return; }
-    cryptoTool.value.output = fallback.join(',');
-    showToast(`输入是明文，已规范化为 ${fallback.length} 个 ID（${cryptoTool.value.output.length} 字符）`, 'info');
-    return;
-  }
-  cryptoTool.value.output = decoded.join(',');
-  showToast(`解密完成 · ${decoded.length} 个 ID（${cryptoTool.value.output.length} 字符）`, 'success');
-}
-async function copyCryptoOutput() {
-  if (!cryptoTool.value.output) { showToast('输出框是空的', 'warning'); return; }
-  try {
-    await navigator.clipboard.writeText(cryptoTool.value.output);
-    showToast(`已复制输出（${cryptoTool.value.output.length} 字符）`, 'success');
-  } catch (e) {
-    showToast(`复制失败: ${e.message}`, 'error');
-  }
-}
-function swapCryptoIO() {
-  const tmp = cryptoTool.value.input;
-  cryptoTool.value.input = cryptoTool.value.output;
-  cryptoTool.value.output = tmp;
-}
-function parsePastedIds(text) {
-  if (!text) return [];
-  // 优先识别压缩格式
-  const decompressed = decompressIds(text);
-  if (decompressed && decompressed.length) return decompressed;
-  // 回退：从任意文本中抠出 3 位以上数字（兼容旧的逗号/空格/换行/URL 混合）
-  const matches = String(text).match(/\d{3,}/g) || [];
-  return Array.from(new Set(matches));
 }
 const parsedPastedIds = computed(() => parsePastedIds(form.value.idsText));
 const isPastedCompressed = computed(() => /dbids:[0-9a-z.]+/i.test(form.value.idsText || ''));
@@ -2375,24 +2305,7 @@ function openTutorials() {
   tutorialsModal.value.open = true;
 }
 
-async function openHostsFolder() {
-  await window.desktopAPI.external.open('file:///C:/Windows/System32/drivers/etc/');
-}
-
-async function openFfmpegTutorial() {
-  // 知乎 ffmpeg 安装教程；在系统默认浏览器打开
-  await window.desktopAPI.external.open('https://zhuanlan.zhihu.com/p/662421567');
-}
-
-async function copyHostsSnippet() {
-  const text = safeMode ? '104.26.11.39 safebooru.donmai.us' : '104.26.11.39 danbooru.donmai.us';
-  try {
-    await navigator.clipboard.writeText(text);
-    showToast('已复制 hosts 内容', 'success');
-  } catch (e) {
-    showToast('复制失败：' + (e.message || e), 'error');
-  }
-}
+// 教程 Modal 逻辑已抽到 ./crawler/TutorialsModal.vue（hosts/ffmpeg 帮助），这里只保留开关。
 
 // ---------------- 角色增量翻译 ----------------
 const translationModal = ref({
@@ -2447,23 +2360,8 @@ const browse = ref({
   collectedDate: '',    // collected 模式：正在查看哪个日期的收集结果
 });
 
-// 缩略图 URL：统一走后端 /api/proxy_thumb（落盘缓存 + 防盗链转发）。
-// 直连模式下浏览器 <img> 直接连 Danbooru CDN 会被防盗链挡掉，所以两种模式都走代理最稳。
-function browseThumbUrl(post) {
-  const raw = post.preview_file_url || post.large_file_url || post.file_url || '';
-  if (!raw) return '';
-  return `http://127.0.0.1:8000/api/proxy_thumb?url=${encodeURIComponent(raw)}`;
-}
-
-// rating 首字母：Danbooru 返回 g/s/q/e，g(general) 归入 s 档
-function ratingBucket(post) {
-  const r = (post.rating || '').toLowerCase();
-  if (r === 'e') return 'e';
-  if (r === 'q') return 'q';
-  return 's'; // s / g / 空
-}
-
-// 从本地图片条目的 tags.rating 归档成 s/q/e；无 rating 信息时返回 ''（区别于 s）
+// 缩略图 URL / rating 分桶 / 打开原帖 的辅助逻辑已抽到 ./crawler/BrowseOverlay.vue。
+// ratingFromTags 仍在本组件——它服务于本地图库，browse 那边的 ratingBucket 不一样（g 归入 s）。
 function ratingFromTags(item) {
   const r = ((item?.tags?.rating) || '').toLowerCase();
   if (!r) return '';
@@ -2481,16 +2379,6 @@ const browseFiltered = computed(() => {
   }
   return list;
 });
-
-// 在默认浏览器打开 Danbooru 原帖（跟随 SFW 开关走 safebooru / danbooru）
-function browsePostUrl(post) {
-  const host = safeMode.value ? 'safebooru.donmai.us' : 'danbooru.donmai.us';
-  return `https://${host}/posts/${post.id}`;
-}
-async function openBrowsePost(post) {
-  if (!post?.id) return;
-  await window.desktopAPI.external.open(browsePostUrl(post));
-}
 
 // 刷新当前页的 score：重拉当前页（id: / tag 查询返回的就是最新数值），保留已勾选
 function refreshBrowsePage() {
@@ -2758,6 +2646,12 @@ function rawCharacterTag(item, index) {
   return raw.split(' ').filter(Boolean)[index] || '';
 }
 
+function rawArtistTag(item, index) {
+  // artist 字符串以空格分隔，与 splitTags 一致
+  const raw = item?.artist || '';
+  return raw.split(' ').filter(Boolean)[index] || '';
+}
+
 async function searchCharacterDictionary(query = translationModal.value.search) {
   translationModal.value.loading = true;
   try {
@@ -2785,10 +2679,11 @@ async function openCharacterDictionary(rawTag = '') {
   await searchCharacterDictionary();
 }
 
-// 角色 chip 右键弹出的迷你菜单：编辑词条 / 复制
+// 角色 / 画师 chip 右键弹出的迷你菜单：编辑词条（仅角色） / 复制
+// 复用一个 state，避免复制 dismiss / teleport 那套逻辑。
 // 旧版本直接打开字典弹窗，缺点是用户看不到 rawTag，搜索或复制原名要去翻字典。
-// 现在固定弹一个 2 项菜单，菜单上仅显示 rawTag（英文原 tag），让用户认得当前是哪个。
-const charContextMenu = ref({ open: false, x: 0, y: 0, rawTag: '' });
+// 现在固定弹一个菜单，菜单上仅显示 rawTag（英文原 tag），让用户认得当前是哪个。
+const charContextMenu = ref({ open: false, x: 0, y: 0, rawTag: '', kind: 'character' });
 
 function onCharacterContextMenu(event, item, index) {
   // 调试：先确认 handler 有没有真的跑到
@@ -2801,7 +2696,8 @@ function onCharacterContextMenu(event, item, index) {
     showToast('找不到该角色对应的原始 tag', 'warning');
     return;
   }
-  // 视口边界兜底：菜单宽约 180 / 高约 96，预留边距 8px
+  // 视口边界兜底：菜单宽约 180 / 高约 96（角色含「编辑词条」会更高），
+  // 画师只有一项更矮，统一用 96 足够。预留边距 8px
   const MENU_W = 180, MENU_H = 96, MARGIN = 8;
   let x = event.clientX;
   let y = event.clientY;
@@ -2809,8 +2705,33 @@ function onCharacterContextMenu(event, item, index) {
   if (y + MENU_H + MARGIN > window.innerHeight) y = window.innerHeight - MENU_H - MARGIN;
   if (x < MARGIN) x = MARGIN;
   if (y < MARGIN) y = MARGIN;
-  charContextMenu.value = { open: true, x, y, rawTag };
-  console.debug('[char-ctx] menu opened', { x, y, rawTag });
+  charContextMenu.value = { open: true, x, y, rawTag, kind: 'character' };
+  console.debug('[char-ctx] menu opened', { x, y, rawTag, kind: 'character' });
+}
+
+function onArtistContextMenu(event, item, index) {
+  // 画师右键：复用同一个迷你菜单，只显示「复制」一项
+  event.preventDefault();
+  event.stopPropagation();
+  if (event && typeof event.stopImmediatePropagation === 'function') event.stopImmediatePropagation();
+  const token = (item?.artistTokens || [])[index];
+  if (!token || token === '未知') {
+    showToast('该画师标签为空', 'warning');
+    return;
+  }
+  const rawTag = rawArtistTag(item, index);
+  if (!rawTag) {
+    showToast('找不到该画师对应的原始 tag', 'warning');
+    return;
+  }
+  const MENU_W = 180, MENU_H = 64, MARGIN = 8;  // 画师只有一项，更矮
+  let x = event.clientX;
+  let y = event.clientY;
+  if (x + MENU_W + MARGIN > window.innerWidth) x = window.innerWidth - MENU_W - MARGIN;
+  if (y + MENU_H + MARGIN > window.innerHeight) y = window.innerHeight - MENU_H - MARGIN;
+  if (x < MARGIN) x = MARGIN;
+  if (y < MARGIN) y = MARGIN;
+  charContextMenu.value = { open: true, x, y, rawTag, kind: 'artist' };
 }
 
 function closeCharContextMenu() {
@@ -2935,41 +2856,7 @@ async function fetchCharacterSource() {
   }
 }
 
-async function copyManualPrompt() {
-  try {
-    await navigator.clipboard.writeText(translateDetail.value.manualPrompt || '');
-    showToast('Prompt 已复制到剪贴板', 'success');
-  } catch (err) {
-    showToast('复制失败: ' + err.message, 'error');
-  }
-}
-
-function parsePastedJson() {
-  const raw = (translateDetail.value.pasteText || '').trim();
-  translateDetail.value.parseError = '';
-  if (!raw) {
-    translateDetail.value.parseError = '请先粘贴大模型返回的 JSON';
-    return;
-  }
-  let text = raw;
-  // 兼容大模型偶尔输出的 ```json ``` 包裹
-  if (text.startsWith('```json')) text = text.slice(7);
-  if (text.startsWith('```')) text = text.slice(3);
-  if (text.endsWith('```')) text = text.slice(0, -3);
-  text = text.trim();
-  try {
-    const obj = JSON.parse(text);
-    translateDetail.value.form = {
-      has_chinese: !!obj.has_chinese,
-      chinese_name: String(obj.chinese_name || ''),
-      source_hint: String(obj.source_hint || '').toLowerCase(),
-      translated_description_zh: String(obj.translated_description_zh || ''),
-    };
-    showToast('已解析填表', 'success');
-  } catch (err) {
-    translateDetail.value.parseError = 'JSON 解析失败: ' + err.message + '，可手动改下方字段';
-  }
-}
+// 复制 Prompt / 解析 JSON 已抽到 ./crawler/TranslateDetailModal.vue（emit notify 让父组件显示 toast）
 
 async function saveTranslation() {
   const form = translateDetail.value.form;
@@ -4373,7 +4260,7 @@ const tagFolderPreview = computed(() => {
       </div>
     </section>
 
-    <!-- 角色 chip 右键弹出的迷你菜单：编辑词条 / 复制
+    <!-- 角色 / 画师 chip 右键弹出的迷你菜单：编辑词条（仅角色） / 复制
          Teleport 到 body 避免被 viewer overlay / translate modal 的 z-index 遮住。
          mousedown / scroll / Esc / blur / resize 都已在 onMounted 里 dismiss。 -->
     <Teleport to="body">
@@ -4385,100 +4272,27 @@ const tagFolderPreview = computed(() => {
         @contextmenu.prevent
       >
         <div class="char-ctx-raw" :title="charContextMenu.rawTag">{{ charContextMenu.rawTag }}</div>
-        <button class="char-ctx-item" @click="charMenuEditDictionary">编辑词条</button>
+        <button v-if="charContextMenu.kind === 'character'" class="char-ctx-item" @click="charMenuEditDictionary">编辑词条</button>
         <button class="char-ctx-item" @click="charMenuCopyRawTag">复制</button>
       </div>
     </Teleport>
 
-    <div v-if="selectionListOpen" class="viewer-overlay" @click.self="selectionListOpen = false" style="z-index: 10000; display: flex; justify-content: center; align-items: center; padding: 24px;">
-      <div class="selection-list-card">
-        <div class="selection-list-head">
-          <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">已选清单 · {{ selection.ids.size }} 个</h3>
-          <button class="ghost" @click="selectionListOpen = false" style="color: var(--muted);">×</button>
-        </div>
-        <div v-if="!selection.ids.size" class="gallery-empty" style="min-height: 120px;">还没有选择任何图片</div>
-        <div v-else class="selection-list-body">
-          <div v-if="selectionInCurrentDate.length" class="selection-list-section">
-            <div class="selection-list-section-title">本日期可定位 · {{ selectionInCurrentDate.length }} 个</div>
-            <div class="selection-list-grid">
-              <div v-for="entry in selectionInCurrentDate" :key="`cur-${entry.id}`" class="selection-list-item">
-                <img class="selection-list-thumb" :src="entry.item.thumbUrl" :alt="entry.id" loading="lazy" />
-                <div class="selection-list-item-info">
-                  <span class="selection-list-id">#{{ entry.id }}</span>
-                  <span class="muted compact-text">第 {{ entry.page }} 页</span>
-                </div>
-                <div class="selection-list-item-actions">
-                  <button class="secondary" @click="jumpToSelected(entry.id)" title="跳转到该图所在页">跳转</button>
-                  <button class="ghost" @click="removeFromSelection(entry.id)" title="从选择中移除">移除</button>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div v-if="selectionOtherDates.length" class="selection-list-section">
-            <div class="selection-list-section-title">其他日期 / 当前过滤外 · {{ selectionOtherDates.length }} 个</div>
-            <div class="selection-list-other">
-              <span v-for="id in selectionOtherDates" :key="`oth-${id}`" class="selection-chip">
-                #{{ id }}
-                <button @click="removeFromSelection(id)" title="移除">×</button>
-              </span>
-            </div>
-            <p class="muted compact-text" style="margin: 8px 0 0;">提示：这些 ID 在当前日期 / 过滤条件下找不到。切换日期或关掉「只看高分」「格式过滤」可能能看到。</p>
-          </div>
-        </div>
-        <div class="selection-list-foot">
-          <button class="ghost" @click="selectionListOpen = false">关闭</button>
-        </div>
-      </div>
-    </div>
+    <SelectionListModal
+      v-model="selectionListOpen"
+      :selection-size="selection.ids.size"
+      :current-entries="selectionInCurrentDate"
+      :other-ids="selectionOtherDates"
+      @jump-to="jumpToSelected"
+      @remove="removeFromSelection"
+    />
 
-    <div v-if="cryptoTool.open" class="viewer-overlay" @click.self="closeCryptoTool" style="z-index: 10000; display: flex; justify-content: center; align-items: center; padding: 24px;">
-      <div class="crypto-tool-card">
-        <div class="crypto-tool-head">
-          <div>
-            <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">🗜 ID 加密 / 解密工具</h3>
-            <p class="muted compact-text" style="margin: 4px 0 0;">把长长的 ID 列表压成短字符串方便分享；也能反向还原。</p>
-          </div>
-          <button class="ghost" @click="closeCryptoTool" style="color: var(--muted);">×</button>
-        </div>
-
-        <div class="crypto-tool-row">
-          <span class="crypto-tool-label">输入</span>
-          <span class="muted compact-text">{{ cryptoTool.input.length }} 字符</span>
-          <button class="ghost crypto-tool-mini" @click="loadSelectionToCryptoInput" :disabled="!selection.ids.size" title="把当前选择的所有 IDs 填到输入框">⬇ 载入当前选择 ({{ selection.ids.size }})</button>
-          <button class="ghost crypto-tool-mini" @click="cryptoTool.input = ''" :disabled="!cryptoTool.input">清空</button>
-        </div>
-        <textarea
-          v-model="cryptoTool.input"
-          class="crypto-tool-textarea"
-          rows="4"
-          placeholder="粘贴你要加密的明文 IDs（逗号 / 空格 / 换行 / URL 都行），或粘贴压缩格式 dbids:... 用于解密"
-        />
-
-        <div class="crypto-tool-actions">
-          <button class="secondary" @click="cryptoEncrypt" :disabled="!cryptoTool.input.trim()">加密（压缩）</button>
-          <button class="secondary" @click="cryptoDecrypt" :disabled="!cryptoTool.input.trim()">🔓 解密（还原）</button>
-          <button class="ghost" @click="swapCryptoIO" :disabled="!cryptoTool.output" title="把输出搬回输入，方便再次加/解密">⇅ 交换</button>
-        </div>
-
-        <div class="crypto-tool-row">
-          <span class="crypto-tool-label">输出</span>
-          <span class="muted compact-text">{{ cryptoTool.output.length }} 字符</span>
-        </div>
-        <textarea
-          v-model="cryptoTool.output"
-          class="crypto-tool-textarea"
-          rows="4"
-          readonly
-          placeholder="结果会出现在这里"
-        />
-
-        <div class="crypto-tool-foot">
-          <span class="muted compact-text">压缩格式 = base36 增量编码，100+ 个 ID 通常省 60%+</span>
-          <button class="ghost" @click="closeCryptoTool">关闭</button>
-          <button @click="copyCryptoOutput" :disabled="!cryptoTool.output">复制输出</button>
-        </div>
-      </div>
-    </div>
+    <CryptoToolModal
+      :state="cryptoTool"
+      :selection-count="selection.ids.size"
+      @update:open="closeCryptoTool"
+      @load-from-selection="loadSelectionToCryptoInput"
+      @notify="({ message, type }) => showToast(message, type)"
+    />
 
     <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer" @mousemove="onViewerMouseMove" @mouseleave="viewer.toolbarHovered = false">
       <div
@@ -4491,12 +4305,13 @@ const tagFolderPreview = computed(() => {
         <div class="viewer-toolbar-info">
           <div class="viewer-meta-block">
             <span class="viewer-meta-label">画师</span>
-            <template v-for="token in (viewerItem?.artistTokens?.length ? viewerItem.artistTokens : ['未知'])" :key="`v-artist-${token}`">
+            <template v-for="(token, artistIndex) in (viewerItem?.artistTokens?.length ? viewerItem.artistTokens : ['未知'])" :key="`v-artist-${token}-${artistIndex}`">
               <button
                 class="meta-link author-link token-chip viewer-token-chip"
                 :class="{ 'is-favorited-chip': favoritedArtistSet.has(token) }"
                 @click="applySearch(token); closeViewer();"
-                :title="`搜索同画师作品：${token}`"
+                @contextmenu="onArtistContextMenu($event, viewerItem, artistIndex)"
+                :title="token === '未知' ? `搜索同画师作品：${token}` : `左键搜索同画师；右键复制画师原名：${token}`"
               >{{ token }}</button>
               <button
                 v-if="token !== '未知'"
@@ -4641,471 +4456,80 @@ const tagFolderPreview = computed(() => {
     </div>
 
     <!-- 教程 Modal -->
-    <div v-if="tutorialsModal.open" class="viewer-overlay" @click.self="tutorialsModal.open = false" style="z-index: 10000; display: flex; justify-content: center; align-items: center;">
-      <div class="card panel" style="width: 540px; max-width: 92vw; background: rgba(255, 255, 255, 0.96); box-shadow: 0 20px 50px rgba(0,0,0,0.3); display: flex; flex-direction: column; gap: 16px; padding: 22px 24px;">
-        <div style="display: flex; align-items: center; justify-content: space-between;">
-          <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">教程 / Tutorials</h3>
-          <button class="ghost" @click="tutorialsModal.open = false" style="min-width: 36px;">×</button>
-        </div>
-
-        <div class="tutorial-card">
-          <div class="tutorial-card-head">
-            <span class="tutorial-card-index">1</span>
-            <div>
-              <div class="tutorial-card-title">修改 hosts · 让 Danbooru 可直连</div>
-              <div class="tutorial-card-desc">当 Danbooru / Safebooru 走默认 DNS 解析失败时，把下列 IP 写进 hosts 即可直连。</div>
-            </div>
-          </div>
-          <ol class="tutorial-steps">
-            <li>用记事本（管理员）打开：<code>C:\Windows\System32\drivers\etc\hosts</code></li>
-            <li>在文件末尾添加下面这一行（按你当前模式选一条）：</li>
-          </ol>
-          <textarea readonly style="width: 100%; height: 56px; font-family: Consolas, monospace; font-size: 13px; resize: none; background: rgba(0,0,0,0.04); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 10px; outline: none; cursor: text;" onfocus="this.select()">{{ safeMode ? '104.26.11.39 safebooru.donmai.us' : '104.26.11.39 danbooru.donmai.us' }}</textarea>
-          <div style="display: flex; gap: 10px; margin-top: 10px; justify-content: flex-end;">
-            <button class="secondary" @click="openHostsFolder">打开 hosts 所在目录</button>
-            <button @click="copyHostsSnippet">复制 hosts 内容</button>
-          </div>
-        </div>
-
-        <div class="tutorial-card">
-          <div class="tutorial-card-head">
-            <span class="tutorial-card-index">2</span>
-            <div>
-              <div class="tutorial-card-title">安装 ffmpeg · 让 zip 动画能转 GIF、MP4 缩略图能取首帧</div>
-              <div class="tutorial-card-desc">没装 ffmpeg 时，"批量转 GIF" 按钮和 MP4 卡片缩略图会失效。点下面按钮看知乎图文教程。</div>
-            </div>
-          </div>
-          <div style="display: flex; gap: 10px; margin-top: 8px; justify-content: flex-end;">
-            <a
-              href="https://zhuanlan.zhihu.com/p/662421567"
-              target="_blank"
-              rel="noopener"
-              class="tutorial-link-btn"
-              @click.prevent="openFfmpegTutorial"
-            >打开知乎 ffmpeg 教程 →</a>
-          </div>
-        </div>
-
-        <div style="display: flex; justify-content: flex-end; margin-top: 4px;">
-          <button @click="tutorialsModal.open = false" style="min-width: 80px;">关闭</button>
-        </div>
-      </div>
-    </div>
+    <TutorialsModal
+      v-model="tutorialsModal.open"
+      :safe-mode="safeMode"
+      @notify="({ message, type }) => showToast(message, type)"
+    />
 
     <!-- Tag Browse Overlay: 按 tag 预览缩略图，勾选后下载 -->
-    <div v-if="browse.open" class="viewer-overlay browse-overlay" @click.self="closeBrowse">
-      <div class="browse-card">
-        <div class="browse-head">
-          <div class="browse-head-title">
-            <h3>{{ browse.source === 'collected' ? '查看收集ID' : 'Tag 浏览' }}</h3>
-            <span class="muted compact-text">
-              {{ browse.source === 'collected'
-                ? `${browse.collectedDate} · 收集 ${browse.collectedIds.length} 个 ID`
-                : '缩略图经后端缓存转发' }} · {{ safeMode ? 'SFW' : '全部内容' }}
-            </span>
-          </div>
-          <button class="ghost" @click="closeBrowse" style="color: var(--muted);">×</button>
-        </div>
-
-        <div class="browse-searchbar">
-          <template v-if="browse.source === 'collected'">
-            <span class="muted compact-text" style="align-self: center;">查看日期</span>
-            <TaskDatePicker :model-value="browse.collectedDate" @update:model-value="d => loadCollectedIds(d, 1)" placeholder="默认今天" />
-            <button class="secondary" :disabled="browse.loading" @click="loadCollectedIds(browse.collectedDate, 1)">
-              {{ browse.loading ? '加载中…' : '刷新' }}
-            </button>
-          </template>
-          <template v-else>
-            <input
-              v-model="browse.query"
-              class="search-input"
-              type="text"
-              placeholder="tag 查询串，例如：hatsune_miku rating:safe -comic"
-              @keyup.enter="runBrowseSearch(1)"
-            />
-          <button class="secondary" :disabled="browse.loading" @click="runBrowseSearch(1)">
-            {{ browse.loading ? '搜索中…' : '搜索' }}
-          </button>
-          </template>
-        </div>
-
-        <div class="browse-filters">
-          <label class="browse-filter-item">
-            最低分
-            <input v-model.number="browse.minScore" type="number" min="0" class="browse-score-input" />
-          </label>
-          <label class="browse-filter-item">
-            排序
-            <select v-model="browse.sortBy" class="browse-score-input" style="width: auto;">
-              <option value="default">默认顺序</option>
-              <option value="score">按 score</option>
-            </select>
-          </label>
-          <button class="ghost" :disabled="browse.loading || !browseFiltered.length" @click="refreshBrowsePage" title="重新拉取当前页，更新 score（保留已勾选）">刷新分数</button>
-          <span class="browse-filter-spacer"></span>
-          <button class="ghost" @click="browseSelectAllVisible">全选当前</button>
-          <button class="ghost" @click="browseClearSelection">清空选择</button>
-        </div>
-
-        <div class="browse-grid-wrap">
-          <div v-if="browse.loading" class="gallery-empty" style="min-height: 200px;">正在获取…</div>
-          <div v-else-if="browse.error" class="gallery-empty" style="min-height: 200px;">{{ browse.error }}</div>
-          <div v-else-if="!browseFiltered.length" class="gallery-empty" style="min-height: 200px;">
-            没有符合筛选条件的结果
-          </div>
-          <div v-else class="browse-grid">
-            <div
-              v-for="post in browseFiltered"
-              :key="post.id"
-              class="browse-cell"
-              :class="{ selected: browse.selected.has(post.id) }"
-              @click="toggleBrowseSelect(post)"
-            >
-              <img
-                :src="browseThumbUrl(post)"
-                class="browse-thumb"
-                loading="lazy"
-                referrerpolicy="no-referrer"
-                :alt="post.id"
-              />
-              <div class="browse-cell-check" :class="{ on: browse.selected.has(post.id) }">✓</div>
-              <button class="browse-open-post" @click.stop="openBrowsePost(post)" title="在浏览器打开 Danbooru 原帖">↗</button>
-              <div class="browse-cell-meta">
-                <span class="browse-badge" :class="`rating-${ratingBucket(post)}`">{{ (post.rating || '?').toUpperCase() }}</span>
-                <span class="browse-badge">▲{{ post.score }}</span>
-                <span class="browse-badge" v-if="post.image_width">{{ post.image_width }}×{{ post.image_height }}</span>
-                <span class="browse-badge browse-ext">{{ (post.file_ext || '').toUpperCase() }}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="browse-foot">
-          <div class="browse-foot-left">
-            <button class="ghost" :disabled="browse.page <= 1 || browse.loading" @click="browseGoPage(-1)">‹ 上一页</button>
-            <span class="browse-page-label">第 {{ browse.page }} 页</span>
-            <button class="ghost" :disabled="!browse.hasMore || browse.loading" @click="browseGoPage(1)">下一页 ›</button>
-          </div>
-          <div class="browse-foot-right">
-            <span class="muted compact-text">下载到</span>
-            <TaskDatePicker v-model="browse.targetDate" placeholder="默认今天" />
-            <button
-              class="browse-download-btn"
-              :disabled="!browseSelectedCount || browse.downloading"
-              @click="downloadBrowseSelected"
-            >
-              {{ browse.downloading ? '提交中…' : `下载选中 (${browseSelectedCount})` }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <BrowseOverlay
+      :state="browse"
+      :filtered="browseFiltered"
+      :selected-count="browseSelectedCount"
+      :safe-mode="safeMode"
+      @update:open="closeBrowse"
+      @load-collected="(d, p = 1) => loadCollectedIds(d, p)"
+      @run-search="(p = 1) => runBrowseSearch(p)"
+      @refresh="refreshBrowsePage"
+      @go-page="browseGoPage"
+      @toggle-select="toggleBrowseSelect"
+      @select-all-visible="browseSelectAllVisible"
+      @clear-selection="browseClearSelection"
+      @download-selected="downloadBrowseSelected"
+    />
 
     <!-- Translation Modal (list of untranslated characters) -->
-    <div v-if="translationModal.open" class="viewer-overlay translation-overlay" @click.self="closeTranslationModal">
-      <div class="translation-card">
-        <div class="translation-head">
-          <div>
-            <h3 style="margin: 0; color: var(--accent-deep); font-size: 18px;">
-              {{ translationModal.mode === 'dictionary' ? '角色字典' : `未翻译角色 · ${gallery.selectedDate || ''}` }}
-            </h3>
-            <p class="muted compact-text" style="margin: 4px 0 0;">
-              {{ translationModal.mode === 'dictionary' ? '可按 tag、中文名或 source_hint 搜索' : `共 ${translationModal.list.length} 个 · 已筛选 ${filteredUntranslated.length} 个` }}
-            </p>
-          </div>
-          <button class="ghost" @click="closeTranslationModal" style="color: var(--muted);">×</button>
-        </div>
-
-        <div class="character-dict-search-row">
-          <input
-            v-model="translationModal.search"
-            class="search-input"
-            type="text"
-            :placeholder="translationModal.mode === 'dictionary' ? '搜索 tag、中文名或作品来源' : '搜索 tag 或回退名'"
-            @keyup.enter="translationModal.mode === 'dictionary' && searchCharacterDictionary()"
-          />
-          <button v-if="translationModal.mode === 'dictionary'" class="secondary" @click="searchCharacterDictionary">搜索</button>
-        </div>
-
-        <button
-          v-if="translationModal.mode === 'dictionary' && translationModal.targetTag"
-          class="character-dict-target"
-          @click="openTranslateDetail({ tag: translationModal.targetTag, fallback_name: translationModal.targetTag })"
-        >编辑当前精确 tag：{{ translationModal.targetTag }}</button>
-
-        <div class="translation-list">
-          <div v-if="translationModal.loading" class="gallery-empty" style="min-height: 120px;">正在加载...</div>
-          <div v-else-if="!filteredUntranslated.length" class="gallery-empty" style="min-height: 120px;">
-            {{ translationModal.mode === 'dictionary' ? '没有匹配的字典记录，可直接编辑当前精确 tag' : (translationModal.list.length ? '没有匹配的角色' : '当前日期没有未翻译的角色') }}
-          </div>
-          <div
-            v-else
-            v-for="item in filteredUntranslated"
-            :key="item.tag"
-            class="translation-row"
-            @click="openTranslateDetail(item)"
-          >
-            <div class="translation-row-main">
-              <span class="translation-row-tag">{{ item.tag }}</span>
-              <span class="translation-row-fallback">
-                {{ translationModal.mode === 'dictionary' ? (item.chinese_name || item.fallback_name) : item.fallback_name }}
-                <template v-if="translationModal.mode === 'dictionary' && item.source_hint"> · {{ item.source_hint }}</template>
-              </span>
-            </div>
-            <span v-if="translationModal.mode === 'untranslated'" class="translation-row-count">出现 {{ item.post_count }} 次</span>
-            <span v-else class="translation-row-count">编辑</span>
-          </div>
-        </div>
-
-        <div class="translation-foot">
-          <span class="muted compact-text">保存单条记录后会立即同步到画廊；右键角色标签可快速进入这里。</span>
-          <div style="display: flex; gap: 8px;">
-            <button class="ghost" @click="closeTranslationModal" style="color: var(--accent-deep);">关闭</button>
-            <button
-              v-if="translationModal.mode === 'untranslated'"
-              @click="importTranslationDict"
-              :disabled="translationModal.importing"
-              style="min-width: 130px;"
-            >{{ translationModal.importing ? '导入中...' : '导入到画廊' }}</button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <TranslationModal
+      :state="translationModal"
+      :filtered="filteredUntranslated"
+      :selected-date="gallery.selectedDate"
+      @update:open="closeTranslationModal"
+      @search="searchCharacterDictionary"
+      @open-detail="openTranslateDetail"
+      @import="importTranslationDict"
+    />
 
     <!-- Translate Detail Modal (single character) -->
-    <div v-if="translateDetail.open" class="viewer-overlay translation-overlay" @click.self="closeTranslateDetail" style="z-index: 10010;">
-      <div class="translation-card translation-detail-card">
-        <div class="translation-head">
-          <div style="min-width: 0;">
-            <h3 style="margin: 0; color: var(--accent-deep); font-size: 17px; word-break: break-all;">{{ translateDetail.tag }}</h3>
-            <p class="muted compact-text" style="margin: 4px 0 0;">回退名: {{ translateDetail.fallbackName }}</p>
-          </div>
-          <button class="ghost" @click="closeTranslateDetail" style="color: var(--muted);">×</button>
-        </div>
-
-        <div v-if="!translateDetail.source.exists" class="translation-fetch-banner">
-          <span style="flex: 1; min-width: 0;">
-            character.json 中没有这条记录。可使用下方“重新拉取 Wiki 信息”补充描述，结果会写入 character_supplement.json。
-            <span v-if="translateDetail.fetchMsg" style="display: block; color: #9d2c2c; margin-top: 4px;">{{ translateDetail.fetchMsg }}</span>
-          </span>
-        </div>
-
-        <!-- 描述区固定在头部下方，不进 scrolling body，保证切换 tab / 滚动表单时一直可见 -->
-        <div class="translation-detail-section translation-description-pinned">
-          <div class="translation-detail-section-head static">
-            <span>英文描述与候选名（{{ translateDetail.source.other_names.length }} 个候选）</span>
-            <button
-              class="secondary translation-wiki-refresh"
-              @click="fetchCharacterSource"
-              :disabled="translateDetail.fetchBusy"
-              title="忽略本地缓存，重新请求 Danbooru Wiki 并覆盖增量资料"
-            >{{ translateDetail.fetchBusy ? '正在拉取...' : '重新拉取 Wiki 信息' }}</button>
-          </div>
-          <div class="translation-detail-section-body">
-            <div v-if="translateDetail.source.other_names.length" style="margin-bottom: 8px;">
-              <strong style="font-size: 12px;">候选名: </strong>
-              <span class="muted compact-text">{{ translateDetail.source.other_names.slice(0, 30).join(' / ') }}</span>
-            </div>
-            <pre class="translation-desc">{{ translateDetail.source.description || '(无描述，可点上方“重新拉取 Wiki 信息”)' }}</pre>
-            <p v-if="translateDetail.matchedTranslationKey && translateDetail.matchedTranslationKey !== translateDetail.tag" class="translation-inherit-note">
-              当前显示继承自 {{ translateDetail.matchedTranslationKey }}。保存后会为 {{ translateDetail.tag }} 创建精确覆盖，适合修正多皮肤同名问题。
-            </p>
-          </div>
-        </div>
-
-        <div class="translation-detail-body">
-          <div class="translation-mode-body">
-            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap;">
-              <button class="secondary" @click="copyManualPrompt" style="min-width: 130px;">复制 Prompt</button>
-              <span class="muted compact-text">粘贴到你的大模型，把返回的 JSON 贴到下方</span>
-            </div>
-            <textarea
-              v-model="translateDetail.pasteText"
-              placeholder='把大模型返回的 JSON 粘贴到这里，例如：{"has_chinese": true, "chinese_name": "...", ...}'
-              class="translation-paste"
-            ></textarea>
-            <div style="display: flex; gap: 10px; align-items: center; margin-top: 6px; flex-wrap: wrap;">
-              <button class="secondary" @click="parsePastedJson" style="min-width: 130px;">解析填表</button>
-              <span v-if="translateDetail.parseError" class="error-text" style="margin: 0;">{{ translateDetail.parseError }}</span>
-            </div>
-          </div>
-
-          <div class="translation-form">
-            <label class="translation-form-row">
-              <input type="checkbox" v-model="translateDetail.form.has_chinese" />
-              <span>有中文名</span>
-            </label>
-            <label class="translation-form-field">
-              <span>中文名</span>
-              <input v-model="translateDetail.form.chinese_name" type="text" placeholder="例如：初音未来" />
-            </label>
-            <label class="translation-form-field">
-              <span>source_hint（小写英文，例如 vocaloid / touhou）</span>
-              <input v-model="translateDetail.form.source_hint" type="text" placeholder="例如：touhou" />
-            </label>
-            <label class="translation-form-field">
-              <span>中文简介</span>
-              <textarea
-                v-model="translateDetail.form.translated_description_zh"
-                placeholder="可选：角色的中文简介，会显示在画廊详情里"
-                class="translation-desc-input"
-              ></textarea>
-            </label>
-          </div>
-        </div>
-
-        <div class="translation-foot">
-          <span class="muted compact-text">保存后会写入 character_chinese_search.json</span>
-          <div style="display: flex; gap: 8px;">
-            <button class="ghost" @click="closeTranslateDetail" style="color: var(--accent-deep);">取消</button>
-            <button
-              @click="saveTranslation"
-              :disabled="translateDetail.saving"
-              style="min-width: 110px;"
-            >{{ translateDetail.saving ? '保存中...' : '保存到字典' }}</button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <TranslateDetailModal
+      :state="translateDetail"
+      @update:open="closeTranslateDetail"
+      @refresh-wiki="fetchCharacterSource"
+      @save="saveTranslation"
+      @notify="({ message, type }) => showToast(message, type)"
+    />
 
     <!-- 刷新范围 Modal -->
-    <div v-if="rangeRefresh.open" class="viewer-overlay" @click.self="closeRangeRefreshDialog" style="z-index: 10020; display: flex; justify-content: center; align-items: center; padding: 24px;">
-      <div class="range-refresh-modal">
-        <div class="range-refresh-head">
-          <h3 style="margin: 0; color: var(--accent-deep); font-size: 17px;">刷新指定范围页的热度</h3>
-          <button class="ghost" @click="closeRangeRefreshDialog" style="color: var(--muted);">×</button>
-        </div>
-        <p class="muted compact-text" style="margin: 0;">
-          当前共 {{ activeTotalPages }} 页 · 每页 {{ gallery.pageSize }} 张 · 当前所在第 {{ activePage }} 页
-        </p>
-        <div class="field-grid">
-          <label>
-            <span>起始页</span>
-            <input v-model.number="rangeRefresh.startPage" type="number" min="1" :max="activeTotalPages" />
-          </label>
-          <label>
-            <span>结束页</span>
-            <input v-model.number="rangeRefresh.endPage" type="number" min="1" :max="activeTotalPages" />
-          </label>
-        </div>
-        <p class="muted compact-text" style="margin: 0;">
-          将刷新 <strong style="color: var(--accent-deep);">{{ rangeRefreshCount }}</strong> 张图片的 score / 收藏数 / 画师（孤立文件会反查补全）
-        </p>
-        <div style="display: flex; justify-content: flex-end; gap: 8px;">
-          <button class="ghost" @click="closeRangeRefreshDialog" style="color: var(--accent-deep);">取消</button>
-          <button @click="startRefreshScoresRange" :disabled="!rangeRefreshCount || refresh.isRunning" style="min-width: 100px;">
-            {{ refresh.isRunning ? '刷新中...' : '确定刷新' }}
-          </button>
-        </div>
-      </div>
-    </div>
+    <RefreshRangeModal
+      :state="rangeRefresh"
+      :active-total-pages="activeTotalPages"
+      :active-page="activePage"
+      :page-size="gallery.pageSize"
+      :count="rangeRefreshCount"
+      :is-running="refresh.isRunning"
+      @update:open="closeRangeRefreshDialog"
+      @confirm="startRefreshScoresRange"
+    />
 
     <!-- 加入画师收藏 Modal -->
-    <div v-if="favoriteDialog.open" class="viewer-overlay" @click.self="closeFavoriteDialog" style="z-index: 10020; display: flex; justify-content: center; align-items: center; padding: 24px;">      <div class="fav-add-modal">
-        <div class="fav-add-head">
-          <div>
-            <h3 style="margin: 0; color: var(--accent-deep); font-size: 17px;">加入画师收藏</h3>
-            <p class="muted compact-text" style="margin: 4px 0 0;">画师：<strong style="color: var(--ink); font-family: Consolas, monospace;">{{ favoriteDialog.artist }}</strong></p>
-          </div>
-          <button class="ghost" @click="closeFavoriteDialog" style="color: var(--muted);">×</button>
-        </div>
-
-        <div v-if="favoriteDialog.loading" class="muted compact-text" style="text-align: center; padding: 20px;">加载分组中...</div>
-        <template v-else>
-          <div class="fav-add-list">
-            <label v-for="g in favGroupList" :key="g.name" class="fav-add-row">
-              <input
-                type="checkbox"
-                :checked="favoriteDialog.selectedGroups.includes(g.name)"
-                @change="toggleFavGroup(g.name)"
-              />
-              <span class="fav-add-name">{{ g.name }}</span>
-              <span class="fav-add-count">{{ g.count }}</span>
-            </label>
-            <div v-if="!favGroupList.length" class="muted compact-text" style="text-align: center; padding: 12px;">
-              还没有分组，请在下方创建一个
-            </div>
-          </div>
-
-          <div class="fav-add-new">
-            <input
-              v-model="favoriteDialog.newGroupName"
-              type="text"
-              placeholder="新分组名称，例如：厚涂大佬"
-              @keyup.enter="createFavGroupInline"
-            />
-            <button class="secondary" @click="createFavGroupInline" style="white-space: nowrap;">+ 新建</button>
-          </div>
-        </template>
-
-        <div class="fav-add-foot">
-          <span class="muted compact-text">已勾选 {{ favoriteDialog.selectedGroups.length }} 个分组</span>
-          <div style="display: flex; gap: 8px;">
-            <button class="ghost" @click="closeFavoriteDialog" style="color: var(--accent-deep);">取消</button>
-            <button @click="saveFavoriteDialog" :disabled="favoriteDialog.saving" style="min-width: 90px;">
-              {{ favoriteDialog.saving ? '保存中...' : '保存' }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <ArtistFavoriteModal
+      :state="favoriteDialog"
+      :group-list="favGroupList"
+      @update:open="closeFavoriteDialog"
+      @toggle-group="toggleFavGroup"
+      @create-group="createFavGroupInline"
+      @save="saveFavoriteDialog"
+    />
 
     <!-- 加入角色收藏 Modal -->
-    <div v-if="charFavoriteDialog.open" class="viewer-overlay" @click.self="closeCharacterFavoriteDialog" style="z-index: 10020; display: flex; justify-content: center; align-items: center; padding: 24px;">
-      <div class="fav-add-modal">
-        <div class="fav-add-head">
-          <div>
-            <h3 style="margin: 0; color: var(--accent-deep); font-size: 17px;">加入角色收藏</h3>
-            <p class="muted compact-text" style="margin: 4px 0 0;">
-              角色：<strong style="color: var(--ink); font-family: Consolas, monospace;">{{ charFavoriteDialog.character }}</strong>
-            </p>
-            <p v-if="charFavoriteDialog.sourceHint" class="muted compact-text" style="margin: 2px 0 0;">
-              出处 (source_hint)：<strong style="color: var(--accent-deep);">{{ charFavoriteDialog.sourceHint }}</strong>
-              <span class="muted compact-text">· 同出处的角色会自动合并到同名分组</span>
-            </p>
-          </div>
-          <button class="ghost" @click="closeCharacterFavoriteDialog" style="color: var(--muted);">×</button>
-        </div>
-
-        <div v-if="charFavoriteDialog.loading" class="muted compact-text" style="text-align: center; padding: 20px;">加载分组中...</div>
-        <template v-else>
-          <div class="fav-add-list">
-            <label v-for="g in charFavGroupList" :key="g.name" class="fav-add-row">
-              <input
-                type="checkbox"
-                :checked="charFavoriteDialog.selectedGroups.includes(g.name)"
-                @change="toggleCharFavGroup(g.name)"
-              />
-              <span class="fav-add-name">{{ g.name }}</span>
-              <span class="fav-add-count">{{ g.count }}</span>
-            </label>
-            <div v-if="!charFavGroupList.length" class="muted compact-text" style="text-align: center; padding: 12px;">
-              还没有分组，下方已为你预填 source_hint 作为新分组名
-            </div>
-          </div>
-
-          <div class="fav-add-new">
-            <input
-              v-model="charFavoriteDialog.newGroupName"
-              type="text"
-              placeholder="新分组名（建议 = source_hint，例如 vocaloid / touhou）"
-              @keyup.enter="createCharFavGroupInline"
-            />
-            <button class="secondary" @click="createCharFavGroupInline" style="white-space: nowrap;">+ 新建</button>
-          </div>
-        </template>
-
-        <div class="fav-add-foot">
-          <span class="muted compact-text">已勾选 {{ charFavoriteDialog.selectedGroups.length }} 个分组</span>
-          <div style="display: flex; gap: 8px;">
-            <button class="ghost" @click="closeCharacterFavoriteDialog" style="color: var(--accent-deep);">取消</button>
-            <button @click="saveCharacterFavoriteDialog" :disabled="charFavoriteDialog.saving" style="min-width: 90px;">
-              {{ charFavoriteDialog.saving ? '保存中...' : '保存' }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <CharacterFavoriteModal
+      :state="charFavoriteDialog"
+      :group-list="charFavGroupList"
+      @update:open="closeCharacterFavoriteDialog"
+      @toggle-group="toggleCharFavGroup"
+      @create-group="createCharFavGroupInline"
+      @save="saveCharacterFavoriteDialog"
+    />
   </div>
 </template>
 
@@ -5174,79 +4598,7 @@ const tagFolderPreview = computed(() => {
   color: #ff9800;
 }
 
-/* 教程弹窗里的卡片 */
-.tutorial-card {
-  border: 1px solid rgba(30, 41, 82, 0.16);
-  border-radius: 10px;
-  padding: 14px 16px;
-  background: rgba(255, 252, 246, 0.7);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.tutorial-card-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-.tutorial-card-index {
-  flex: 0 0 28px;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
-  color: #fff;
-  font-weight: 800;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  margin-top: 2px;
-}
-.tutorial-card-title {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--ink);
-  line-height: 1.4;
-}
-.tutorial-card-desc {
-  font-size: 12px;
-  color: var(--muted, #846a55);
-  margin-top: 2px;
-  line-height: 1.5;
-}
-.tutorial-steps {
-  margin: 4px 0 0;
-  padding-left: 22px;
-  font-size: 12px;
-  color: var(--ink);
-  line-height: 1.7;
-}
-.tutorial-steps code {
-  background: rgba(0, 0, 0, 0.06);
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-family: Consolas, monospace;
-  font-size: 11.5px;
-}
-.tutorial-link-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 14px;
-  border-radius: 7px;
-  background: linear-gradient(135deg, #10b981, #059669);
-  color: #fff;
-  text-decoration: none;
-  font-size: 13px;
-  font-weight: 600;
-  border: none;
-  cursor: pointer;
-  transition: filter 0.15s ease;
-}
-.tutorial-link-btn:hover {
-  filter: brightness(1.08);
-}
+/* 教程弹窗里的卡片已随 TutorialsModal.vue 一起搬走 */
 
 .mode-selector {
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -6655,240 +6007,7 @@ const tagFolderPreview = computed(() => {
   text-align: left;
   overflow-wrap: anywhere;
 }
-.translation-inherit-note {
-  margin: 8px 0 0;
-  padding: 7px 9px;
-  border-radius: 8px;
-  background: rgba(216, 140, 27, 0.12);
-  color: #8a5a00;
-  font-size: 11px;
-  line-height: 1.5;
-}
-.translation-overlay {
-  z-index: 10000;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  padding: 24px;
-}
-.translation-card {
-  width: 720px;
-  max-width: 92vw;
-  max-height: 86vh;
-  background: rgba(255, 255, 255, 0.98);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  overflow: hidden;
-}
-.translation-detail-card {
-  width: 760px;
-  max-height: 90vh;
-}
-.translation-detail-body {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding-right: 4px;
-}
-.translation-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 10px;
-}
-.translation-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.55);
-}
-.translation-row {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-bottom: 1px dashed rgba(30, 41, 82, 0.12);
-  cursor: pointer;
-  transition: background 0.15s ease;
-}
-.translation-row:hover {
-  background: rgba(99, 102, 241, 0.1);
-}
-.translation-row:last-child {
-  border-bottom: none;
-}
-.translation-row-main {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-  flex: 1;
-}
-.translation-row-tag {
-  font-family: Consolas, monospace;
-  font-size: 13px;
-  color: var(--ink);
-  word-break: break-all;
-}
-.translation-row-fallback {
-  font-size: 12px;
-  color: var(--muted);
-}
-.translation-row-count {
-  flex-shrink: 0;
-  font-size: 11px;
-  color: var(--accent-deep);
-  background: var(--soft);
-  padding: 3px 10px;
-  border-radius: 999px;
-  font-weight: 600;
-}
-.translation-foot {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-  margin-top: 4px;
-  flex-wrap: wrap;
-}
-.translation-detail-section {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.55);
-  overflow: hidden;
-}
-.translation-description-pinned {
-  flex: 0 0 auto;
-}
-.translation-detail-section-head {
-  padding: 8px 12px;
-  background: rgba(99, 102, 241, 0.1);
-  cursor: pointer;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 12px;
-  font-weight: 600;
-  user-select: none;
-}
-.translation-detail-section-head.static {
-  cursor: default;
-}
-.translation-wiki-refresh {
-  flex: 0 0 auto;
-  padding: 4px 9px;
-  font-size: 11px;
-  white-space: nowrap;
-}
-.translation-detail-section-body {
-  padding: 10px 12px;
-  max-height: 150px;
-  overflow-y: auto;
-}
-.translation-desc {
-  margin: 0;
-  font-family: Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.55;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--ink);
-}
-.translation-mode-tabs {
-  display: flex;
-  gap: 8px;
-}
-.translation-mode-body {
-  padding: 10px 12px;
-  background: rgba(99, 102, 241, 0.25);
-  border-radius: 12px;
-  border: 1px dashed rgba(30, 41, 82, 0.18);
-}
-.translation-paste {
-  width: 100%;
-  height: 64px;
-  padding: 8px 10px;
-  font-family: Consolas, monospace;
-  font-size: 12px;
-  line-height: 1.55;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
-  color: var(--ink);
-  resize: vertical;
-  margin-top: 6px;
-}
-.translation-form {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.translation-form-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  font-size: 12px;
-  color: var(--ink);
-}
-.translation-form-row input[type="checkbox"] {
-  width: auto;
-  margin: 0;
-}
-.translation-form-field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--muted);
-}
-.translation-desc-input {
-  width: 100%;
-  height: 90px;
-  padding: 8px 10px;
-  font-size: 12px;
-  line-height: 1.55;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: #fff;
-  color: var(--ink);
-  resize: vertical;
-}
-.translation-fetch-banner {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 12px;
-  background: rgba(212, 143, 47, 0.12);
-  border: 1px solid rgba(212, 143, 47, 0.35);
-  border-radius: 10px;
-  color: #8a5a14;
-  font-size: 12px;
-  line-height: 1.5;
-}
-.translation-api-error {
-  margin-top: 8px;
-  padding: 10px 12px;
-  background: rgba(157, 44, 44, 0.08);
-  border: 1px solid rgba(157, 44, 44, 0.35);
-  border-radius: 10px;
-  color: #9d2c2c;
-  font-size: 12px;
-  line-height: 1.5;
-  word-break: break-word;
-  max-height: 160px;
-  overflow-y: auto;
-}
+/* .translation-* 共享样式已抽到 src/styles/translation.css（TranslationModal + TranslateDetailModal 共用） */
 
 /* ---------------- 画师 chip ★ 按钮 + 加入收藏弹窗 ---------------- */
 .author-fav-btn {
@@ -6904,69 +6023,7 @@ const tagFolderPreview = computed(() => {
   border-color: rgba(212, 143, 47, 0.55);
 }
 
-.fav-add-modal {
-  width: 440px;
-  max-width: 92vw;
-  background: rgba(255, 255, 255, 0.98);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.fav-add-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 10px;
-}
-.fav-add-list {
-  max-height: 260px;
-  overflow-y: auto;
-  padding: 8px 10px;
-  background: rgba(255, 255, 255, 0.55);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.fav-add-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 6px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--ink);
-}
-.fav-add-row:hover { background: rgba(99, 102, 241, 0.09); }
-.fav-add-row input[type="checkbox"] { width: auto; margin: 0; }
-.fav-add-name { flex: 1; word-break: break-all; }
-.fav-add-count {
-  flex-shrink: 0;
-  font-size: 11px;
-  font-weight: 700;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--soft);
-  color: var(--accent-deep);
-}
-.fav-add-new {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-.fav-add-new input { flex: 1; }
-.fav-add-foot {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 10px;
-}
+/* .fav-add-* 样式已抽到 src/styles/fav-add.css（两个 favorite modal 共享） */
 
 /* ---------------- 刷新热度下拉菜单（合并原本 3 个按钮） ---------------- */
 .refresh-dropdown {
@@ -7207,24 +6264,7 @@ const tagFolderPreview = computed(() => {
   color: var(--accent-deep);
 }
 
-/* ---------------- 刷新范围 Modal ---------------- */
-.range-refresh-modal {
-  width: 400px;
-  max-width: 92vw;
-  background: rgba(255, 255, 255, 0.98);
-  border: 1px solid var(--line);
-  border-radius: 18px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
-  padding: 18px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.range-refresh-head {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
+/* 刷新范围 Modal 样式已随 RefreshRangeModal.vue 一起搬走 */
 
 /* ---------------- 收藏卡片 / chip 异色高亮 ---------------- */
 .search-input-wrap {
@@ -7624,113 +6664,7 @@ const tagFolderPreview = computed(() => {
   font-weight: 600;
   color: var(--accent-deep);
   margin-bottom: 6px;
-}
-.selection-list-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
-  gap: 10px;
-}
-.selection-list-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px;
-  background: rgba(99, 102, 241, 0.4);
-  border: 1px solid rgba(79, 118, 224, 0.14);
-  border-radius: 10px;
-}
-.selection-list-thumb {
-  width: 56px;
-  height: 56px;
-  object-fit: cover;
-  border-radius: 6px;
-  background: #eee;
-  flex: 0 0 auto;
-}
-.selection-list-item-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.selection-list-id {
-  font-family: Consolas, monospace;
-  font-size: 12px;
-  color: var(--ink);
-  font-weight: 600;
-}
-.selection-list-item-actions {
-  display: flex;
-  gap: 4px;
-}
-.selection-list-item-actions button {
-  padding: 4px 8px;
-  font-size: 11px;
-}
-.selection-list-other {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-.selection-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 8px 4px 10px;
-  border-radius: 999px;
-  background: rgba(99, 102, 241, 0.1);
-  border: 1px solid rgba(79, 118, 224, 0.18);
-  font-family: Consolas, monospace;
-  font-size: 12px;
-  color: var(--ink);
-}
-.selection-chip button {
-  background: transparent;
-  border: none;
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1;
-  padding: 0 2px;
-  cursor: pointer;
-}
-.selection-chip button:hover {
-  color: #d12869;
-}
-.selection-list-foot {
-  display: flex;
-  justify-content: flex-end;
-}
-
-/* 加密工具弹窗 */
-.crypto-tool-card {
-  width: 640px;
-  max-width: 92vw;
-  max-height: 86vh;
-  background: rgba(255, 255, 255, 0.97);
-  border-radius: 14px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
-  padding: 18px 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.crypto-tool-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 4px;
-}
-.crypto-tool-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 4px;
-}
-.crypto-tool-label {
-  font-weight: 600;
-  font-size: 13px;
+/* .selection-list-* 样式已随 SelectionListModal.vue 一起搬走 */
   color: var(--accent-deep);
 }
 .crypto-tool-mini {
@@ -7773,44 +6707,7 @@ const tagFolderPreview = computed(() => {
 /* 大图浏览器底部的「收藏」切换按钮 */
 .viewer-fav-btn {
   background: rgba(255, 255, 255, 0.12);
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.25);
-}
-.viewer-fav-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.22); }
-.viewer-fav-btn.active {
-  background: linear-gradient(135deg, #ff5b8a, #d12869);
-  border-color: transparent;
-  color: #fff;
-  box-shadow: 0 2px 8px rgba(209, 40, 105, 0.5);
-}
-
-
-.image-card.is-favorited {
-  background: linear-gradient(135deg, rgba(255, 222, 173, 0.35), rgba(255, 188, 86, 0.18));
-  border: 3px solid #d48f2f;
-  box-shadow: 0 0 0 1px rgba(212, 143, 47, 0.25), 0 6px 22px rgba(212, 143, 47, 0.4);
-  position: relative;
-}
-.image-card.is-favorited::before {
-  content: '★ 收藏';
-  position: absolute;
-  top: 32px;
-  left: 6px;
-  z-index: 2;
-  padding: 2px 8px;
-  font-size: 10px;
-  font-weight: 700;
-  color: #fff;
-  background: linear-gradient(135deg, #d48f2f, #b46e16);
-  border-radius: 999px;
-  box-shadow: 0 2px 6px rgba(180, 110, 22, 0.45);
-  letter-spacing: 0.5px;
-  pointer-events: none;
-}
-/* 图片直接收藏比作者/角色命中优先级更高：粉红色厚边框 + 阴影更强 */
-.image-card.is-img-favorited {
-  background: linear-gradient(135deg, rgba(255, 192, 213, 0.4), rgba(209, 40, 105, 0.18));
-  border: 3px solid #d12869;
+/* .crypto-tool-* 样式已随 CryptoToolModal.vue 一起搬走 */
   box-shadow: 0 0 0 1px rgba(209, 40, 105, 0.3), 0 6px 22px rgba(209, 40, 105, 0.45);
 }
 .image-card.is-img-favorited::before {
@@ -8385,151 +7282,5 @@ const tagFolderPreview = computed(() => {
 .gallery-tools input { background: rgba(255, 255, 255, 0.92); }
 .viewer-corner-btn.is-active { box-shadow: 0 4px 16px rgba(var(--accent-rgb), 0.35); }
 
-/* ---------------- Tag 浏览 overlay ---------------- */
-.browse-overlay {
-  z-index: 10000;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  padding: 24px;
-}
-.browse-card {
-  width: min(1200px, 94vw);
-  height: min(860px, 92vh);
-  background: var(--surface, #fff);
-  border-radius: 14px;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
-}
-.browse-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 18px;
-  border-bottom: 1px solid var(--line, #eee);
-}
-.browse-head-title { display: flex; align-items: baseline; gap: 12px; }
-.browse-head-title h3 { margin: 0; color: var(--accent-deep); font-size: 18px; }
-.browse-searchbar {
-  display: flex;
-  gap: 8px;
-  padding: 12px 18px 8px;
-}
-.browse-searchbar .search-input { flex: 1; }
-.browse-filters {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 4px 18px 12px;
-  flex-wrap: wrap;
-  border-bottom: 1px solid var(--line, #eee);
-}
-.browse-filter-item { display: flex; align-items: center; gap: 6px; font-size: 13px; }
-.browse-score-input { width: 64px; }
-.browse-filter-ratings { display: flex; gap: 12px; font-size: 13px; }
-.browse-filter-ratings label { display: flex; align-items: center; gap: 4px; cursor: pointer; }
-.browse-filter-spacer { flex: 1; }
-.browse-grid-wrap { flex: 1; overflow-y: auto; padding: 14px 18px; }
-.browse-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-  gap: 10px;
-}
-.browse-cell {
-  position: relative;
-  aspect-ratio: 1 / 1;
-  border-radius: 10px;
-  overflow: hidden;
-  cursor: pointer;
-  background: var(--surface-muted, #f0f0f0);
-  border: 2px solid transparent;
-  transition: border-color 0.12s, transform 0.12s;
-}
-.browse-cell:hover { transform: translateY(-2px); }
-.browse-cell.selected { border-color: var(--accent-deep, #7c5cff); }
-.browse-thumb { width: 100%; height: 100%; object-fit: cover; display: block; }
-.browse-cell-check {
-  position: absolute;
-  top: 6px;
-  left: 6px;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.4);
-  color: transparent;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  font-weight: bold;
-  border: 2px solid rgba(255, 255, 255, 0.8);
-}
-.browse-cell-check.on { background: var(--accent-deep, #7c5cff); color: #fff; }
-.browse-open-post {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 22px;
-  height: 22px;
-  padding: 0;
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.45);
-  color: #fff;
-  border: 2px solid rgba(255, 255, 255, 0.8);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  font-weight: bold;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s ease, background 0.15s ease;
-}
-.browse-cell:hover .browse-open-post { opacity: 1; }
-.browse-open-post:hover { background: var(--accent-deep, #7c5cff); }
-.browse-cell-meta {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-  padding: 4px 6px;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.65), transparent);
-}
-.browse-badge {
-  font-size: 10px;
-  line-height: 1.4;
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: rgba(0, 0, 0, 0.55);
-  color: #fff;
-}
-.browse-badge.rating-e { background: rgba(220, 50, 50, 0.85); }
-.browse-badge.rating-q { background: rgba(220, 150, 40, 0.85); }
-.browse-badge.rating-s { background: rgba(50, 160, 90, 0.85); }
-.browse-foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 18px;
-  border-top: 1px solid var(--line, #eee);
-  gap: 12px;
-}
-.browse-foot-left, .browse-foot-right { display: flex; align-items: center; gap: 10px; }
-.browse-page-label { font-size: 13px; color: var(--muted); min-width: 60px; text-align: center; }
-.browse-download-btn {
-  min-width: 140px;
-  padding: 8px 16px;
-  border: none;
-  border-radius: 8px;
-  background: var(--accent-deep, #7c5cff);
-  color: #fff;
-  cursor: pointer;
-  font-weight: 600;
-}
-.browse-download-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* .browse-* 样式已随 BrowseOverlay.vue 一起搬走 */
 </style>

@@ -1,0 +1,238 @@
+/* 角色翻译系统共享样式
+ * 用于 TranslationModal（未翻译列表 / 角色字典）和 TranslateDetailModal（编辑单条）。
+ * 全局 CSS，因为两个 modal 共享 .translation-card / .translation-head / .translation-list 等。 */
+
+.translation-inherit-note {
+  margin: 8px 0 0;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: rgba(216, 140, 27, 0.12);
+  color: #8a5a00;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.translation-overlay {
+  z-index: 10000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 24px;
+}
+.translation-card {
+  width: 720px;
+  max-width: 92vw;
+  max-height: 86vh;
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+}
+.translation-detail-card {
+  width: 760px;
+  max-height: 90vh;
+}
+.translation-detail-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+.translation-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+.translation-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
+}
+.translation-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px dashed rgba(30, 41, 82, 0.12);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.translation-row:hover {
+  background: rgba(99, 102, 241, 0.1);
+}
+.translation-row:last-child {
+  border-bottom: none;
+}
+.translation-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.translation-row-tag {
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  color: var(--ink);
+  word-break: break-all;
+}
+.translation-row-fallback {
+  font-size: 12px;
+  color: var(--muted);
+}
+.translation-row-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--accent-deep);
+  background: var(--soft);
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-weight: 600;
+}
+.translation-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+.translation-detail-section {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
+  overflow: hidden;
+}
+.translation-description-pinned {
+  flex: 0 0 auto;
+}
+.translation-detail-section-head {
+  padding: 8px 12px;
+  background: rgba(99, 102, 241, 0.1);
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  user-select: none;
+}
+.translation-detail-section-head.static {
+  cursor: default;
+}
+.translation-wiki-refresh {
+  flex: 0 0 auto;
+  padding: 4px 9px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.translation-detail-section-body {
+  padding: 10px 12px;
+  max-height: 150px;
+  overflow-y: auto;
+}
+.translation-desc {
+  margin: 0;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--ink);
+}
+.translation-mode-tabs {
+  display: flex;
+  gap: 8px;
+}
+.translation-mode-body {
+  padding: 10px 12px;
+  background: rgba(99, 102, 241, 0.25);
+  border-radius: 12px;
+  border: 1px dashed rgba(30, 41, 82, 0.18);
+}
+.translation-paste {
+  width: 100%;
+  height: 64px;
+  padding: 8px 10px;
+  font-family: Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  resize: vertical;
+  margin-top: 6px;
+}
+.translation-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.translation-form-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--ink);
+}
+.translation-form-row input[type="checkbox"] {
+  width: auto;
+  margin: 0;
+}
+.translation-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.translation-desc-input {
+  width: 100%;
+  height: 90px;
+  padding: 8px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--ink);
+  resize: vertical;
+}
+.translation-fetch-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  background: rgba(212, 143, 47, 0.12);
+  border: 1px solid rgba(212, 143, 47, 0.35);
+  border-radius: 10px;
+  color: #8a5a14;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.translation-api-error {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: rgba(157, 44, 44, 0.08);
+  border: 1px solid rgba(157, 44, 44, 0.35);
+  border-radius: 10px;
+  color: #9d2c2c;
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+  max-height: 160px;
+  overflow-y: auto;
+}
