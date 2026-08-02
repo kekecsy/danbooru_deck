@@ -1,7 +1,7 @@
 <script setup>
-// 教程弹窗：hosts 直连 + ffmpeg 安装。状态（open）由父组件 v-model 传入。
+// 教程弹窗：hosts 直连 + ffmpeg 安装 + 文件所在地址。状态（open）由父组件 v-model 传入。
 // notify 事件用于通知父组件显示 toast —— 保持 toast 系统单一来源。
-import { computed } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 
 const props = defineProps({
   modelValue: { type: Boolean, required: true },
@@ -34,6 +34,41 @@ async function copyHostsSnippet() {
     emit('notify', { message: '已复制 hosts 内容', type: 'success' });
   } catch (e) {
     emit('notify', { message: '复制失败：' + (e.message || e), type: 'error' });
+  }
+}
+
+// 文件路径信息：开发版 / Portable 版显示的目录不一样，
+// 这里从主进程拉一份权威路径，避免前端硬编码、误把 dev 路径给到 portable 用户。
+const paths = ref(null);
+const pathsLoading = ref(false);
+async function loadPaths() {
+  if (paths.value || pathsLoading.value) return;
+  if (!window.desktopAPI?.app?.getPaths) return;
+  pathsLoading.value = true;
+  try {
+    paths.value = await window.desktopAPI.app.getPaths();
+  } catch (e) {
+    emit('notify', { message: '读取路径失败：' + (e.message || e), type: 'error' });
+  } finally {
+    pathsLoading.value = false;
+  }
+}
+onMounted(loadPaths);
+
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    emit('notify', { message: '已复制路径', type: 'success' });
+  } catch (e) {
+    emit('notify', { message: '复制失败：' + (e.message || e), type: 'error' });
+  }
+}
+
+async function revealFolder(key) {
+  if (!window.desktopAPI?.app?.revealFolder) return;
+  const res = await window.desktopAPI.app.revealFolder(key);
+  if (!res?.ok) {
+    emit('notify', { message: res?.message || '打开目录失败', type: 'error' });
   }
 }
 </script>
@@ -93,6 +128,58 @@ async function copyHostsSnippet() {
             class="tutorial-link-btn"
             @click.prevent="openFfmpegTutorial"
           >打开知乎 ffmpeg 教程 →</a>
+        </div>
+      </div>
+
+      <div class="tutorial-card">
+        <div class="tutorial-card-head">
+          <span class="tutorial-card-index">3</span>
+          <div>
+            <div class="tutorial-card-title">打开文件所在地址 · 备份 / 拷贝 / 排查问题</div>
+            <div class="tutorial-card-desc">
+              下载的图片、收藏、翻译、caption 都在本地。点下面的按钮直接用资源管理器打开对应目录，
+              不用再翻 Windows 找路径。
+            </div>
+          </div>
+        </div>
+        <div v-if="!paths" style="font-size: 12px; color: var(--muted, #846a55); margin-top: 4px;">
+          {{ pathsLoading ? '正在读取路径…' : '当前环境暂未提供路径信息' }}
+        </div>
+        <div v-else>
+          <!-- 模式提示：让用户立刻知道这是哪种版本，避免按 dev 路径找不到文件 -->
+          <div
+            style="font-size: 12px; font-weight: 700; margin: 2px 0 6px;"
+            :style="{ color: paths.isDev ? '#d97706' : '#059669' }"
+          >
+            当前是
+            <span v-if="paths.isDev">开发版（dev，源码直接跑）</span>
+            <span v-else>Portable 版（用户数据在 %APPDATA%\Danbooru Deck\data）</span>
+          </div>
+          <ol class="tutorial-steps">
+            <li>
+              <span v-if="paths.isDev">项目根目录（源码、character.json、custom_translation.json 等都在这里）：</span>
+              <span v-else>数据根目录（character.json、custom_translation.json、hot_pic、caption、收藏 等都在这里）：</span>
+              <code style="word-break: break-all;">{{ paths.repoRoot }}</code>
+              <button class="secondary" style="margin-left: 6px; padding: 2px 8px; font-size: 11px;" @click="copyToClipboard(paths.repoRoot)">复制</button>
+            </li>
+            <li>
+              下载的图片落盘目录（按日期分文件夹）：
+              <code style="word-break: break-all;">{{ paths.hotPicDir }}</code>
+              <button class="secondary" style="margin-left: 6px; padding: 2px 8px; font-size: 11px;" @click="copyToClipboard(paths.hotPicDir)">复制</button>
+            </li>
+            <li v-if="!paths.isDev">
+              Portable 版的 userData 根（窗口状态、缩略图缓存、caption 副本等在 <code>data\</code> 同级）：
+              <code style="word-break: break-all;">{{ paths.userDataPath }}</code>
+              <button class="secondary" style="margin-left: 6px; padding: 2px 8px; font-size: 11px;" @click="copyToClipboard(paths.userDataPath)">复制</button>
+            </li>
+          </ol>
+          <div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; justify-content: flex-end;">
+            <button class="secondary" @click="revealFolder('hotPicDir')">打开 hot_pic 目录</button>
+            <button @click="revealFolder('repoRoot')">
+              <span v-if="paths.isDev">打开项目根目录</span>
+              <span v-else>打开数据根目录</span>
+            </button>
+          </div>
         </div>
       </div>
 

@@ -2,7 +2,9 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('desktopAPI', {
   app: {
-    getContext: () => ipcRenderer.invoke('app:get-context')
+    getContext: () => ipcRenderer.invoke('app:get-context'),
+    getPaths: () => ipcRenderer.invoke('app:get-paths'),
+    revealFolder: (key) => ipcRenderer.invoke('app:reveal-folder', key)
   },
   gallery: {
     getByDate: (date) => ipcRenderer.invoke('gallery:get-by-date', date),

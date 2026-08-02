@@ -722,6 +722,35 @@ ipcMain.handle('external:open', async (_event, url) => {
   return true;
 });
 
+// 把 app 内部几个关键路径暴露给渲染层，教程弹窗会用它们展示
+// 「开发版 / Portable 版各自的文件位置」并提供「打开所在目录」按钮。
+// repoRoot 在 dev 下 = 源码根目录，portable 下 = %APPDATA%\Danbooru Deck\data
+// hotPicDir 是下载图片实际落盘的目录
+ipcMain.handle('app:get-paths', async () => ({
+  isDev,
+  repoRoot,
+  hotPicDir,
+  userDataPath: app.getPath('userData'),
+}));
+
+// 用 key 选择要打开的目录，目录不存在时按需创建。
+// 用 shell.openPath 而不是 shell.openExternal + file://，避免 Windows 上
+// 某些路径下 file:// 协议被路由到浏览器而非资源管理器。
+ipcMain.handle('app:reveal-folder', async (_event, key) => {
+  let target = '';
+  if (key === 'repoRoot') target = repoRoot;
+  else if (key === 'hotPicDir') target = hotPicDir;
+  else if (key === 'userData') target = app.getPath('userData');
+  else return { ok: false, message: '未知路径：' + String(key) };
+  try {
+    if (!fs.existsSync(target)) fs.mkdirSync(target, { recursive: true });
+  } catch (e) {
+    return { ok: false, message: '创建目录失败：' + (e.message || e) };
+  }
+  const result = await shell.openPath(target);
+  return { ok: result === '', message: result || '已尝试打开目录' };
+});
+
 ipcMain.handle('dialog:select-image', async () => {
   const result = await dialog.showOpenDialog({
     properties: ['openFile'],

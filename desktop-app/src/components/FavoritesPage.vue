@@ -2047,13 +2047,23 @@ onMounted(loadFavorites);
   position: relative;
 }
 
-/* ⋮ 触发器：hover 出现，跟原来 ✎/× 同款机制；展开后保持可见（is-open） */
+/* ⋮ 触发器：默认透明 + 不可点击，hover / focus / is-open 时淡入可见。
+   两层修复叠加：
+   1) 用 opacity + visibility + pointer-events 替换 display: none 切换，
+      避免隐藏时从布局消失、被下层 .group-item 误点击穿透，以及 display 硬切造成的「跳」。
+   2) class="ghost group-menu-trigger" 会被全局 button.ghost 覆盖 background / color /
+      border-color / box-shadow，被全局 button:hover:not(:disabled) 覆盖 filter / box-shadow，
+      被全局 button:active:not(:disabled) 覆盖 transform: translateY(1px) —— 后者
+      会覆盖掉本地的 translateY(-50%) 居中偏移，导致点击瞬间按钮「下移 1px」再回弹，
+      这才是用户看到的「抖动 / 点不到」的真凶。
+      仿照 .viewer-nav-arrow 的写法，用 :not(:disabled) 显式抬升特异性到 (0,3,1)，
+      覆盖全局 :active 的 transform 与 filter，按下时维持居中、不再位移。 */
 .group-menu-trigger {
   position: absolute;
   right: 8px;
   top: 50%;
   transform: translateY(-50%);
-  display: none;
+  display: inline-flex;
   width: 24px;
   height: 24px;
   padding: 0;
@@ -2069,18 +2079,39 @@ onMounted(loadFavorites);
   align-items: center;
   justify-content: center;
   font-family: inherit;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.15s ease, visibility 0.15s ease,
+              background 0.15s, color 0.15s, border-color 0.15s;
 }
-.group-item-wrap:hover .group-menu-trigger { display: inline-flex; }
+.group-item-wrap:hover .group-menu-trigger,
+.group-menu-trigger:focus,
+.group-menu-trigger.is-open {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
 .group-menu-trigger:hover {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   color: #fff;
   border-color: transparent;
+  /* 抑制全局 button:hover:not(:disabled) 的 filter: brightness(0.93)，
+     保持本地 hover 时显示的渐变背景原色，不被「泛灰一档」干扰 */
+  filter: none;
 }
 .group-menu-trigger.is-open {
-  display: inline-flex;
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   color: #fff;
   border-color: transparent;
+  filter: none;
+}
+/* 核心修复：覆盖全局 button:active:not(:disabled) 的 transform: translateY(1px)，
+   否则按下瞬间 -50% 居中偏移被全局 1px 下移覆盖，按钮「跳」到非居中位置，松开又跳回。
+   specificity (0,3,1) > 全局 (0,1,1)，稳赢。同时关掉全局 filter: brightness(0.88)。 */
+.group-menu-trigger:active:not(:disabled) {
+  transform: translateY(-50%);
+  filter: none;
 }
 .group-menu-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
 
