@@ -9,6 +9,18 @@ const props = defineProps({
   filtered: { type: Array, required: true },
   selectedCount: { type: Number, required: true },
   safeMode: { type: Boolean, default: true },
+  // 「全选当前」按钮在父组件按三态循环驱动：
+  //   全选（除已下载）→ 全选所有 → 取消全选 → 全选（除已下载）…
+  // 这里只接收最终文案，不在子组件里持有 phase，避免双向同步。
+  selectAllLabel: { type: String, default: '全选（除已下载）' },
+  // 已选中但不在当前页的数量（用于「查看已选」按钮的角标）
+  crossPageCount: { type: Number, default: 0 },
+  // 多页批量选择弹窗状态：父组件持有（open / from / to / loading / progress / error），
+  // 子组件只是把表单控件 v-model 出去 + 把三个动作转发回去。
+  multiPage: {
+    type: Object,
+    default: () => ({ open: false, from: 1, to: 1, loading: false, progress: '', error: '' }),
+  },
 });
 const emit = defineEmits([
   'update:open',
@@ -19,6 +31,12 @@ const emit = defineEmits([
   'toggle-select',      // (post)
   'select-all-visible', // ()
   'clear-selection',    // ()
+  'open-selection-list',// () 打开跨页已选清单
+  'open-multi-page',    // () 打开多页批量弹窗
+  'close-multi-page',   // () 关闭多页批量弹窗
+  'multi-page-action',  // (mode: 'non_downloaded' | 'all' | 'clear_range')
+  'update:multi-from',  // (number)
+  'update:multi-to',    // (number)
   'download-selected',  // ()
 ]);
 
@@ -116,8 +134,99 @@ async function openPost(post) {
         </label>
         <button class="ghost" :disabled="state.loading || !filtered.length" @click="emit('refresh')" title="重新拉取当前页，更新 score（保留已勾选）">刷新分数</button>
         <span class="browse-filter-spacer"></span>
-        <button class="ghost" @click="emit('select-all-visible')">全选当前</button>
+        <button class="ghost" @click="emit('select-all-visible')" :title="selectAllLabel + '（连续按下依次切换为：全选所有 → 取消全选）'">{{ selectAllLabel }}</button>
+        <button
+          class="ghost"
+          :class="{ 'browse-multi-page-on': multiPage.open }"
+          :disabled="state.loading"
+          title="按页范围批量处理：选择/清空多页（一次性，不参与三态）"
+          @click="emit(multiPage.open ? 'close-multi-page' : 'open-multi-page')"
+        >
+          多页全选 {{ multiPage.open ? '▴' : '▾' }}
+        </button>
         <button class="ghost" @click="emit('clear-selection')">清空选择</button>
+        <button
+          class="ghost browse-view-selected"
+          :disabled="!selectedCount"
+          :title="crossPageCount
+            ? `已选 ${selectedCount} 个，其中 ${crossPageCount} 个不在当前页`
+            : '查看已选 ID 列表'"
+          @click="emit('open-selection-list')"
+        >
+          查看已选
+          <span v-if="selectedCount" class="browse-view-selected-count">({{ selectedCount }})</span>
+          <span v-if="crossPageCount" class="browse-view-selected-cross" :title="`${crossPageCount} 个不在当前页`">·{{ crossPageCount }} 跨页</span>
+        </button>
+      </div>
+
+      <!-- 多页批量弹窗（直接内联在筛选栏下面，popover 形态）。
+           范围输入 + 三个一次性动作；执行中禁用控件、显示进度。 -->
+      <div v-if="multiPage.open" class="browse-multipage" @click.stop>
+        <div class="browse-multipage-head">
+          <span class="browse-multipage-title">多页批量（一次性）</span>
+          <span class="muted compact-text">
+            当前第 {{ state.page }} 页 · 范围上限 {{ state.page }}
+          </span>
+          <button class="ghost" :disabled="multiPage.loading" @click="emit('close-multi-page')" title="关闭">×</button>
+        </div>
+        <div class="browse-multipage-body">
+          <label class="browse-multipage-field">
+            从
+            <input
+              type="number"
+              min="1"
+              :max="state.page"
+              :value="multiPage.from"
+              :disabled="multiPage.loading"
+              class="browse-multipage-input"
+              @input="e => emit('update:multi-from', Math.max(1, Math.min(state.page, Number(e.target.value) || 1)))"
+            />
+            页
+          </label>
+          <label class="browse-multipage-field">
+            到
+            <input
+              type="number"
+              min="1"
+              :max="state.page"
+              :value="multiPage.to"
+              :disabled="multiPage.loading"
+              class="browse-multipage-input"
+              @input="e => emit('update:multi-to', Math.max(1, Math.min(state.page, Number(e.target.value) || 1)))"
+            />
+            页
+          </label>
+          <div class="browse-multipage-actions">
+            <button
+              class="secondary"
+              :disabled="multiPage.loading"
+              :title="`把第 ${multiPage.from}-${multiPage.to} 页内 post.downloaded === false 的全部勾上`"
+              @click="emit('multi-page-action', 'non_downloaded')"
+            >
+              全选(除已下载)
+            </button>
+            <button
+              class="secondary"
+              :disabled="multiPage.loading"
+              :title="`把第 ${multiPage.from}-${multiPage.to} 页内所有图片（含已下载）一起勾上`"
+              @click="emit('multi-page-action', 'all')"
+            >
+              全选所有
+            </button>
+            <button
+              class="ghost"
+              :disabled="multiPage.loading"
+              :title="`把当前已选中、且出现在第 ${multiPage.from}-${multiPage.to} 页的 ID 从已选里移除`"
+              @click="emit('multi-page-action', 'clear_range')"
+            >
+              清空范围内
+            </button>
+          </div>
+        </div>
+        <div v-if="multiPage.progress || multiPage.error" class="browse-multipage-status">
+          <span v-if="multiPage.progress" class="muted compact-text">{{ multiPage.progress }}…</span>
+          <span v-if="multiPage.error" class="browse-multipage-error">{{ multiPage.error }}</span>
+        </div>
       </div>
 
       <div class="browse-grid-wrap">
@@ -342,6 +451,100 @@ async function openPost(post) {
   font-size: 13px;
 }
 .browse-download-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* 「查看已选」按钮：默认 ghost 风格，括号里放总数；
+   有跨页条目时附一个橙色小角标提示「主网格看不到的部分」 */
+.browse-view-selected {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.browse-view-selected-count {
+  color: var(--accent-deep);
+  font-weight: 600;
+}
+.browse-view-selected-cross {
+  color: #d97706;
+  font-weight: 600;
+  font-size: 11px;
+  background: rgba(245, 158, 11, 0.12);
+  padding: 1px 6px;
+  border-radius: 999px;
+  margin-left: 2px;
+}
+
+/* 「多页全选」按钮：开 / 关两种状态用箭头提示，再加一个开关高亮 */
+.browse-multi-page-on {
+  background: rgba(var(--accent-rgb), 0.16);
+  border-color: rgba(var(--accent-rgb), 0.45);
+  color: var(--accent-deep);
+}
+
+/* 多页批量 popover：内联在筛选栏下面，浅色卡片 + 边框 + 内边距。
+   用 flex 让范围输入和三个动作按钮在窄屏自动换行。 */
+.browse-multipage {
+  margin: 0 18px;
+  border: 1px solid rgba(var(--accent-rgb), 0.25);
+  background: rgba(var(--accent-rgb), 0.05);
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.browse-multipage-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.browse-multipage-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent-deep);
+}
+.browse-multipage-head .ghost {
+  margin-left: auto;
+  padding: 0 8px;
+}
+.browse-multipage-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+.browse-multipage-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+.browse-multipage-input {
+  width: 64px;
+  padding: 4px 6px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  font-size: 13px;
+}
+.browse-multipage-input:disabled { opacity: 0.5; }
+.browse-multipage-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-wrap: wrap;
+}
+.browse-multipage-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12px;
+  min-height: 18px;
+}
+.browse-multipage-error {
+  color: #b91c1c;
+  font-weight: 600;
+}
 
 /* 「已下载」价签：左缘竖向绿色长条 + 小圆点孔洞，模仿吊牌。
    让出 cell 圆角 + 上方 check / 打开原帖 按钮的空间，竖向文字不挡缩略图主体。 */

@@ -243,13 +243,13 @@ function imageCountLabel(count) {
 
 function dateCellTitle(cell) {
   if (!cell.hasFolder) return cell.date;
-  if (!cell.countKnown) return `${cell.date} · 已有日期文件夹`;
+  if (!cell.countKnown) return `${cell.date} · 图数未统计（点入即扫）`;
   return cell.hasImages ? `${cell.date} · 有图片` : `${cell.date} · 文件夹为空`;
 }
 
 function periodTitle(label, item) {
   if (!item.folderCount) return label;
-  if (!item.countKnown) return `${label} · ${item.folderCount} 个日期文件夹`;
+  if (!item.countKnown) return `${label} · ${item.folderCount} 个日期文件夹 · 图数未统计（点入即扫）`;
   return item.hasImages
     ? `${label} · ${item.folderCount} 个日期`
     : `${label} · ${item.folderCount} 个日期 · 文件夹为空`;
@@ -383,7 +383,7 @@ onBeforeUnmount(() => {
             :key="cell.date"
             type="button"
             class="day-cell"
-            :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.hasFolder, 'has-images': cell.hasImages, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages }"
+            :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.hasFolder, 'has-images': cell.hasImages, 'uncounted': cell.hasFolder && !cell.countKnown, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages }"
             :title="dateCellTitle(cell)"
             @click="selectDate(cell.date)"
           >
@@ -418,7 +418,7 @@ onBeforeUnmount(() => {
             :key="item.year"
             type="button"
             class="year-cell"
-            :class="{ selected: item.selected, today: item.today, 'has-folder': item.folderCount, 'has-images': item.hasImages, 'empty-folder': item.folderCount && item.countKnown && !item.hasImages }"
+            :class="{ selected: item.selected, today: item.today, 'has-folder': item.folderCount, 'has-images': item.hasImages, 'uncounted': item.folderCount && !item.countKnown, 'empty-folder': item.folderCount && item.countKnown && !item.hasImages }"
             :title="periodTitle(`${item.year} 年`, item)"
             @click="pickYear(item.year)"
           >
@@ -582,6 +582,29 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
+/* 懒扫根上还没数图的日期：斜纹背景 + 虚线边，hover 提示点入即扫 */
+.day-cell.uncounted:not(.selected) {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(77, 139, 87, 0.18) 0,
+    rgba(77, 139, 87, 0.18) 4px,
+    rgba(255, 252, 246, 0.55) 4px,
+    rgba(255, 252, 246, 0.55) 8px
+  );
+  color: #276136;
+  box-shadow: inset 0 0 0 1px dashed rgba(77, 139, 87, 0.42);
+  font-weight: 600;
+}
+.day-cell.uncounted:not(.selected)::after {
+  content: '·';
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  font-size: 14px;
+  line-height: 1;
+  color: rgba(39, 97, 54, 0.55);
+}
+
 .day-cell.empty-folder:not(.selected) {
   background: rgba(230, 224, 214, 0.58);
   color: #a99684;
@@ -639,6 +662,22 @@ onBeforeUnmount(() => {
   border-color: rgba(77, 139, 87, 0.46);
   color: #276136;
   font-weight: 700;
+}
+
+/* 懒扫根上月 / 年格：和 day-cell 一致用斜纹 + 虚线边 */
+.month-cell.uncounted:not(.selected),
+.year-cell.uncounted:not(.selected) {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(77, 139, 87, 0.16) 0,
+    rgba(77, 139, 87, 0.16) 4px,
+    rgba(255, 252, 246, 0.55) 4px,
+    rgba(255, 252, 246, 0.55) 8px
+  );
+  border-style: dashed;
+  border-color: rgba(77, 139, 87, 0.42);
+  color: #276136;
+  font-weight: 600;
 }
 
 .month-cell.empty-folder:not(.selected),

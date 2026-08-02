@@ -89,7 +89,7 @@ Danbooru Deck Data/
 - `artist_favorites.json`
 - `character_favorites.json`
 - `image_favorites.json`
-- `library_roots.json`
+- `library_roots.json` — 多图库根目录配置。每个 root 可加 `"lazy_scan": true` 让 app 启动时只枚举日期目录名，不数图（适合机械盘 / 外置盘 / NAS）。详见 `library_roots.example.json` 的注释。
 - `custom_translation.json`
 - `character_chinese_search.json`
 - `character_supplement.json`

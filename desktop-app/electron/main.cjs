@@ -106,11 +106,17 @@ function loadLibraryRoots() {
     }
     seenPaths.add(pathKey);
     seenIds.add(id);
+    // 机械盘 / 外置盘 / 网盘根目录上开懒扫：只枚举日期目录名，不数图。
+    // 用户在 JSON 里显式写 "lazyScan": false 可以覆盖（适用于该 root 是本地 SSD）。
+    // Python 端 _load_library_roots_config 也有同样的字段，命名用 snake_case；这里
+    // 保持 camelCase 是 Electron 这一侧的历史命名习惯，避免影响其它读 lazyScan 的代码。
+    const lazyScan = !!(entry && typeof entry === 'object' && entry.lazyScan);
     roots.push({
       id,
       label: (typeof entry === 'object' && (entry.label || entry.name)) || path.basename(resolved) || id,
       path: resolved,
-      isDefault: false
+      isDefault: false,
+      lazyScan
     });
   });
   return roots;
@@ -298,16 +304,26 @@ function listDateFolderDetails() {
   const byDate = new Map();
   for (const root of loadLibraryRoots()) {
     if (!fs.existsSync(root.path)) continue;
+    // 懒扫根：只读日期目录名，不调 countGalleryMediaFiles / countPendingIds。
+    // 机械盘 / 外置盘 / 网盘上几百个日期 × 几百张图，iterdir 几次就卡死。
+    // 数量留 null + countKnown=false，让前端走"有图片但未统计"分支；
+    // 点进具体日期时由 buildGalleryByDate 触发单日扫描补上。
+    const isLazy = !!root.lazyScan;
     for (const item of fs.readdirSync(root.path, { withFileTypes: true })) {
       if (!item.isDirectory() || !isDateFolder(item.name)) continue;
       const rec = byDate.get(item.name) || {
         date: item.name,
-        imageCount: 0,
+        imageCount: isLazy ? null : 0,
         sourceCount: 0,
-        hasImages: false,
-        pendingIds: 0
+        hasImages: isLazy,
+        pendingIds: 0,
+        countKnown: !isLazy
       };
       rec.sourceCount += 1;
+      if (isLazy) {
+        byDate.set(item.name, rec);
+        continue;
+      }
       rec.imageCount += countGalleryMediaFiles(path.join(root.path, item.name));
       rec.hasImages = rec.imageCount > 0;
       rec.pendingIds += countPendingIds(path.join(root.path, item.name));
@@ -327,22 +343,28 @@ function normalizeDateFolderDetails(rawDetails, fallbackDates = []) {
   for (const item of Array.isArray(rawDetails) ? rawDetails : []) {
     const date = item?.date || item?.folder;
     if (!isDateFolder(date) || seen.has(date)) continue;
-    const imageCount = Number(item.imageCount ?? item.image_count ?? item.count ?? 0);
+    // 显式保留 null：懒扫根上 imageCount=null 表示"未统计"，不要 Number() 转成 0
+    // 让前端误以为文件夹是空的。
+    const rawCount = item.imageCount ?? item.image_count ?? item.count;
+    const imageCount = rawCount == null ? null : Number(rawCount);
     const sourceCount = Number(item.sourceCount ?? item.source_count ?? 1);
     const pendingIds = Number(item.pendingIds ?? item.pending_ids ?? 0);
     seen.add(date);
     details.push({
       date,
-      imageCount: Number.isFinite(imageCount) ? imageCount : 0,
+      imageCount: imageCount == null ? null : (Number.isFinite(imageCount) ? imageCount : 0),
       sourceCount: Number.isFinite(sourceCount) ? sourceCount : 1,
       pendingIds: Number.isFinite(pendingIds) ? pendingIds : 0,
-      hasImages: Boolean(item.hasImages ?? item.has_images ?? imageCount > 0)
+      hasImages: imageCount == null
+        ? Boolean(item.hasImages ?? item.has_images ?? true)
+        : Boolean(item.hasImages ?? item.has_images ?? imageCount > 0),
+      countKnown: imageCount != null
     });
   }
   for (const date of fallbackDates || []) {
     if (!isDateFolder(date) || seen.has(date)) continue;
     seen.add(date);
-    details.push({ date, imageCount: null, sourceCount: 1, pendingIds: 0, hasImages: true });
+    details.push({ date, imageCount: null, sourceCount: 1, pendingIds: 0, hasImages: true, countKnown: false });
   }
   return details.sort((a, b) => b.date.localeCompare(a.date));
 }

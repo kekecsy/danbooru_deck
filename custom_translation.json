@@ -3883,7 +3883,7 @@
   },
   "male_rover_(wuthering_waves)": {
     "has_chinese": true,
-    "chinese_name": "漂泊者",
+    "chinese_name": "男漂泊者",
     "source_hint": "wuthering_waves",
     "translated_description_zh": "《鸣潮》主角的男性版本。"
   },
@@ -77416,5 +77416,17 @@
     "chinese_name": "蕾米埃尔·丹（月夜密语）",
     "source_hint": "zenless zone zero",
     "translated_description_zh": "《绝区零》中登场的一位角色，是初代“虚狩”之一，同时也是“白祇重工”的创始人。此描述为其官方换装形象，首次以“拉米尔”的化名向主角兄妹介绍自己，该造型后成为游戏内皮肤。在该服装中，她身穿黑色连衣裙，背部有镂空设计，胸前佩戴束带，穿着黑色蕾丝边过膝长袜并配有吊带，低垂的翅膀也呈黑色。头发上佩戴了多种发饰，包括X形发饰、四角星形发饰以及两条黑色丝带。该形象通常还会佩戴黑色蕾丝口罩。"
+  },
+  "ganj-i-sawai_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "冈依沙瓦号",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中帆船冈依沙瓦号的拟人化角色，由德井青空配音。"
+  },
+  "ganj-i-sawai_(mermaid_in_distress)_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "冈依沙瓦号（被封印的美人鱼）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中冈依沙瓦号的美人鱼/万圣节主题官方换装。"
   }
 }

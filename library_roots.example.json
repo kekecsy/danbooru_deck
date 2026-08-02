@@ -1,9 +1,15 @@
 {
+  "_comment": "library_roots.json — 多图库根目录配置。缺省时 app 只用项目内的 hot_pic/。",
+  "_comment2": "每个 root 可以加 lazy_scan:true 来告诉 app '这个根目录里的日期图数先别数，只列目录名即可'。",
+  "_comment3": "  适合场景：机械盘、外置 USB 盘、NAS/网盘、archive 用冷盘。启动时不会 iterdir 每个日期目录，秒进。",
+  "_comment4": "  不适合：本地 SSD（再懒也是几毫秒的事，反而失去图数提示）。这时显式写 lazy_scan:false 即可。",
+  "_comment5": "  点进具体日期时仍会扫描单日目录（秒级），所以能看到当天的图；只是日历右上角不显示总数，改用斜纹+虚线边提示。",
   "roots": [
     {
       "id": "hdd_archive",
       "label": "HDD Archive",
-      "path": "D:/danbooru_hot_pic"
+      "path": "D:/danbooru_hot_pic",
+      "lazy_scan": true
     }
   ]
 }

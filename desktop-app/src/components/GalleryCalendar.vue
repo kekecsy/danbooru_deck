@@ -302,7 +302,7 @@ function dateCellTitle(cell) {
   if (cell.noFolder) return `点击创建 ${cell.date} 的空文件夹并进入`;
   // 不显示具体数量，只提示"有未下载 id"
   const pending = cell.pendingIds > 0 ? ' · 有未下载 id' : '';
-  if (!cell.countKnown) return `查看 ${cell.date}${pending}`;
+  if (!cell.countKnown) return `查看 ${cell.date} · 图数未统计（点入即扫）${pending}`;
   return cell.hasImages
     ? `${cell.date} · 有图片${pending}`
     : `${cell.date} · 文件夹为空${pending}`;
@@ -311,7 +311,7 @@ function dateCellTitle(cell) {
 function periodTitle(label, item) {
   if (item.noFolder) return `${label} · 点击进入（里面还没建日期文件夹）`;
   const pending = item.pendingIds > 0 ? ' · 有未下载 id' : '';
-  if (!item.countKnown) return `查看 ${label}${pending}`;
+  if (!item.countKnown) return `查看 ${label} · 图数未统计（点入即扫）${pending}`;
   return item.hasImages
     ? `${label} · ${item.folderCount} 个日期${pending}`
     : `${label} · ${item.folderCount} 个日期 · 文件夹为空${pending}`;
@@ -321,7 +321,7 @@ function periodTitle(label, item) {
 function yearCellTitle(item) {
   if (item.noFolder) return `${item.year} 年 · 点击进入（里面还没建日期文件夹）`;
   const pending = item.pendingIds > 0 ? ' · 有未下载 id' : '';
-  if (!item.countKnown) return `查看 ${item.year} 年${pending}`;
+  if (!item.countKnown) return `查看 ${item.year} 年 · 图数未统计（点入即扫）${pending}`;
   return item.hasImages
     ? `${item.year} 年 · ${item.folderCount} 个日期${pending}`
     : `${item.year} 年 · 文件夹为空${pending}`;
@@ -464,7 +464,7 @@ function pickTag(folder) {
               v-for="cell in cells"
               :key="cell.date"
               class="day-cell"
-              :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.hasFolder, 'no-folder': cell.noFolder, 'has-images': cell.hasImages, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages, 'has-pending-ids': cell.hasPendingIds }"
+              :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.hasFolder, 'no-folder': cell.noFolder, 'has-images': cell.hasImages, 'uncounted': cell.hasFolder && !cell.countKnown, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages, 'has-pending-ids': cell.hasPendingIds }"
               :title="dateCellTitle(cell)"
               @click="pickDate(cell.date)"
             >
@@ -478,7 +478,7 @@ function pickTag(folder) {
             v-for="m in monthItems"
             :key="m.month"
             class="month-cell"
-            :class="{ selected: m.selected, today: m.today, 'has-folder': m.hasFolder, 'no-folder': m.noFolder, 'has-images': m.hasImages, 'empty-folder': m.hasFolder && m.countKnown && !m.hasImages, 'has-pending-ids': m.hasPendingIds }"
+            :class="{ selected: m.selected, today: m.today, 'has-folder': m.hasFolder, 'no-folder': m.noFolder, 'has-images': m.hasImages, 'uncounted': m.hasFolder && !m.countKnown, 'empty-folder': m.hasFolder && m.countKnown && !m.hasImages, 'has-pending-ids': m.hasPendingIds }"
             :title="periodTitle(`${currentYear} 年 ${m.label}`, m)"
             @click="pickMonth(m.month)"
           >
@@ -497,7 +497,7 @@ function pickTag(folder) {
               v-for="y in yearItems"
               :key="y.year"
               class="year-cell"
-              :class="{ selected: y.selected, today: y.today, 'has-folder': y.hasFolder, 'no-folder': y.noFolder, 'has-images': y.hasImages, 'empty-folder': y.hasFolder && y.countKnown && !y.hasImages, 'has-pending-ids': y.hasPendingIds }"
+              :class="{ selected: y.selected, today: y.today, 'has-folder': y.hasFolder, 'no-folder': y.noFolder, 'has-images': y.hasImages, 'uncounted': y.hasFolder && !y.countKnown, 'empty-folder': y.hasFolder && y.countKnown && !y.hasImages, 'has-pending-ids': y.hasPendingIds }"
               :title="yearCellTitle(y)"
               @click="pickYear(y.year)"
             >
@@ -662,6 +662,29 @@ function pickTag(folder) {
   box-shadow: inset 0 0 0 1px rgba(77, 139, 87, 0.36);
   font-weight: 700;
 }
+/* 懒扫根上还没数图的日期：保留绿色"有文件夹"语义，但用斜纹背景 + 小点暗示
+   "图数未知"。点进去就会触发单日扫描补上，避免启动时把机械盘整个扫一遍。 */
+.day-cell.uncounted:not(.selected) {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(77, 139, 87, 0.18) 0,
+    rgba(77, 139, 87, 0.18) 4px,
+    rgba(255, 252, 246, 0.55) 4px,
+    rgba(255, 252, 246, 0.55) 8px
+  );
+  color: #276136;
+  box-shadow: inset 0 0 0 1px dashed rgba(77, 139, 87, 0.42);
+  font-weight: 600;
+}
+.day-cell.uncounted:not(.selected)::after {
+  content: '·';
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  font-size: 14px;
+  line-height: 1;
+  color: rgba(39, 97, 54, 0.55);
+}
 .day-cell.empty-folder:not(.selected) {
   background: rgba(230, 224, 214, 0.58);
   color: #a99684;
@@ -733,6 +756,21 @@ function pickTag(folder) {
 .month-cell.empty-folder small,
 .year-cell.empty-folder small {
   color: #9a6610;
+}
+/* 懒扫根上月 / 年格：和 day-cell 一致用斜纹 + 虚线边 */
+.month-cell.uncounted:not(.selected),
+.year-cell.uncounted:not(.selected) {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(77, 139, 87, 0.16) 0,
+    rgba(77, 139, 87, 0.16) 4px,
+    rgba(255, 252, 246, 0.55) 4px,
+    rgba(255, 252, 246, 0.55) 8px
+  );
+  color: #276136;
+  border-style: dashed;
+  border-color: rgba(77, 139, 87, 0.42);
+  font-weight: 600;
 }
 .month-cell.has-images:not(.selected),
 .year-cell.has-images:not(.selected) {

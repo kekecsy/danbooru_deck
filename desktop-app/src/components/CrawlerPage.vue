@@ -10,6 +10,7 @@ import BrowseOverlay from './crawler/BrowseOverlay.vue';
 import TranslationModal from './crawler/TranslationModal.vue';
 import TranslateDetailModal from './crawler/TranslateDetailModal.vue';
 import SelectionListModal from './crawler/SelectionListModal.vue';
+import BrowseSelectionModal from './crawler/BrowseSelectionModal.vue';
 import CryptoToolModal from './crawler/CryptoToolModal.vue';
 import { parsePastedIds } from '../utils/idCodec.js';
 
@@ -1647,6 +1648,17 @@ function snapshotFormToItem() {
   };
 }
 
+// 统一的入队反馈：推入 taskQueue 末尾 + 自动展开面板 + 短暂高亮脉冲 + toast。
+// 用于 addCurrentToQueue（表单快照）和 downloadBrowseSelected（browse 弹窗勾选）。
+function enqueueItem(item, successMessage) {
+  item.label = item.label || queueItemLabel(item);
+  taskQueue.value.push(item);
+  queuePanelOpen.value = true;
+  justAddedId.value = item.id;
+  setTimeout(() => { if (justAddedId.value === item.id) justAddedId.value = null; }, 1100);
+  showToast(successMessage || `已加入队列：${item.label}`, 'success');
+}
+
 function addCurrentToQueue() {
   const f = form.value;
   // 与 startTask 一致的最小校验
@@ -1669,25 +1681,14 @@ function addCurrentToQueue() {
           }
           f.idsText = payload.ids.join('\n');
           const item = snapshotFormToItem();
-          item.label = queueItemLabel(item);
-          taskQueue.value.push(item);
-          queuePanelOpen.value = true;
-          justAddedId.value = item.id;
-          setTimeout(() => { if (justAddedId.value === item.id) justAddedId.value = null; }, 1100);
-          showToast(`已加入队列：消费 folder 的 ${payload.ids.length} 个待下载 ID`, 'success');
+          enqueueItem(item, `已加入队列：消费 folder 的 ${payload.ids.length} 个待下载 ID`);
         })
         .catch(err => showToast(`读取 folder ID 失败：${err.message}`, 'error'));
       return;
     }
   }
   const item = snapshotFormToItem();
-  item.label = queueItemLabel(item);
-  taskQueue.value.push(item);
-  // 加入反馈：自动展开面板（折叠时用户看不到新项）+ 短暂高亮脉冲
-  queuePanelOpen.value = true;
-  justAddedId.value = item.id;
-  setTimeout(() => { if (justAddedId.value === item.id) justAddedId.value = null; }, 1100);
-  showToast(`已加入队列：${item.label}`, 'success');
+  enqueueItem(item, `已加入队列：${item.label || queueItemLabel(item)}`);
 }
 
 function removeQueueItem(i) {
@@ -2349,7 +2350,11 @@ const browse = ref({
   limit: 40,
   loading: false,
   posts: [],            // [{id, preview_file_url, ...}]
-  selected: new Set(),  // 选中的 post id 字符串
+  selected: new Set(),  // 选中的 post id 字符串（跨页/跨搜索累计）
+  // 选中时记下的 post 对象快照（id -> post），让「跨页已选」弹窗能在切页/换搜索之后
+  // 仍然渲染缩略图和 rating/score。selected 是 source of truth，selectedItems 只是
+  // 给 UI 用的反查表，下载/移除时只动 selected。
+  selectedItems: new Map(),
   hasMore: false,
   error: '',
   targetDate: '',       // 空 = 今天
@@ -2358,6 +2363,12 @@ const browse = ref({
   downloading: false,
   collectedIds: [],     // collected 模式：当前日期收集到的全部 ID（按页切片后再拉预览）
   collectedDate: '',    // collected 模式：正在查看哪个日期的收集结果
+  // 「全选当前」按钮三态循环状态：
+  //   0 = 当前未做任何「全选」操作（或已清空）
+  //   1 = 已经按过第一次：仅选未下载
+  //   2 = 已经按过第二次：含已下载全选
+  // 再次按下复原到 0。手动勾选、显式清空、加入下载队列、切页/新搜索时回到 0。
+  selectAllPhase: 0,
 });
 
 // 缩略图 URL / rating 分桶 / 打开原帖 的辅助逻辑已抽到 ./crawler/BrowseOverlay.vue。
@@ -2380,13 +2391,14 @@ const browseFiltered = computed(() => {
   return list;
 });
 
-// 刷新当前页的 score：重拉当前页（id: / tag 查询返回的就是最新数值），保留已勾选
+// 刷新当前页的 score：重拉当前页（id: / tag 查询返回的就是最新数值）
+// selected / selectedItems 默认就跨页保留，无需 keepSelection 参数。
 function refreshBrowsePage() {
   if (browse.value.loading) return;
   if (browse.value.source === 'collected') {
-    loadCollectedPage(browse.value.page, true);
+    loadCollectedPage(browse.value.page);
   } else {
-    runBrowseSearch(browse.value.page, true);
+    runBrowseSearch(browse.value.page);
   }
 }
 
@@ -2401,7 +2413,11 @@ function openBrowse() {
   browse.value.posts = [];
   browse.value.error = '';
   browse.value.page = 1;
+  // 重新打开弹窗 = 全新一次浏览会话，把上一次累积的勾选（连同 post 快照）一起清掉
   browse.value.selected = new Set();
+  browse.value.selectedItems = new Map();
+  browse.value.selectAllPhase = 0;
+  browseSelectionListOpen.value = false;
 }
 
 // 打开「查看收集ID」的在线预览：复用同一个 browse 弹窗，source 切到 collected
@@ -2412,6 +2428,9 @@ function openCollectedBrowse() {
   browse.value.error = '';
   browse.value.page = 1;
   browse.value.selected = new Set();
+  browse.value.selectedItems = new Map();
+  browse.value.selectAllPhase = 0;
+  browseSelectionListOpen.value = false;
   browse.value.collectedIds = [];
   // 默认看今天收集的；targetDate 也指向它，下载时落到同一天
   const d = todayString();
@@ -2458,8 +2477,8 @@ async function loadCollectedIds(date, page = 1) {
 }
 
 // collected 模式翻页：把收集到的 ID 按 limit 切片，用 id:1,2,3 语法批量拉预览元数据
-// keepSelection=true 时不清空已勾选（用于「刷新」当前页）
-async function loadCollectedPage(page = 1, keepSelection = false) {
+// 注意：selected / selectedItems 跨页/跨搜索累积，调用方不再需要 keepSelection 参数。
+async function loadCollectedPage(page = 1) {
   const ids = browse.value.collectedIds;
   const limit = browse.value.limit;
   const total = ids.length;
@@ -2490,7 +2509,8 @@ async function loadCollectedPage(page = 1, keepSelection = false) {
     browse.value.posts = slice.map(id => byId.get(String(id))).filter(Boolean);
     browse.value.page = p;
     browse.value.hasMore = p < maxPage;
-    if (!keepSelection) browse.value.selected = new Set();
+    // 跨页/跨搜索累积：不再因换页而清空 selected / selectedItems。
+    // 刷新 score（keepSelection=true）时原本就保留，行为统一。
     if (!browse.value.posts.length) {
       browse.value.error = '这一页的 ID 都取不到预览（可能已被删除或需登录）';
     }
@@ -2502,7 +2522,7 @@ async function loadCollectedPage(page = 1, keepSelection = false) {
   }
 }
 
-async function runBrowseSearch(page = 1, keepSelection = false) {
+async function runBrowseSearch(page = 1) {
   const q = (browse.value.query || '').trim();
   if (!q) {
     showToast('请填写 tag 查询串（例如：hatsune_miku rating:safe）', 'error');
@@ -2523,7 +2543,8 @@ async function runBrowseSearch(page = 1, keepSelection = false) {
     browse.value.posts = data.posts || [];
     browse.value.page = data.page || page;
     browse.value.hasMore = !!data.has_more;
-    if (!keepSelection) browse.value.selected = new Set(); // 换页/换搜索清空选择
+    // 跨页/跨搜索累积：selected / selectedItems 不会因为换页或换搜索而清空。
+    // 全选三态 phase 也保留——之前积累的勾选和「全选」按钮状态彼此独立。
     if (!browse.value.posts.length) {
       browse.value.error = '没有结果（tag 可能无效，或该页已到末尾）';
     }
@@ -2547,64 +2568,296 @@ function browseGoPage(delta) {
 
 function toggleBrowseSelect(post) {
   const s = new Set(browse.value.selected);
-  if (s.has(post.id)) s.delete(post.id);
-  else s.add(post.id);
+  const items = new Map(browse.value.selectedItems);
+  if (s.has(post.id)) {
+    s.delete(post.id);
+    items.delete(post.id);
+  } else {
+    s.add(post.id);
+    // 记住 post 对象本身，跨页之后弹窗还能渲染缩略图
+    items.set(post.id, post);
+  }
   browse.value.selected = s;
+  browse.value.selectedItems = items;
+  // 手动勾选破坏「全选三态」的语义，回到初始态，下一次按下重新从「只选未下载」开始
+  browse.value.selectAllPhase = 0;
 }
 
+// 「全选当前」按钮：三次一循环
+//   第 1 次：勾选当前页所有「未下载」的图片（post.downloaded === false）
+//   第 2 次：在已有的基础上再补上「已下载」那些，得到全选
+//   第 3 次：清空，回到 phase 0
+// 之后再次按下又从第 1 次开始循环。
 function browseSelectAllVisible() {
-  const s = new Set(browse.value.selected);
-  for (const p of browseFiltered.value) s.add(p.id);
-  browse.value.selected = s;
+  const b = browse.value;
+  const phase = b.selectAllPhase || 0;
+  if (phase === 0) {
+    const s = new Set(b.selected);
+    const items = new Map(b.selectedItems);
+    for (const p of browseFiltered.value) {
+      if (!p.downloaded) {
+        s.add(p.id);
+        items.set(p.id, p);
+      }
+    }
+    b.selected = s;
+    b.selectedItems = items;
+    b.selectAllPhase = 1;
+  } else if (phase === 1) {
+    const s = new Set(b.selected);
+    const items = new Map(b.selectedItems);
+    for (const p of browseFiltered.value) {
+      s.add(p.id);
+      items.set(p.id, p);
+    }
+    b.selected = s;
+    b.selectedItems = items;
+    b.selectAllPhase = 2;
+  } else {
+    // phase === 2: 复原
+    b.selected = new Set();
+    b.selectedItems = new Map();
+    b.selectAllPhase = 0;
+  }
 }
 
 function browseClearSelection() {
   browse.value.selected = new Set();
+  browse.value.selectedItems = new Map();
+  browse.value.selectAllPhase = 0;
 }
 
-async function downloadBrowseSelected() {
+// 按钮文案随 phase 变化，提示用户下一次按下会发生什么。
+const browseSelectAllLabel = computed(() => {
+  const p = browse.value.selectAllPhase || 0;
+  if (p === 1) return '全选所有';
+  if (p === 2) return '取消全选';
+  return '全选（除已下载）';
+});
+
+// 「查看已选」弹窗开/关
+const browseSelectionListOpen = ref(false);
+function openBrowseSelectionList() { browseSelectionListOpen.value = true; }
+function closeBrowseSelectionList() { browseSelectionListOpen.value = false; }
+
+// 把 selectedItems 拍成数组给弹窗用，并标出哪些正好在当前页（onPage）——
+// 当前页的判定就是 post.id 是否在 browse.posts 里出现。
+const browseSelectedEntries = computed(() => {
+  const onPageIds = new Set(browse.value.posts.map(p => p.id));
+  const items = browse.value.selectedItems;
+  return Array.from(browse.value.selected)
+    .map(id => {
+      const post = items.get(id);
+      // 极端情况：selected 里有但 selectedItems 没存到（理论上不会发生，
+      // 因为 toggleBrowseSelect / browseSelectAllVisible 都同步写），
+      // 用占位对象兜底，避免弹窗里出现空白
+      return {
+        id,
+        post: post || { id, rating: '?', score: 0 },
+        onPage: onPageIds.has(id),
+      };
+    })
+    .sort((a, b) => String(a.id).localeCompare(String(b.id), 'en', { numeric: true }));
+});
+const browseOnPageCount = computed(() => browseSelectedEntries.value.filter(e => e.onPage).length);
+const browseCrossPageCount = computed(() => browseSelectedEntries.value.length - browseOnPageCount.value);
+
+// 从已选里移除单个 id（弹窗用）。手动行为，破坏 selectAll 三态。
+function browseRemoveFromSelection(id) {
+  if (!browse.value.selected.has(id)) return;
+  const s = new Set(browse.value.selected);
+  s.delete(id);
+  const items = new Map(browse.value.selectedItems);
+  items.delete(id);
+  browse.value.selected = s;
+  browse.value.selectedItems = items;
+  browse.value.selectAllPhase = 0;
+}
+
+// Tag 浏览 / 查看收集 ID 共用的「下载」入口。
+// 行为：把选中的 id 包成一个 download_ids 队列项推到 taskQueue 末尾，**不**立刻启动爬虫。
+// ——这样无论是哪种来源的勾选，都与左侧表单「加入队列」走同一条路，行为一致可预期。
+// 队列没在跑就只是挂在那里等用户点「运行队列」；队列正在跑则会在当前项结束后按顺序处理。
+function downloadBrowseSelected() {
   const ids = Array.from(browse.value.selected);
   if (!ids.length) {
     showToast('请先勾选要下载的图片', 'info');
     return;
   }
-  if (queueRunning.value) {
-    showToast('顺序队列运行中，请先停止队列再下载', 'info');
-    return;
-  }
-  if (task.value.isRunning || task.value.isStopping) {
-    showToast('已有抓图任务在跑（同一时刻只能一个），请等它结束再下载', 'info');
-    return;
-  }
   const targetDate = browse.value.targetDate || todayString();
-  browse.value.downloading = true;
+  const item = {
+    id: ++_queueIdSeq,
+    mode: 'download_ids',
+    startPage: 1,
+    endPage: 1,
+    tags: '',
+    targetDate: tokenizeDate(targetDate),
+    startDate: '',
+    endDate: '',
+    tagQuery: '',
+    tagSource: 'danbooru',
+    idsText: ids.join('\n'),
+    status: 'pending',
+    error: '',
+    failureReports: [],
+  };
+  enqueueItem(item, `已加入队列：${queueItemLabel(item)}`);
+  // 勾选状态被消费（"这些已经在队列里了"），给用户一个明确的视觉反馈
+  browse.value.selected = new Set();
+  browse.value.selectedItems = new Map();
+  browse.value.selectAllPhase = 0;
+  appendLog(`[Tag浏览] 已加入下载队列：${ids.length} 个 ID → ${targetDate}`);
+}
+
+// ---------------- 多页批量选择（一次性，不参与三态） ----------------
+// 设计意图：现有「全选(除已下载)/全选所有/取消全选」是当前页三态；
+// 用户想批量处理多页时开这个弹窗，输入 [从 X 页] [到 Y 页]，三个一次性动作：
+//   1) 全选(除已下载)：把区间内 post.downloaded === false 的全部加进 selected
+//   2) 全选所有：把区间内所有 post 加进 selected
+//   3) 清空范围内：把区间内出现过的 id 从 selected / selectedItems 里删掉
+// 这三个动作是幂等的（再次按结果一样），不进三态。
+
+const browseMultiPage = ref({
+  open: false,
+  from: 1,
+  to: 1,
+  loading: false,
+  progress: '',         // 形如 "已获取 2/5 页"
+  error: '',
+});
+
+// 拉取第 N 页的 posts（不修改 browse.value.posts，不动 selected，只读）。
+// tag 模式走 /api/browse_tags?page=N；collected 模式按 collectedIds 切片并用 id: 语法。
+async function fetchBrowsePagePosts(page) {
+  const b = browse.value;
+  const limit = b.limit;
+  if (b.source === 'collected') {
+    const ids = b.collectedIds || [];
+    const slice = ids.slice((page - 1) * limit, page * limit);
+    if (!slice.length) return [];
+    const q = 'id:' + slice.join(',');
+    const url = `http://127.0.0.1:8000/api/browse_tags?tags=${encodeURIComponent(q)}&page=1&limit=${limit}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.msg || '获取预览失败');
+    // 按收集顺序排，缺失的丢掉
+    const byId = new Map((data.posts || []).map(pp => [String(pp.id), pp]));
+    return slice.map(id => byId.get(String(id))).filter(Boolean);
+  }
+  const q = (b.query || '').trim();
+  if (!q) throw new Error('没有 tag 查询串');
+  const url = `http://127.0.0.1:8000/api/browse_tags?tags=${encodeURIComponent(q)}&page=${page}&limit=${limit}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (!data.ok) throw new Error(data.msg || '获取预览失败');
+  return data.posts || [];
+}
+
+// 顺序拉取 [from, to] 范围内的每一页（Promise.all + 进度回调），合并到一个数组返回。
+async function fetchBrowseRange(from, to, onProgress) {
+  const pages = [];
+  for (let p = from; p <= to; p++) pages.push(p);
+  const all = [];
+  let done = 0;
+  // 串行：避免一次性打几十个并发请求把后端 / Danbooru 打爆；
+  // 用户感知上看 N 页通常 1-3 秒内结束，可接受
+  for (const p of pages) {
+    const posts = await fetchBrowsePagePosts(p);
+    all.push(...posts);
+    done += 1;
+    onProgress && onProgress(done, pages.length);
+  }
+  return all;
+}
+
+function openBrowseMultiPage() {
+  const cur = browse.value.page || 1;
+  // 默认 [1, 当前页]，符合「从开头到当前位置」的直觉；
+  // 用户改了之后会保留在组件 state 里直到关闭
+  browseMultiPage.value.from = 1;
+  browseMultiPage.value.to = Math.max(cur, 1);
+  browseMultiPage.value.error = '';
+  browseMultiPage.value.progress = '';
+  browseMultiPage.value.open = true;
+}
+function closeBrowseMultiPage() {
+  if (browseMultiPage.value.loading) return; // 正在执行时不许关
+  browseMultiPage.value.open = false;
+}
+
+// mode: 'non_downloaded' | 'all' | 'clear_range'
+async function browseMultiPageAction(mode) {
+  const mp = browseMultiPage.value;
+  const fromRaw = Math.floor(Number(mp.from) || 0);
+  const toRaw = Math.floor(Number(mp.to) || 0);
+  const cur = browse.value.page || 1;
+  // 兜底：from 不填默认 1；to 不填默认当前页；保证 from >= 1
+  const from = Math.max(1, fromRaw || 1);
+  // 多页批量只处理「已经能拿到的页」——也就是 1..cur。
+  // 用户输入 to > cur 不静默裁剪，而是显式报错，避免误操作把 999 页全勾上
+  const to = Math.max(from, toRaw || cur);
+  if (to > cur) {
+    mp.error = `结束页 ${to} 超出当前第 ${cur} 页；多页批量只能处理已经能拿到的页`;
+    return;
+  }
+  const b = browse.value;
+  if (b.source === 'tags' && !(b.query || '').trim()) {
+    mp.error = '请先在搜索框输入 tag 查询串';
+    return;
+  }
+  if (b.source === 'collected' && (!b.collectedIds || !b.collectedIds.length)) {
+    mp.error = '当前没有可用的收集 ID 列表';
+    return;
+  }
+  mp.loading = true;
+  mp.error = '';
+  mp.progress = `准备拉取第 ${from}-${to} 页…`;
   try {
-    // 复用 download_ids：把选中 id 塞进 /api/start，后端下载到 hot_pic/<date>/ 并入库
-    const payload = {
-      start_page: 1,
-      end_page: 1,
-      tags: '',
-      mode: 'download_ids',
-      target_date: targetDate,
-      ids,
-    };
-    const result = await window.desktopAPI.crawler.start(payload);
-    if (result?.ok === false) {
-      showToast(result.msg || '启动下载失败', 'error');
+    const posts = await fetchBrowseRange(from, to, (done, total) => {
+      mp.progress = `已获取 ${done}/${total} 页`;
+    });
+    if (!posts.length) {
+      mp.error = '该范围内没有可处理的图片';
       return;
     }
-    showToast(`已提交 ${ids.length} 张到 ${targetDate} 下载`, 'success');
-    appendLog(`[Tag浏览] 已提交 ${ids.length} 个 ID 下载到 ${targetDate}`);
-    browse.value.selected = new Set();
-    // 让日期切到下载目标，方便下载完在右侧图库看到
-    if (gallery.value.selectedDate !== targetDate) {
-      gallery.value.selectedDate = targetDate;
+    const s = new Set(b.selected);
+    const items = new Map(b.selectedItems);
+    let added = 0;
+    let removed = 0;
+    if (mode === 'clear_range') {
+      const idsInRange = new Set(posts.map(p => String(p.id)));
+      for (const id of idsInRange) {
+        if (s.has(id)) {
+          s.delete(id);
+          items.delete(id);
+          removed += 1;
+        }
+      }
+    } else {
+      const includeDownloaded = mode === 'all';
+      for (const p of posts) {
+        if (!includeDownloaded && p.downloaded) continue;
+        if (!s.has(p.id)) added += 1;
+        s.add(p.id);
+        items.set(p.id, p);
+      }
     }
-    await syncStatus();
+    b.selected = s;
+    b.selectedItems = items;
+    // 一次性批量动作不算「手动勾选」，但它改变了 selected 的内容，让 selectAll 三态
+    // 回到 phase 0 比较稳——下次按「全选当前」会从「只选未下载」开始
+    b.selectAllPhase = 0;
+    const verb = mode === 'clear_range'
+      ? `清空范围内：移除 ${removed} 个`
+      : (mode === 'all' ? `全选所有：新增 ${added} 个` : `全选(除已下载)：新增 ${added} 个`);
+    showToast(`多页批量 ${from}-${to} 页 ${verb}，共 ${s.size} 个已选`, 'success');
+    appendLog(`[Tag浏览] 多页批量 ${from}-${to} 页 ${verb}`);
+    mp.open = false;
   } catch (e) {
-    showToast('下载失败：' + (e.message || e), 'error');
+    mp.error = '失败：' + (e.message || e);
   } finally {
-    browse.value.downloading = false;
+    mp.loading = false;
+    mp.progress = '';
   }
 }
 
@@ -4468,6 +4721,9 @@ const tagFolderPreview = computed(() => {
       :filtered="browseFiltered"
       :selected-count="browseSelectedCount"
       :safe-mode="safeMode"
+      :select-all-label="browseSelectAllLabel"
+      :cross-page-count="browseCrossPageCount"
+      :multi-page="browseMultiPage"
       @update:open="closeBrowse"
       @load-collected="(d, p = 1) => loadCollectedIds(d, p)"
       @run-search="(p = 1) => runBrowseSearch(p)"
@@ -4476,7 +4732,23 @@ const tagFolderPreview = computed(() => {
       @toggle-select="toggleBrowseSelect"
       @select-all-visible="browseSelectAllVisible"
       @clear-selection="browseClearSelection"
+      @open-selection-list="openBrowseSelectionList"
+      @open-multi-page="openBrowseMultiPage"
+      @close-multi-page="closeBrowseMultiPage"
+      @multi-page-action="browseMultiPageAction"
+      @update:multi-from="v => (browseMultiPage.from = v)"
+      @update:multi-to="v => (browseMultiPage.to = v)"
       @download-selected="downloadBrowseSelected"
+    />
+
+    <!-- Tag 浏览的跨页已选清单（缩略图 + 单条移除） -->
+    <BrowseSelectionModal
+      v-model="browseSelectionListOpen"
+      :selected-entries="browseSelectedEntries"
+      :total-count="browseSelectedCount"
+      :on-page-count="browseOnPageCount"
+      :cross-page-count="browseCrossPageCount"
+      @remove="browseRemoveFromSelection"
     />
 
     <!-- Translation Modal (list of untranslated characters) -->
@@ -5702,7 +5974,6 @@ const tagFolderPreview = computed(() => {
 .status-dot.is-active {
   background: #51cf66;
   box-shadow: 0 0 0 2px rgba(81, 207, 102, 0.2);
-  animation: pulse 2s infinite;
 }
 
 @keyframes pulse {
@@ -6330,14 +6601,26 @@ const tagFolderPreview = computed(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.2s, transform 0.15s, color 0.2s;
+  transition: background 0.2s, color 0.2s, box-shadow 0.2s, filter 0.2s;
   backdrop-filter: blur(4px);
 }
-.img-fav-toggle:hover { background: rgba(0, 0, 0, 0.65); transform: scale(1.08); }
+.img-fav-toggle:hover { background: rgba(0, 0, 0, 0.65); }
+/* 已收藏态 hover：要保持「红色身份」，不能被 :hover 的深色背景覆盖。
+   显式提高特异性，覆盖默认 :hover 的 background 切换（避免 0.2s 过渡里短暂闪一下深色），
+   只用 filter 微暗 + 加强 box-shadow 提示「点一下就取消收藏」
+   （去掉 scale 放大，跟其他普通按钮的悬浮行为保持一致）。
+   transition 也要把 background 排除：父规则的 `transition: background 0.2s ...` 仍生效，
+   即使 initial/hover 都是粉色，浏览器仍可能启动一次粉→深灰→粉的过渡造成「无色闪一下」。 */
 .img-fav-toggle.active {
   background: linear-gradient(135deg, #ff5b8a, #d12869);
   color: #fff;
   box-shadow: 0 2px 8px rgba(209, 40, 105, 0.5);
+}
+.img-fav-toggle.active:hover {
+  background: linear-gradient(135deg, #ff5b8a, #d12869);
+  filter: brightness(0.92) saturate(1.08);
+  box-shadow: 0 4px 12px rgba(209, 40, 105, 0.6);
+  transition: box-shadow 0.2s, filter 0.2s;
 }
 
 .img-select-toggle {
@@ -6704,10 +6987,44 @@ const tagFolderPreview = computed(() => {
   margin-right: auto;
 }
 
-/* 大图浏览器底部的「收藏」切换按钮 */
+/* 大图浏览器底部的「收藏」切换按钮
+   base：暗色胶囊 + 金色字；active：粉色渐变 + 白字 + 红色光晕
+   hover 拆分：未收藏态用白底叠加（让暗胶囊更亮一点），已收藏态保持红色
+   身份但加 brightness(0.9) 微暗一档，告诉用户「点一下就取消收藏」，
+   不要把 active 按钮的渐变整个洗成白色——会瞬间失忆「这图还在不在收藏里」
+   （去掉 scale 放大，跟其他普通按钮的悬浮行为保持一致） */
 .viewer-fav-btn {
   background: rgba(255, 255, 255, 0.12);
-/* .crypto-tool-* 样式已随 CryptoToolModal.vue 一起搬走 */
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  color: #ffd699;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s, box-shadow 0.2s, border-color 0.2s, filter 0.2s;
+}
+.viewer-fav-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.2);
+}
+/* 已收藏态的 hover：要保持「红色身份」，只用 filter 微暗，不要用 background 白底
+   把渐变洗掉。
+   这里要显式 lock 住 background = 粉色渐变，并 override transition 去掉 background 项
+   —— 父规则的 transition: background 0.2s 仍生效，若不显式声明，浏览器仍可能启动
+   一次「粉→白→粉」的过渡出现「已收藏按钮变无色」的闪烁。
+   顺便把 box-shadow 加强一档，让悬浮时的粉色外光晕更明显，提示「点一下就取消收藏」
+   （去掉 scale 放大，跟其他普通按钮的悬浮行为保持一致） */
+.viewer-fav-btn.active:hover:not(:disabled) {
+  background: linear-gradient(135deg, #ff5b8a, #d12869);
+  filter: brightness(0.9) saturate(1.1);
+  box-shadow: 0 0 0 1px rgba(209, 40, 105, 0.5), 0 8px 26px rgba(209, 40, 105, 0.6);
+  transition: box-shadow 0.2s, border-color 0.2s, filter 0.2s;
+}
+.viewer-fav-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.viewer-fav-btn.active {
+  background: linear-gradient(135deg, #ff5b8a, #d12869);
+  color: #fff;
+  border-color: transparent;
   box-shadow: 0 0 0 1px rgba(209, 40, 105, 0.3), 0 6px 22px rgba(209, 40, 105, 0.45);
 }
 .image-card.is-img-favorited::before {

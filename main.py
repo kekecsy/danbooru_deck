@@ -103,10 +103,14 @@ def _load_library_roots_config():
             raw_path = entry
             raw_id = ""
             label = ""
+            lazy_scan = False
         elif isinstance(entry, dict):
             raw_path = entry.get("path") or entry.get("root") or ""
             raw_id = entry.get("id") or ""
             label = entry.get("label") or entry.get("name") or ""
+            # 机械盘 / 外置盘 / 网盘根目录上默认开懒扫：只枚举日期目录名，不数图。
+            # 用户在 JSON 里显式写 "lazy_scan": false 可以覆盖（例如该 root 是本地 SSD）。
+            lazy_scan = bool(entry.get("lazy_scan", False))
         else:
             continue
         if not raw_path:
@@ -132,6 +136,7 @@ def _load_library_roots_config():
             "label": label or path.name or lib_id,
             "path": path,
             "is_default": False,
+            "lazy_scan": lazy_scan,
         })
     return roots
 
@@ -147,6 +152,7 @@ def get_library_roots_payload():
             "label": root["label"],
             "path": str(root["path"]),
             "is_default": root.get("is_default", False),
+            "lazy_scan": bool(root.get("lazy_scan", False)),
         }
         for root in get_library_roots()
     ]
@@ -625,6 +631,11 @@ def get_available_date_folder_details():
         base = root["path"]
         if not base.exists():
             continue
+        # 懒扫根：只枚举日期目录名，不数图、不读 ids_data.json。
+        # 机械盘 / 外置盘 / 网盘上有几百个日期文件夹时，逐目录 iterdir 几次就卡死。
+        # 图数留 None，让前端走"有图片但未统计"分支；点进具体日期时由
+        # build_local_image_library 单日扫描（单目录 IO 很快）补上。
+        is_lazy = bool(root.get("lazy_scan", False))
         for item in base.iterdir():
             if not item.is_dir() or not date_pattern.match(item.name):
                 continue
@@ -634,12 +645,16 @@ def get_available_date_folder_details():
                 continue
             rec = folders.setdefault(item.name, {
                 "date": item.name,
-                "image_count": 0,
+                "image_count": None if is_lazy else 0,
                 "source_count": 0,
-                "has_images": False,
+                "has_images": True if is_lazy else False,
                 "pending_ids": 0,
+                "count_known": not is_lazy,
             })
             rec["source_count"] += 1
+            if is_lazy:
+                # 不调 count_gallery_media_files / _count_pending_ids，直接累加 source_count
+                continue
             rec["image_count"] += count_gallery_media_files(item)
             rec["has_images"] = rec["image_count"] > 0
             rec["pending_ids"] += _count_pending_ids(item)
