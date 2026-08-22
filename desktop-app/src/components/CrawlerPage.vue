@@ -353,14 +353,13 @@ let isModeSwitching = false;
 watch(() => gallery.value.selectedDate, (newDate) => {
   if (!newDate) return;
   const mode = form.value.mode;
-  if (mode === 'popular' && !form.value.dateRange) {
-    if (form.value.targetDate !== newDate) form.value.targetDate = newDate;
-  } else if (mode === 'popular' && form.value.dateRange) {
-    if (form.value.startDate !== newDate) form.value.startDate = newDate;
-  } else if (isDownloadByIdsMode.value) {
-    // 「按ID下载」子操作：目标日期跟随右侧 GalleryCalendar，
-    // 同时主动 fetch 新日期 folder 的待下载 ID 写回 idsText，
-    // 解决"切到 B 日期 → 粘贴区仍是 A 的 ID"这个频繁补日期的痛点。
+  // 「按ID下载」子操作：目标日期跟随右侧 GalleryCalendar，
+  // 同时主动 fetch 新日期 folder 的待下载 ID 写回 idsText，
+  // 解决"切到 B 日期 → 粘贴区仍是 A 的 ID"这个频繁补日期的痛点。
+  // 必须放在最前面：原版 if/else if 链在 popular+单日 模式下第一个分支先匹配，
+  // 导致这里成 dead code，「按ID下载」状态下切日期只会改 targetDate、不会同步 idsText，
+  // 出现"日期 A 的 IDs 被下载到日期 B folder"的跨日期污染。
+  if (isDownloadByIdsMode.value) {
     if (form.value.targetDate !== newDate) {
       form.value.targetDate = newDate;
       fetchCollectedIdsForDate(newDate, {
@@ -381,6 +380,12 @@ watch(() => gallery.value.selectedDate, (newDate) => {
         },
       });
     }
+    return;
+  }
+  if (mode === 'popular' && !form.value.dateRange) {
+    if (form.value.targetDate !== newDate) form.value.targetDate = newDate;
+  } else if (mode === 'popular' && form.value.dateRange) {
+    if (form.value.startDate !== newDate) form.value.startDate = newDate;
   }
 });
 
@@ -1706,6 +1711,41 @@ async function syncStatusOnce() {
         await reloadCurrentGallery();
       } else {
         await refreshGalleryIndex(gallery.value.selectedDate);
+      }
+      // 「按ID下载」子操作 + 任务结束 + 下载目标 = 当前画廊日期：
+      // 主动重读 ids_data.json，把"已下载成功"的 ID（被 resolve_pending_id 移除）剔除，
+      // 剩下的写回 idsText，让用户切回表单能直接看到「还剩哪些没下」+ 一键重新入队。
+      // 防竞态：fetch 期间用户又切了日期 → 丢弃过期结果。
+      // 不覆盖 'error'：任务异常时 ids_data.json 状态不可信，让用户自己决定下一步。
+      if (isDownloadByIdsMode.value
+          && finishedFolder
+          && finishedFolder === gallery.value.selectedDate
+          && (status.outcome === 'completed'
+              || status.outcome === 'completed_with_failures'
+              || status.outcome === 'stopped')) {
+        fetchCollectedIdsForDate(finishedFolder, {
+          onSuccess: (fetchedDate, payload) => {
+            if (gallery.value.selectedDate !== fetchedDate) return;
+            const before = (form.value.idsText || '').trim();
+            form.value.idsText = payload.ids.join('\n');
+            const after = (form.value.idsText || '').trim();
+            if (before === after) return;  // 没变化就不打扰
+            showToast(
+              payload.ids.length
+                ? `任务完成，已刷新 ${fetchedDate} 剩余 ${payload.ids.length} 个待下载 ID`
+                : `任务完成，${fetchedDate} folder 已无可下载 ID`,
+              'info',
+            );
+          },
+          onEmpty: (fetchedDate) => {
+            if (gallery.value.selectedDate !== fetchedDate) return;
+            if ((form.value.idsText || '').trim()) {
+              form.value.idsText = '';
+              showToast(`任务完成，${fetchedDate} folder 已无可下载 ID`, 'info');
+            }
+          },
+          // onError 静默：任务结束 toast 已经提示过，ids_data 读取失败不要额外打扰
+        });
       }
     }
   } catch (error) {
