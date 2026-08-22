@@ -319,6 +319,8 @@ class DownloadJob:
     tag_source: str = "danbooru"                          # tags 模式：danbooru / gelbooru
     failed_pages: list = field(default_factory=list)      # [{"folder":..., "page":...}]，页面列表抓取失败（页级）
     failed_ids: dict = field(default_factory=dict)        # {ids: folder}，图片下载失败（图级），供前端按 id 重试
+    consecutive_page_failures: int = 0                     # 页面抓取静默重试全部失败的「连续」页数（任一成功即清零），
+                                                            # 达到 CONSECUTIVE_PAGE_FAILURE_THRESHOLD 时 auto-pause 一次
     pending_ids: set = field(default_factory=set)         # 当前 folder 的 ids_data.json 内存镜像：下载前写入、成功后移除
     pages_list: list = field(default_factory=list)        # 定向重试页码（如 [10, 11, 12]）；空 = 走 start_page..end_page 全段
     total_planned: int = 0                                # 本次任务总目标数（task_download_ids 入口一次性设置）
@@ -1194,45 +1196,80 @@ class ImageFavoriteRemoveRequest(BaseModel):
 # ==========================================
 
 def _fetch_page_or_pause(fetch_fn, job, label, page=None):
-    """对「页面列表抓取」的单次抓取，失败即记入 failed_pages 并暂停任务等用户决策。
+    """对「页面列表抓取」的单次抓取：失败时静默重试 PAGE_FETCH_SILENT_RETRIES 次
+    （间隔 PAGE_FETCH_BACKOFF 退避），全部失败则记入 failed_pages 并返回 [] 让 grabber
+    跳过本张/本页继续抓下一张/下一页。同时累计「连续失败页数」，达到
+    CONSECUTIVE_PAGE_FAILURE_THRESHOLD 时 auto-pause 一次让用户决策（避免在系统
+    性故障时把整轮抓完才停下）。
 
-    设计原因：之前的复杂版本有「auto-pause + 重试本页 / 跳过此页」三选一横幅，
-    交互层和 play_event 状态机互相抢锁，bug 太多。本版本简化为：
-      - 抓取失败 → log + record_failed_page + 清 play_event 让任务进入暂停态
-      - 用户在已有的「继续 / 停止」按钮里二选一：
-        · 继续 → play_event.set() 唤醒本函数，重新抓**同一页**（attempt 累加）
-        · 停止 → job.is_running=False，本函数 return None 让 grabber 收尾
-      - 「跳过此页」按钮被删（语义与「继续」重叠且容易和继续抢锁）。想跳页就
-        停止任务，重新入队时改 start_page。
+    设计原因：旧版「抓失败即 auto-pause」体验差 —— 一次风控抖动就让任务卡住，
+    用户点「继续」后又同样失败，陷入「失败→暂停→继续→失败」的循环。新版把
+    「瞬时抖动」和「真失败」分开：
+      - 静默重试成功 = 瞬时抖动吸收，不打扰用户。
+      - 静默重试全部失败 = 该页真的没拿到，记入 failed_pages 让前端「需手动
+        重试的页」提示出现，用户跑完整轮后一次性重新入队即可。
+      - 连续多张/页都失败 = 大概率是 host 故障或风控熔断，auto-pause 让用户
+        决定是继续等还是先停。
 
     返回值约定：
-      - list（成功）：fetch_fn 的返回值（也可能是空 list = 该页本身无数据）
-      - None：任务已停，grabber 收尾
+      - list（成功 或 重试后跳过）：fetch_fn 的返回值；空 list 表示该页被跳过
+        或该页本身无数据。grabber 看到 [] 时 _process_posts_concurrent 已自带
+        fast-path（if not posts: return 0, 0, 0）。
+      - None：任务已停（用户点停止 或 auto-pause 后用户点停止），grabber 收尾。
 
-    grabber 仍只需判 None 即可：if posts is None: return [], ...
+    grabber 仍只需判 None：if posts is None: return [], ...
     """
-    attempt = 0
-    while job.is_running:
-        attempt += 1
-        try:
-            return fetch_fn()
-        except Exception as e:
-            if page is not None:
-                job.record_failed_page(page)
+    total_attempts = PAGE_FETCH_SILENT_RETRIES + 1  # 1 初次 + N 静默重试
+    last_err = None
+    for attempt in range(1, total_attempts + 1):
+        if attempt > 1:
+            delay = PAGE_FETCH_BACKOFF[attempt - 2]
             job.append_log(
-                f"{label} 抓取失败: {e}"
-                f"（已自动暂停任务，点「继续」重试本页，点「停止」结束任务）"
+                f"{label} 抓取失败（{last_err}），{delay} 秒后第 {attempt - 1}/{PAGE_FETCH_SILENT_RETRIES} 次重试..."
             )
-            job.play_event.clear()
-            # 阻塞在 play_event 上直到用户决策；grabber 外层 `job.play_event.wait()`
-            # 也会等到，所以这里不破坏其他暂停语义。
-            job.play_event.wait()
-            if not job.is_running:
-                return None
-            # 用户点「继续」：回到 while 顶端重新抓同一页
-            job.append_log(f"{label} 用户已继续，尝试第 {attempt + 1} 次抓取...")
+            # 退避 sleep 走 play_event 兼容暂停：暂停时不真正数 sleep，由用户「继续/停止」决定
+            slept = 0
+            while slept < delay:
+                if not job.is_running:
+                    return None
+                job.play_event.wait()
+                if not job.is_running:
+                    return None
+                sleep(1)
+                slept += 1
+        try:
+            result = fetch_fn()
+        except Exception as e:
+            last_err = e
             continue
-    return None
+        # 成功（初次成功 或 静默重试成功）：清零连续失败计数
+        if attempt > 1:
+            job.append_log(f"{label} 第 {attempt - 1} 次重试成功。")
+        if job.consecutive_page_failures:
+            job.consecutive_page_failures = 0
+        return result
+
+    # 静默重试全部失败
+    if page is not None:
+        job.record_failed_page(page)
+    job.consecutive_page_failures += 1
+    job.append_log(
+        f"{label} 抓取失败：{last_err}（已重试 {PAGE_FETCH_SILENT_RETRIES} 次仍失败）。"
+        f"已记入失败页跳过本张/本页，任务继续跑下一张/下一页。"
+    )
+    if job.consecutive_page_failures >= CONSECUTIVE_PAGE_FAILURE_THRESHOLD:
+        job.append_log(
+            f"⚠ 连续 {job.consecutive_page_failures} 张/页抓取失败，可能 host 故障或风控熔断，"
+            f"已自动暂停任务等待用户决策（点「继续」继续抓，点「停止」结束任务）。"
+        )
+        job.play_event.clear()
+        job.play_event.wait()
+        if not job.is_running:
+            return None
+        # 用户已决定继续：清零计数，给任务一次喘息机会
+        job.append_log("用户已继续，重置连续失败计数为 0，继续抓取。")
+        job.consecutive_page_failures = 0
+    return []
 
 
 def _rest_between_pages(idx, job, n=5, rest_seconds=15):
@@ -1346,6 +1383,17 @@ def _persist_global_data():
 # 单个下载任务内的图片并发下载度。curl_cffi 的阻塞 requests.get 在网络IO期间释放 GIL，
 # 所以线程池能真并发。Danbooru 有限流，4 是速度与撞 429 风险的平衡点。
 DOWNLOAD_CONCURRENCY = 4
+
+
+# 页面列表抓取的容错参数。失败时单页静默重试 3 次（1s/3s/5s 退避），仍失败则记入
+# failed_pages 并跳过本张/本页让 grabber 继续抓下一张/下一页；同时累计「连续失败页数」，
+# 达到阈值时 auto-pause 一次让用户决策，避免在系统性故障（host 挂了 / 一直 429）时
+# 把 50 页全跑完才停下。阈值 5 是经验值：3 张/页瞬时抖动×3 静默重试 = 9s/页，
+# 5×9s = 45s 内仍全部失败 → 大概率是站端问题而不是本机抖动。
+PAGE_FETCH_SILENT_RETRIES = 3
+CONSECUTIVE_PAGE_FAILURE_THRESHOLD = 5
+# 静默重试的退避间隔（秒）。最后一次固定 5s 是为了让风控冷却下来再试一次。
+PAGE_FETCH_BACKOFF = (1, 3, 5)
 
 
 def _process_posts_concurrent(job, posts, page_need_update, new_hot_artists,
