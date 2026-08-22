@@ -15,6 +15,16 @@ class TransientImageError(Exception):
     pass
 
 
+class PermanentPostError(Exception):
+    """拉取 post 元数据时遇到永久错误（403/404/410/451 —— 帖子已删 / 已删号 / 隐私）。
+    上层据此把 id 从待下载队列移除（不写 failed_ids），避免「重试」按钮每次都列出同一个已删图。
+    区别于 TransientImageError：本类重试无意义，瞬时错误才会重试。"""
+    def __init__(self, post_id, status_code):
+        super().__init__(f"post {post_id} 永久不可用 (HTTP {status_code})")
+        self.post_id = str(post_id)
+        self.status_code = int(status_code)
+
+
 # ---------------- SFW 开关 ----------------
 # 默认走 safebooru（无 R-18 内容）；前端通过 /api/set_safe_mode 切换。
 # 所有需要拼 URL 的地方都通过 get_host()/post_url() 读，确保切换即时生效。
@@ -106,10 +116,14 @@ def check_proxy_simple():
     except:
         return False
 
-def get_posts_by_rank(page, timeout=20):
+def get_posts_by_rank(page, limit=20, timeout=20):
+    """按 order:rank 拉一页 posts.json 给前端预览/收集，不下载图片。
+    limit 默认 20（Danbooru 默认页大小），与旧调用方行为一致；
+    新增的 /api/browse_rank 端点会在 1..200 之间透传覆盖。"""
     params = {
         "d": "1",
         "page": page,
+        "limit": limit,
         "tags": "order:rank"
     }
     r = requests.get(
@@ -263,7 +277,14 @@ def get_wiki(name, timeout=10):
 
 
 def fetch_data_with_retry(post_id, retries=5, delay=3, timeout=10):
+    """拉取单个 post 的元数据。
+    - 永久错误（403/404/410/451，已删/不可访问）：立即抛 PermanentPostError，**不重试**。
+      之前会被 raise_for_status 当 5xx 一样 5×3s=15s 浪费，并被上层记入 failed_ids
+      让用户每次点重试都重新跑一遍同样的 404 循环。
+    - 瞬时错误（429/5xx/超时/连接错）：仍按 retries × delay 重试；耗尽后返回 None。
+    """
     url = f'https://{_HOST}/posts/{post_id}.json'
+    PERMANENT_STATUS = {403, 404, 410, 451}
     attempt = 0
     while attempt < retries:
         try:
@@ -274,12 +295,19 @@ def fetch_data_with_retry(post_id, retries=5, delay=3, timeout=10):
                 impersonate="chrome120",
                 timeout=timeout
             )
+            if r.status_code in PERMANENT_STATUS:
+                # 永久错误：不再重试，不再伪装成 None 让人误以为是瞬时失败
+                raise PermanentPostError(post_id, r.status_code)
             r.raise_for_status()
             return r.json()
+        except PermanentPostError:
+            # 自己抛的，往上传，不算「重试次数」
+            raise
         except Exception as e:
             attempt += 1
             print(f"请求ID {post_id} 失败 ({attempt}/{retries}): {e}")
-            sleep(delay)
+            if attempt < retries:
+                sleep(delay)
     return None
 
 def download_image(url, folder, custom_print=print, retries=3, delay=3, raise_on_transient=False):

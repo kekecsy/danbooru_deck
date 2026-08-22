@@ -366,7 +366,6 @@ onBeforeUnmount(() => {
 
       <div class="date-quickbar task-date-quickbar">
         <button type="button" class="date-quick" @click="selectDate(yesterday())">昨天</button>
-        <button type="button" class="date-quick" @click="selectDate(today())">今天</button>
         <button type="button" class="date-quick" @click="jumpMonth(today())">本月</button>
         <button type="button" class="date-quick" :disabled="!dateFolderRecords.length" @click="jumpLatestGalleryDate">最新目录</button>
         <button type="button" class="date-quick" @click="dateView = 'months'">选月份</button>

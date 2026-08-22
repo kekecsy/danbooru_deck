@@ -106,9 +106,9 @@ async function revealFolder(key) {
           style="width: 100%; height: 56px; font-family: Consolas, monospace; font-size: 13px; resize: none; background: rgba(0,0,0,0.04); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 10px; outline: none; cursor: text;"
           onfocus="this.select()"
         >{{ safeMode ? '104.26.11.39 safebooru.donmai.us' : '104.26.11.39 danbooru.donmai.us' }}</textarea>
-        <div style="display: flex; gap: 10px; margin-top: 10px; justify-content: flex-end;">
-          <button class="secondary" @click="openHostsFolder">打开 hosts 所在目录</button>
-          <button @click="copyHostsSnippet">复制 hosts 内容</button>
+        <div class="tutorial-actions">
+          <button class="secondary tutorial-action-btn" @click="openHostsFolder" title="用资源管理器打开 hosts 所在目录">📂&nbsp;打开 hosts 所在目录</button>
+          <button class="tutorial-action-btn" @click="copyHostsSnippet" title="复制当前模式的 hosts 配置到剪贴板">📋&nbsp;复制 hosts 内容</button>
         </div>
       </div>
 
@@ -120,14 +120,14 @@ async function revealFolder(key) {
             <div class="tutorial-card-desc">没装 ffmpeg 时，"批量转 GIF" 按钮和 MP4 卡片缩略图会失效。点下面按钮看知乎图文教程。</div>
           </div>
         </div>
-        <div style="display: flex; gap: 10px; margin-top: 8px; justify-content: flex-end;">
+        <div class="tutorial-actions">
           <a
             href="https://zhuanlan.zhihu.com/p/662421567"
             target="_blank"
             rel="noopener"
-            class="tutorial-link-btn"
+            class="tutorial-link-btn tutorial-action-btn"
             @click.prevent="openFfmpegTutorial"
-          >打开知乎 ffmpeg 教程 →</a>
+          >📖&nbsp;打开知乎 ffmpeg 教程&nbsp;→</a>
         </div>
       </div>
 
@@ -173,11 +173,11 @@ async function revealFolder(key) {
               <button class="secondary" style="margin-left: 6px; padding: 2px 8px; font-size: 11px;" @click="copyToClipboard(paths.userDataPath)">复制</button>
             </li>
           </ol>
-          <div style="display: flex; gap: 10px; margin-top: 10px; flex-wrap: wrap; justify-content: flex-end;">
-            <button class="secondary" @click="revealFolder('hotPicDir')">打开 hot_pic 目录</button>
-            <button @click="revealFolder('repoRoot')">
-              <span v-if="paths.isDev">打开项目根目录</span>
-              <span v-else>打开数据根目录</span>
+          <div class="tutorial-actions">
+            <button class="secondary tutorial-action-btn" @click="revealFolder('hotPicDir')" title="用资源管理器打开 hot_pic 目录">📂&nbsp;打开 hot_pic 目录</button>
+            <button class="tutorial-action-btn" @click="revealFolder('repoRoot')" :title="paths.isDev ? '用资源管理器打开项目根目录' : '用资源管理器打开数据根目录'">
+              <span v-if="paths.isDev">📁&nbsp;打开项目根目录</span>
+              <span v-else>📁&nbsp;打开数据根目录</span>
             </button>
           </div>
         </div>
@@ -200,6 +200,30 @@ async function revealFolder(key) {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+/* 每个 tutorial-card 底部的按钮行：右对齐 + 窄屏自动换行 + 按钮之间 10px 间距。
+   三个卡片共享这套规则，避免三段 inline style 重复。 */
+.tutorial-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+}
+.tutorial-actions > .tutorial-action-btn,
+.tutorial-actions > .secondary.tutorial-action-btn,
+.tutorial-actions > a.tutorial-action-btn {
+  min-height: 36px;
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 .tutorial-card-head {
   display: flex;

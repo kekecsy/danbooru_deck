@@ -58,5 +58,10 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     const handler = (_e, data) => callback(data);
     ipcRenderer.on('context-menu:copied', handler);
     return () => ipcRenderer.removeListener('context-menu:copied', handler);
+  },
+  // 剪贴板读写：navigator.clipboard 的主进程 fallback
+  clipboard: {
+    readText: () => ipcRenderer.invoke('clipboard:read-text'),
+    writeText: (text) => ipcRenderer.invoke('clipboard:write-text', text)
   }
 });

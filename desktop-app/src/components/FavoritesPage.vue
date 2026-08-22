@@ -298,7 +298,17 @@ async function copyViewerImage() {
     if (result?.ok) {
       if (result.isGif) {
         const kb = Math.round((result.bytes || 0) / 1024);
-        showToast(`已复制完整 GIF ${result.width}×${result.height}（${kb}KB，保留多帧动画）`, 'success');
+        // animated=true: 'image/gif' 通道真的进了剪贴板 → 浏览器/IM 粘贴是动图
+        // animated=false, hasFirstFrame=true: 动图没进去但首帧 CF_DIB 进了剪贴板
+        //   → 只能保证目标 app 粘出张图（多数桌面 app 走这条）
+        // 两条都没成：main.cjs 内部已 ok 短路到 false，不会进到这块
+        if (result.animated) {
+          showToast(`已复制完整 GIF ${result.width}×${result.height}（${kb}KB，保留多帧动画）`, 'success');
+        } else if (result.hasFirstFrame) {
+          showToast(`已复制 GIF 首帧 ${result.width}×${result.height}（${kb}KB，目标应用不支持 GIF 多帧）`, 'warning');
+        } else {
+          showToast(`复制失败：GIF 已写入但目标应用读取不到`, 'error');
+        }
       } else {
         showToast(`已复制图片 ${result.width}×${result.height}（上限 2000px）`, 'success');
       }

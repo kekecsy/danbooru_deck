@@ -109,6 +109,18 @@ function parseDate(value) {
 function formatDate(year, month, day) {
   return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
+function addDays(dateStr, days) {
+  // 用 UTC 算避免本地时区把"11-05 加一天"算出 10-04。
+  const parsed = parseDate(dateStr);
+  if (!parsed) return null;
+  const d = new Date(Date.UTC(parsed.year, parsed.month - 1, parsed.day));
+  d.setUTCDate(d.getUTCDate() + days);
+  return formatDate(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+}
+// YYYY-MM-DD 是字典序可比的格式，直接字符串比较就是日期先后。
+function isAfterToday(dateStr) {
+  return !!props.today && !!dateStr && dateStr > props.today;
+}
 
 function toFiniteCount(value, fallback = 0) {
   const count = Number(value);
@@ -190,6 +202,42 @@ const canJumpToday = computed(() =>
   availableSet.value.has(props.today)
 );
 
+// 上下一天走「自然日历日」：selectedDate 减/加一天，不再从 availableDates 找相邻
+// folder。原先按 sortedAvailableDates[index±1] 跳的话会跨过没有 folder 的日期
+// （比如 11-05 → 11-07，因为 11-06 那天没下载过），用户感知是"按钮少了一天"。
+// 「下一天」在 nextDay > today 时禁用。
+const prevDay = computed(() => {
+  if (isTagSelected.value) return null;
+  return addDays(props.selectedDate, -1);
+});
+const nextDay = computed(() => {
+  if (isTagSelected.value) return null;
+  return addDays(props.selectedDate, 1);
+});
+const canGoPrevDay = computed(() => !!prevDay.value);
+const canGoNextDay = computed(() => !!nextDay.value && !isAfterToday(nextDay.value));
+
+// 前进导航越界保护：nextMonth / nextYear / nextYearBlock 在「下一格已经完全在
+// today 之后」时禁用，避免用户被带到「全是未来日」的月 / 年视图。
+const canGoNextMonth = computed(() => {
+  const t = parseDate(props.today);
+  if (!t) return true;
+  if (currentYear.value < t.year) return true;
+  if (currentYear.value > t.year) return false;
+  return currentMonth.value < t.month;
+});
+const canGoNextYear = computed(() => {
+  const t = parseDate(props.today);
+  if (!t) return true;
+  return currentYear.value < t.year;
+});
+const canGoNextYearBlock = computed(() => {
+  const t = parseDate(props.today);
+  if (!t) return true;
+  // 当前块的最后一年还 < today.year 就能继续 next
+  return yearBlockStart.value + 11 < t.year;
+});
+
 const cells = computed(() => {
   if (!currentYear.value || !currentMonth.value) return [];
   const first = new Date(currentYear.value, currentMonth.value - 1, 1);
@@ -221,7 +269,9 @@ const cells = computed(() => {
       date,
       // 任何合法 YYYY-MM-DD 都可以点：选了一个还没建文件夹的日期时，
       // 后端会建空文件夹并进入，而不是回退到 today。folder 状态仅用于视觉区分。
+      // 但「今天之后」的日期不能选——disabled + .future 灰显，避免用户点到未来。
       enabled: true,
+      future: isAfterToday(date),
       hasFolder: !!folder,
       noFolder: !folder,
       hasImages: !!folder?.hasImages,
@@ -245,12 +295,16 @@ const monthItems = computed(() => {
     const folders = dateFolderRecords.value.filter(item => item.date.startsWith(prefix));
     const imageCount = folders.reduce((sum, item) => sum + (item.imageCount || 0), 0);
     const pendingIds = folders.reduce((sum, item) => sum + (item.pendingIds || 0), 0);
+    // 「今天之后」的月不能选：当年 == today.year 且 month > today.month；或 year > today.year。
+    const isFuture = !!today && (currentYear.value > today.year || (currentYear.value === today.year && month > today.month));
     return {
       month,
       label,
       // 任何月份都允许进入：用户可能想挑一个月里完全没建文件夹的某一天。
       // hasFolder 仅用于视觉区分（绿色=有图，米色=空文件夹，浅虚线=还没建）。
-      enabled: true,
+      // future 月份整格置灰 + 禁用，避免用户进到「全是未来日」的空白月。
+      enabled: !isFuture,
+      future: isFuture,
       hasFolder: folders.length > 0,
       noFolder: folders.length === 0,
       folderCount: folders.length,
@@ -275,9 +329,11 @@ const yearItems = computed(() => {
     const folders = dateFolderRecords.value.filter(item => item.date.startsWith(prefix));
     const imageCount = folders.reduce((sum, item) => sum + (item.imageCount || 0), 0);
     const pendingIds = folders.reduce((sum, item) => sum + (item.pendingIds || 0), 0);
+    const isFuture = !!today && year > today.year;
     return {
       year,
-      enabled: true,
+      enabled: !isFuture,
+      future: isFuture,
       hasFolder: folders.length > 0,
       noFolder: folders.length === 0,
       folderCount: folders.length,
@@ -367,10 +423,22 @@ function pickYear(year) {
   dateView.value = 'months';
 }
 function jumpLatestDate() {
-  const latest = sortedAvailableDates.value[0];
+  // 「最新」= 离 today 最近且 <= today 的日期。理论上后端不会建未来日期的 folder，
+  // 但若 props.today 早于 sortedAvailableDates[0]（比如跨时区 / 手动改系统时间），
+  // 这里仍 clamp 到 today 之前最近的一天。
+  const today = props.today;
+  const latest = today
+    ? sortedAvailableDates.value.find(d => d <= today) || today
+    : sortedAvailableDates.value[0];
   if (!latest) return;
   emit('select', latest);
   open.value = false;
+}
+function jumpPrevDay() {
+  if (prevDay.value) emit('select', prevDay.value);
+}
+function jumpNextDay() {
+  if (nextDay.value) emit('select', nextDay.value);
 }
 function jumpTodayMonth() {
   const parsed = parseDate(props.today);
@@ -397,8 +465,9 @@ function pickTag(folder) {
     <div class="calendar-toolbar">
       <button
         class="small-btn"
-        :disabled="selectedIndex < 0 || selectedIndex >= sortedAvailableDates.length - 1"
-        @click="$emit('select', sortedAvailableDates[selectedIndex + 1])"
+        :disabled="!canGoPrevDay"
+        :title="canGoPrevDay ? `跳到 ${prevDay}` : '已是当前可往前最早的一天'"
+        @click="jumpPrevDay"
       >上一天</button>
       <button
         class="calendar-trigger"
@@ -411,8 +480,9 @@ function pickTag(folder) {
       </button>
       <button
         class="small-btn"
-        :disabled="selectedIndex <= 0"
-        @click="$emit('select', sortedAvailableDates[selectedIndex - 1])"
+        :disabled="!canGoNextDay"
+        :title="canGoNextDay ? `跳到 ${nextDay}` : (isTagSelected ? 'tag 模式没有下一天' : '已经是今天，明天不可选')"
+        @click="jumpNextDay"
       >下一天</button>
       <button
         class="today-btn"
@@ -445,8 +515,8 @@ function pickTag(folder) {
             <strong v-else-if="dateView === 'months'">{{ currentYear }}</strong>
             <strong v-else>{{ yearBlockStart }}-{{ yearBlockStart + 11 }}</strong>
           </button>
-          <button class="small-square" title="下一月" @click="nextMonth">›</button>
-          <button class="small-square" title="下一年" @click="nextYear">»</button>
+          <button class="small-square" title="下一月" :disabled="!canGoNextMonth" @click="nextMonth">›</button>
+          <button class="small-square" title="下一年" :disabled="!canGoNextYear" @click="nextYear">»</button>
         </div>
         <div class="date-quickbar">
           <button class="date-quick" :disabled="!sortedAvailableDates.length" @click="jumpLatestDate">最新</button>
@@ -464,8 +534,9 @@ function pickTag(folder) {
               v-for="cell in cells"
               :key="cell.date"
               class="day-cell"
-              :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.hasFolder, 'no-folder': cell.noFolder, 'has-images': cell.hasImages, 'uncounted': cell.hasFolder && !cell.countKnown, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages, 'has-pending-ids': cell.hasPendingIds }"
-              :title="dateCellTitle(cell)"
+              :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, future: cell.future, 'has-folder': cell.hasFolder, 'no-folder': cell.noFolder, 'has-images': cell.hasImages, 'uncounted': cell.hasFolder && !cell.countKnown, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages, 'has-pending-ids': cell.hasPendingIds }"
+              :title="cell.future ? `${cell.date} · 今天之后不可选` : dateCellTitle(cell)"
+              :disabled="cell.future"
               @click="pickDate(cell.date)"
             >
               <span>{{ cell.day }}</span>
@@ -478,8 +549,9 @@ function pickTag(folder) {
             v-for="m in monthItems"
             :key="m.month"
             class="month-cell"
-            :class="{ selected: m.selected, today: m.today, 'has-folder': m.hasFolder, 'no-folder': m.noFolder, 'has-images': m.hasImages, 'uncounted': m.hasFolder && !m.countKnown, 'empty-folder': m.hasFolder && m.countKnown && !m.hasImages, 'has-pending-ids': m.hasPendingIds }"
-            :title="periodTitle(`${currentYear} 年 ${m.label}`, m)"
+            :class="{ selected: m.selected, today: m.today, future: m.future, 'has-folder': m.hasFolder, 'no-folder': m.noFolder, 'has-images': m.hasImages, 'uncounted': m.hasFolder && !m.countKnown, 'empty-folder': m.hasFolder && m.countKnown && !m.hasImages, 'has-pending-ids': m.hasPendingIds }"
+            :title="m.future ? `${currentYear} 年 ${m.label} · 今天之后不可选` : periodTitle(`${currentYear} 年 ${m.label}`, m)"
+            :disabled="m.future"
             @click="pickMonth(m.month)"
           >
             <span>{{ m.label }}</span>
@@ -490,15 +562,16 @@ function pickTag(folder) {
           <div class="year-picker-nav">
             <button class="small-square" title="上一组年份" @click="prevYearBlock">‹</button>
             <span>{{ yearBlockStart }}-{{ yearBlockStart + 11 }}</span>
-            <button class="small-square" title="下一组年份" @click="nextYearBlock">›</button>
+            <button class="small-square" title="下一组年份" :disabled="!canGoNextYearBlock" @click="nextYearBlock">›</button>
           </div>
           <div class="year-grid">
             <button
               v-for="y in yearItems"
               :key="y.year"
               class="year-cell"
-              :class="{ selected: y.selected, today: y.today, 'has-folder': y.hasFolder, 'no-folder': y.noFolder, 'has-images': y.hasImages, 'uncounted': y.hasFolder && !y.countKnown, 'empty-folder': y.hasFolder && y.countKnown && !y.hasImages, 'has-pending-ids': y.hasPendingIds }"
-              :title="yearCellTitle(y)"
+              :class="{ selected: y.selected, today: y.today, future: y.future, 'has-folder': y.hasFolder, 'no-folder': y.noFolder, 'has-images': y.hasImages, 'uncounted': y.hasFolder && !y.countKnown, 'empty-folder': y.hasFolder && y.countKnown && !y.hasImages, 'has-pending-ids': y.hasPendingIds }"
+              :title="y.future ? `${y.year} 年 · 今天之后不可选` : yearCellTitle(y)"
+              :disabled="y.future"
               @click="pickYear(y.year)"
             >
               <span>{{ y.year }}</span>
@@ -510,7 +583,8 @@ function pickTag(folder) {
             v-for="y in yearItems"
             :key="`strip-${y.year}`"
             class="year-strip-btn"
-            :class="{ active: y.year === currentYear }"
+            :class="{ active: y.year === currentYear, future: y.future }"
+            :disabled="y.future"
             @click="currentYear = y.year"
           >{{ y.year }}</button>
         </div>
@@ -691,7 +765,7 @@ function pickTag(folder) {
   box-shadow: none;
 }
 /* ids_data.json 非空（待下载 id 队列）：有图时右上角加橙点；空文件夹时整格变橙强调。*/
-.day-cell.has-pending-ids.has-images:not(.selected) {
+.day-cell.has-pending-ids.has-images {
   position: relative;
 }
 .day-cell.has-pending-ids.has-images:not(.selected)::after {
@@ -705,11 +779,34 @@ function pickTag(folder) {
   background: #f59e0b;
   box-shadow: 0 0 0 1.5px rgba(255, 252, 246, 0.9);
 }
+.day-cell.has-pending-ids.has-images.selected::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px rgba(245, 158, 11, 0.6);
+}
 .day-cell.has-pending-ids.empty-folder:not(.selected) {
   background: rgba(245, 158, 11, 0.22);
   color: #8a5a0a;
   box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.45);
   font-weight: 600;
+}
+/* 选中态：selected 给 accent 渐变把橙色整格盖掉；用同款右上角橙点带白描边统一表达"待下载 id"。*/
+.day-cell.has-pending-ids.empty-folder.selected::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px rgba(245, 158, 11, 0.6);
 }
 /* 还没有日期文件夹的格子：可点（点了就建空文件夹），用虚线边暗示「点击会建」 */
 .day-cell.no-folder:not(.selected) {
@@ -720,6 +817,18 @@ function pickTag(folder) {
 .day-cell.no-folder:not(.selected):hover {
   background: rgba(99, 102, 241, 0.1);
   color: var(--accent-deep);
+}
+/* 未来日期：灰显 + 禁手（避免用户跨过 today 选到「下一天 = 2026-08-16」这种没意义的格子） */
+.day-cell.future {
+  opacity: 0.32;
+  cursor: not-allowed;
+  background: transparent;
+  color: var(--muted, #846a55);
+  box-shadow: none;
+}
+.day-cell.future:hover {
+  background: transparent;
+  color: var(--muted, #846a55);
 }
 
 .month-grid,
@@ -822,6 +931,10 @@ function pickTag(folder) {
 .year-cell.selected small {
   color: rgba(255, 255, 255, 0.82);
 }
+.month-cell.selected.has-pending-ids,
+.year-cell.selected.has-pending-ids {
+  border-top: 2px solid #f59e0b;
+}
 .month-cell.today:not(.selected),
 .year-cell.today:not(.selected) {
   border-color: rgba(80, 130, 92, 0.55);
@@ -832,6 +945,22 @@ function pickTag(folder) {
 .year-cell.disabled {
   opacity: 0.32;
   cursor: not-allowed;
+}
+/* 未来月 / 年：与 .disabled 视觉一致，但保留 hover 提示"今天之后不可选" */
+.month-cell.future:not(.selected),
+.year-cell.future:not(.selected) {
+  opacity: 0.28;
+  cursor: not-allowed;
+  background: transparent;
+  color: var(--muted, #846a55);
+  border-color: rgba(30, 41, 82, 0.08);
+  border-style: dashed;
+  font-weight: 400;
+}
+.month-cell.future:not(.selected):hover,
+.year-cell.future:not(.selected):hover {
+  background: transparent;
+  color: var(--muted, #846a55);
 }
 .year-picker {
   display: flex;
@@ -872,7 +1001,8 @@ function pickTag(folder) {
   color: #fff;
   font-weight: 700;
 }
-.year-strip-btn.disabled {
+.year-strip-btn.disabled,
+.year-strip-btn.future {
   opacity: 0.3;
   cursor: not-allowed;
 }

@@ -2,7 +2,8 @@
 // Tag 浏览 / 收集ID 在线预览弹窗。
 // 状态由父组件持有（state prop 传 ref，自动 unwrap），数据/网络逻辑也都在父组件里。
 // 本组件纯呈现 + 事件分发；纯展示/格式化逻辑（缩略图 URL、rating 分桶、原帖链接）放在这里。
-import { computed } from 'vue';
+import { computed, ref, watch } from 'vue';
+import SearchHistoryDropdown from '../SearchHistoryDropdown.vue';
 
 const props = defineProps({
   state: { type: Object, required: true },
@@ -21,6 +22,10 @@ const props = defineProps({
     type: Object,
     default: () => ({ open: false, from: 1, to: 1, loading: false, progress: '', error: '' }),
   },
+  // tag 搜索历史（最多 10 条，最近优先）。子组件不直接改 state，仅显示。
+  tagSearchHistory: { type: Array, default: () => [] },
+  // 常用 tag 列表（最多 20 条）：用户保存的 tag 片段（e.g. official_art），点 chip 就拼到当前 query
+  savedTags: { type: Array, default: () => [] },
 });
 const emit = defineEmits([
   'update:open',
@@ -28,6 +33,7 @@ const emit = defineEmits([
   'run-search',         // (page=1)
   'refresh',            // ()
   'go-page',            // (delta)
+  'go-to-page',         // (page: number) 直接跳到指定页（Tag/Rank 浏览；collected 模式也支持，跳到该 ID 列表的对应切片页）
   'toggle-select',      // (post)
   'select-all-visible', // ()
   'clear-selection',    // ()
@@ -38,6 +44,11 @@ const emit = defineEmits([
   'update:multi-from',  // (number)
   'update:multi-to',    // (number)
   'download-selected',  // ()
+  'pick-tag-history',   // (query: string) 点了某条历史 → 父组件覆写 browse.query + 触发搜索
+  'remove-tag-history', // (query: string) 删除单条
+  'clear-tag-history',  // () 清空全部
+  'add-saved-tag',      // (tag: string) 把当前 query 保存为常用 tag
+  'remove-saved-tag',   // (tag: string) 移除一条常用 tag
 ]);
 
 const open = computed({
@@ -45,6 +56,29 @@ const open = computed({
   set: (v) => emit('update:open', v),
 });
 function close() { open.value = false; }
+
+// tag 搜索历史下拉的显示/隐藏
+const showTagHistory = ref(false);
+const tagHistoryRef = ref(null);
+function onTagHistoryBlur() {
+  // 延时关：让下拉里的 mousedown.prevent 抢先触发；点击条目时输入框失焦，blur 在 click 之前
+  setTimeout(() => { showTagHistory.value = false; }, 150);
+}
+
+// 把一个常用 tag 片段追加到当前 query（直接改 state，不触发搜索 ——
+// 用户通常会一次拼多个 tag，最后自己点「搜索」）。
+function appendSavedTagToQuery(tag) {
+  const t = String(tag || '').trim();
+  if (!t) return;
+  const cur = (props.state.query || '').replace(/\s+$/, '');
+  props.state.query = cur ? `${cur} ${t}` : t;
+}
+// 「+ 保存当前」：把当前输入框整段保存为常用 tag；只在 query 非空时可点
+function addCurrentAsSavedTag() {
+  const cur = (props.state.query || '').trim();
+  if (!cur) return;
+  emit('add-saved-tag', cur);
+}
 
 // 缩略图 URL：统一走后端 /api/proxy_thumb（落盘缓存 + 防盗链转发）。
 // 走 large_file_url（Danbooru 720px）+ ?size=360，让后端用 Pillow 缩到长边 360px 落盘：
@@ -77,6 +111,25 @@ async function openPost(post) {
   const host = props.safeMode ? 'safebooru.donmai.us' : 'danbooru.donmai.us';
   await window.desktopAPI.external.open(`https://${host}/posts/${post.id}`);
 }
+
+// 「跳到第 N 页」输入框：默认跟当前页同步；用户输入非法（≤0 / NaN）时不发事件。
+// 每次弹窗重新打开或当前页变化时，刷新一次输入值，避免显示陈旧。
+const jumpPage = ref(1);
+watch(() => props.state.page, (p) => { jumpPage.value = p || 1; }, { immediate: true });
+function submitJump() {
+  let n = Number(jumpPage.value);
+  if (!Number.isFinite(n) || n < 1) {
+    jumpPage.value = props.state.page || 1;
+    return;
+  }
+  n = Math.floor(n);
+  if (n === props.state.page) {
+    // 同一页：把输入框对齐到当前页，避免显示"看起来没生效"
+    jumpPage.value = n;
+    return;
+  }
+  emit('go-to-page', n);
+}
 </script>
 
 <template>
@@ -84,11 +137,13 @@ async function openPost(post) {
     <div class="browse-card">
       <div class="browse-head">
         <div class="browse-head-title">
-          <h3>{{ state.source === 'collected' ? '查看收集ID' : 'Tag 浏览' }}</h3>
+          <h3>{{ state.source === 'collected' ? '查看收集ID' : (state.source === 'rank' ? 'Rank 浏览' : 'Tag 浏览') }}</h3>
           <span class="muted compact-text">
             {{ state.source === 'collected'
               ? `${state.collectedDate} · 收集 ${state.collectedIds.length} 个 ID`
-              : '缩略图经后端缓存转发' }} · {{ safeMode ? 'SFW' : '全部内容' }}
+              : (state.source === 'rank'
+                  ? 'Danbooru 全时排行榜 · order:rank'
+                  : '缩略图经后端缓存转发') }} · {{ safeMode ? 'SFW' : '全部内容' }}
           </span>
         </div>
         <button class="ghost" @click="close" style="color: var(--muted);">×</button>
@@ -106,18 +161,67 @@ async function openPost(post) {
             {{ state.loading ? '加载中…' : '刷新' }}
           </button>
         </template>
+        <template v-else-if="state.source === 'rank'">
+          <span class="muted compact-text" style="flex: 1; align-self: center;">
+            Danbooru 排行榜 · order:rank（按 score 降序，每页 40 条）
+          </span>
+          <button class="secondary" :disabled="state.loading" @click="emit('refresh')">
+            {{ state.loading ? '加载中…' : '刷新当前页' }}
+          </button>
+        </template>
         <template v-else>
-          <input
-            v-model="state.query"
-            class="search-input"
-            type="text"
-            placeholder="tag 查询串，例如：hatsune_miku rating:safe -comic"
-            @keyup.enter="emit('run-search', 1)"
-          />
+          <div class="browse-query-wrap">
+            <input
+              v-model="state.query"
+              class="search-input"
+              type="text"
+              placeholder="tag 查询串，例如：hatsune_miku rating:safe -comic"
+              @focus="showTagHistory = true"
+              @blur="onTagHistoryBlur"
+              @keyup.enter="emit('run-search', 1)"
+              @keydown="tagHistoryRef?.handleKeydown?.($event)"
+            />
+            <SearchHistoryDropdown
+              ref="tagHistoryRef"
+              :items="tagSearchHistory"
+              :open="showTagHistory"
+              header-label="最近 tag 搜索"
+              @pick="entry => { emit('pick-tag-history', entry); showTagHistory = false; }"
+              @remove="emit('remove-tag-history', $event)"
+              @clear="emit('clear-tag-history')"
+              @close="showTagHistory = false"
+            />
+          </div>
           <button class="secondary" :disabled="state.loading" @click="emit('run-search', 1)">
             {{ state.loading ? '搜索中…' : '搜索' }}
           </button>
         </template>
+      </div>
+
+      <div v-if="state.source === 'tags'" class="browse-saved-tags">
+        <button
+          type="button"
+          class="saved-tag-add"
+          :disabled="!(state.query || '').trim()"
+          :title="(state.query || '').trim() ? '把当前查询串保存为常用 tag' : '先在搜索框里输入要保存的 tag'"
+          @click="addCurrentAsSavedTag"
+        >+ 保存当前</button>
+        <span v-if="savedTags.length" class="saved-tags-sep">常用：</span>
+        <span
+          v-for="tag in savedTags"
+          :key="tag"
+          class="saved-tag-chip"
+          :title="`点击把 “${tag}” 追加到当前查询`"
+          @click="appendSavedTagToQuery(tag)"
+        >
+          <span class="saved-tag-text">{{ tag }}</span>
+          <button
+            type="button"
+            class="saved-tag-remove"
+            title="删除这个常用 tag"
+            @click.stop="emit('remove-saved-tag', tag)"
+          >×</button>
+        </span>
       </div>
 
       <div class="browse-filters">
@@ -269,6 +373,25 @@ async function openPost(post) {
           <button class="ghost" :disabled="state.page <= 1 || state.loading" @click="emit('go-page', -1)">‹ 上一页</button>
           <span class="browse-page-label">第 {{ state.page }} 页</span>
           <button class="ghost" :disabled="!state.hasMore || state.loading" @click="emit('go-page', 1)">下一页 ›</button>
+          <span class="browse-jump-wrap" :class="{ disabled: state.loading }" :title="state.hasMore ? '输入页码后按 Enter 或点“跳”' : '已达末页（hasMore=false），跳到更高页可能为空'">
+            <span class="browse-jump-prefix">跳到</span>
+            <input
+              v-model.number="jumpPage"
+              type="number"
+              min="1"
+              step="1"
+              class="browse-jump-input"
+              :disabled="state.loading"
+              @keyup.enter="submitJump"
+              @blur="submitJump"
+            />
+            <span class="browse-jump-suffix">页</span>
+            <button
+              class="ghost browse-jump-btn"
+              :disabled="state.loading"
+              @click="submitJump"
+            >跳</button>
+          </span>
         </div>
         <div class="browse-foot-right">
           <span class="muted compact-text">下载到</span>
@@ -319,6 +442,101 @@ async function openPost(post) {
   border-bottom: 1px solid var(--line);
 }
 .browse-searchbar .search-input { flex: 1; }
+.browse-query-wrap { position: relative; flex: 1; display: flex; }
+
+/* 常用 tag chip 行：仅在 tag 搜索模式展示。点 chip 把 tag 拼到当前 query，点 + 保存当前把 query 存为常用。 */
+.browse-saved-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 18px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.015);
+  font-size: 12px;
+  min-height: 30px;
+}
+.saved-tag-add {
+  background: transparent;
+  border: 1px dashed var(--line, rgba(0, 0, 0, 0.25));
+  border-radius: 14px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--muted, #6b5a3c);
+  cursor: pointer;
+  box-shadow: none;
+  transform: none;
+  transition: border-color 0.14s ease, color 0.14s ease, background-color 0.14s ease;
+}
+.saved-tag-add:hover:not(:disabled) {
+  border-color: var(--accent-deep, #7c5cff);
+  color: var(--accent-deep, #7c5cff);
+  background: rgba(196, 130, 60, 0.06);
+  filter: none;
+  box-shadow: none;
+  transform: none;
+}
+.saved-tag-add:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.saved-tags-sep {
+  color: var(--muted, #6b5a3c);
+  font-size: 12px;
+  margin-left: 2px;
+}
+.saved-tag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  background: var(--surface, rgba(255, 255, 255, 0.55));
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.15));
+  border-radius: 14px;
+  padding: 2px 2px 2px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: var(--ink, #2a1f10);
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.14s ease, color 0.14s ease, background-color 0.14s ease;
+}
+.saved-tag-chip:hover {
+  border-color: var(--accent-deep, #7c5cff);
+  color: var(--accent-deep, #7c5cff);
+  background: rgba(196, 130, 60, 0.10);
+}
+.saved-tag-text {
+  /* 留出右边给 × 按钮：不要让 tag 文本挤到 chip 边缘 */
+  padding-right: 4px;
+}
+.saved-tag-remove {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted, #6b5a3c);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, background-color 0.12s ease, color 0.12s ease;
+  box-shadow: none;
+  transform: none;
+}
+.saved-tag-chip:hover .saved-tag-remove {
+  opacity: 1;
+}
+.saved-tag-remove:hover {
+  background: rgba(157, 44, 44, 0.18);
+  color: #9d2c2c;
+  filter: none;
+  box-shadow: none;
+  transform: none;
+}
 .browse-filters {
   display: flex;
   gap: 14px;
@@ -440,6 +658,15 @@ async function openPost(post) {
 }
 .browse-foot-left, .browse-foot-right { display: flex; align-items: center; gap: 10px; }
 .browse-page-label { font-size: 13px; color: var(--muted); min-width: 60px; text-align: center; }
+.browse-jump-wrap { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-muted); font-size: 12px; color: var(--muted); transition: opacity 0.14s ease, border-color 0.14s ease; }
+.browse-jump-wrap.disabled { opacity: 0.55; }
+.browse-jump-wrap:focus-within { border-color: rgba(var(--accent-rgb), 0.55); }
+.browse-jump-prefix, .browse-jump-suffix { white-space: nowrap; }
+.browse-jump-input { width: 56px; height: 26px; padding: 0 4px; text-align: center; font-size: 12.5px; font-weight: 600; color: var(--ink); background: rgba(255, 255, 255, 0.7); border: 1px solid var(--line); border-radius: 6px; font-family: inherit; }
+.browse-jump-input::-webkit-outer-spin-button, .browse-jump-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.browse-jump-input[type="number"] { -moz-appearance: textfield; }
+.browse-jump-input:disabled { cursor: not-allowed; }
+.browse-jump-btn { height: 26px; padding: 0 10px; font-size: 12px; border-radius: 6px; }
 .browse-download-btn {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   color: #fff;

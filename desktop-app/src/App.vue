@@ -5,6 +5,7 @@ import EditorPage from './components/EditorPage.vue';
 import FavoritesPage from './components/FavoritesPage.vue';
 import CaptionPage from './components/CaptionPage.vue';
 import PosePage from './components/PosePage.vue';
+import InputContextMenu from './components/InputContextMenu.vue';
 
 const activePage = ref('crawler');
 const editorSource = ref(null);
@@ -28,14 +29,76 @@ function flashCopyToast(data) {
   if (copyToastTimer) clearTimeout(copyToastTimer);
   copyToastTimer = setTimeout(() => { copyToast.value.show = false; }, 1600);
 }
+
+// 全局"搜索框 / 文本框右键菜单"：命中 input/textarea 时拦截默认菜单，
+// 弹 InputContextMenu 提供 粘贴 / 复制 / 剪切 / 全选 / 清空。
+// 已有自定义菜单（char chip / pose SVG / pic_web canvas）都已经在 target 上
+// @contextmenu.prevent，主进程会拿到"没有 selectionText"自然放过，无冲突。
+const inputCtxMenu = ref({
+  open: false, x: 0, y: 0,
+  target: null, isReadonly: false, hasSelection: false,
+  value: '',
+});
+function isEditableTarget(el) {
+  if (!el || el.nodeType !== 1) return false;
+  const tag = el.tagName;
+  if (tag === 'TEXTAREA') return true;
+  if (tag === 'INPUT') {
+    // type=text/search/url/email/tel/password/number 都允许粘贴；
+    // type=button/checkbox/radio/submit 等"非文本输入"不弹菜单
+    const t = (el.type || 'text').toLowerCase();
+    return ['text', 'search', 'url', 'email', 'tel', 'password', 'number', ''].includes(t);
+  }
+  return false;
+}
+function onGlobalContextMenu(event) {
+  const el = event.target;
+  if (!isEditableTarget(el)) return;  // 让别的自定义菜单 / 主进程默认行为照旧生效
+  event.preventDefault();
+  event.stopPropagation();
+  const start = el.selectionStart ?? 0;
+  const end = el.selectionEnd ?? 0;
+  inputCtxMenu.value = {
+    open: true,
+    x: event.clientX,
+    y: event.clientY,
+    target: el,
+    isReadonly: !!el.readOnly,
+    hasSelection: end > start && (el.value || '').slice(start, end).length > 0,
+    value: el.value || '',
+  };
+}
+function closeInputCtxMenu() {
+  if (inputCtxMenu.value.open) {
+    inputCtxMenu.value = { ...inputCtxMenu.value, open: false, target: null };
+  }
+}
+function onInputCtxDismiss(event) {
+  if (!inputCtxMenu.value.open) return;
+  if (event?.target && typeof event.target.closest === 'function' && event.target.closest('.input-ctx-menu')) return;
+  closeInputCtxMenu();
+}
+function onInputCtxKey(event) {
+  if (event.key === 'Escape') closeInputCtxMenu();
+}
+
 onMounted(() => {
   if (window.desktopAPI?.onContextCopy) {
     unsubscribeContextCopy = window.desktopAPI.onContextCopy(flashCopyToast);
   }
+  // capture 阶段：先于任何子组件的 @contextmenu 拦截
+  document.addEventListener('contextmenu', onGlobalContextMenu, true);
+  document.addEventListener('mousedown', onInputCtxDismiss, true);
+  document.addEventListener('scroll', onInputCtxDismiss, true);
+  document.addEventListener('keydown', onInputCtxKey, true);
 });
 onBeforeUnmount(() => {
   if (unsubscribeContextCopy) unsubscribeContextCopy();
   if (copyToastTimer) clearTimeout(copyToastTimer);
+  document.removeEventListener('contextmenu', onGlobalContextMenu, true);
+  document.removeEventListener('mousedown', onInputCtxDismiss, true);
+  document.removeEventListener('scroll', onInputCtxDismiss, true);
+  document.removeEventListener('keydown', onInputCtxKey, true);
 });
 
 const navItems = [
@@ -133,5 +196,8 @@ function openCaptionWithImage(item) {
     <Transition name="copy-toast">
       <div v-if="copyToast.show" class="copy-toast-pill">{{ copyToast.text }}</div>
     </Transition>
+
+    <!-- 全局搜索框 / 文本框右键菜单：粘贴 / 复制 / 剪切 / 全选 / 清空 -->
+    <InputContextMenu :state="inputCtxMenu" @close="closeInputCtxMenu" />
   </div>
 </template>

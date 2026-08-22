@@ -10147,9 +10147,9 @@
   },
   "hishi_miracle_(umamusume)": {
     "has_chinese": true,
-    "chinese_name": "菱鑽奇寶",
+    "chinese_name": "菱钻奇宝",
     "source_hint": "umamusume",
-    "translated_description_zh": "《Umamusume》中的角色，昵称米拉子。一名普通女孩，不会游泳且无意参加闪耀系列（与其他普通女孩如马蒂卡内特豪瑟或Nice Nature不同）。她的特点是游泳极差、极度懒惰，几乎总是以冷门胜出身份获胜：真实的菱鑽奇寶曾以第六热门或更低的赔率赢得全部三场G1赛。声优为春日樱"
+    "translated_description_zh": "《赛马娘 Pretty Derby》角色，由春日樱配音。自称“普通”女孩，以极度懒散闻名，对泳池训练深恶痛绝（因此游泳能力极差），但热爱吃大阪烧。虽然想让他人开心，但常选择偷懒。因作为冷门马赢得三场G1胜利而闻名。拥有灰色波浪中长发、黄褐色惺忪睡眼、黄色发饰，以及带有蓝色条纹的白色耳罩。"
   },
   "yamada_anna": {
     "has_chinese": false,
@@ -12486,10 +12486,10 @@
     "translated_description_zh": "蔚蓝档案中的角色，属于地狱学院的潘多拉协会成员，全名为京极皋月，使用毛瑟C96手枪，由樱井春美配音，原画师为mx2j"
   },
   "kazusa_(band)_(blue_archive)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "blue archive",
-    "translated_description_zh": "这是[[Blue Archive]]中[[Kazusa (blue archive)|]]的[[官方替换服装|costume]]（[[band (music)|]]），即在[[After-School Sweets Club (blue archive)|]]以[Sugar Rush]乐队身份参加三一学园学校祭时的形象。外观：* !post #8302980: Profi"
+    "has_chinese": true,
+    "chinese_name": "杏山和纱（乐队）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "《蔚蓝档案》中的杏山和纱，身穿为崔尼蒂学院祭典而组建的乐队“Sugar Rush”的演出服装。"
   },
   "tenjouin_asuka": {
     "has_chinese": true,
@@ -14143,9 +14143,9 @@
   },
   "hishi_amazon_(umamusume)": {
     "has_chinese": true,
-    "chinese_name": "菱亞馬遜",
+    "chinese_name": "菱亚马逊",
     "source_hint": "umamusume",
-    "translated_description_zh": "《Umamusume》角色，特雷森学园美穗宿舍的宿舍长，声优为 Tatsumi Yuiko"
+    "translated_description_zh": "《赛马娘 Pretty Derby》中的角色，特雷森学园美浦宿舍的宿舍长。性格豪爽，热爱“单挑”，是深受大家信赖的“姐姐”角色。她是一位归国子女，擅长料理，但不擅长动脑。与成田白仁是既是竞争对手也是好朋友，与富士奇迹同为宿舍长也互动频繁。由巽悠衣子配音。"
   },
   "kozakura_marry": {
     "has_chinese": true,
@@ -14335,9 +14335,9 @@
   },
   "mari_(idol)_(blue_archive)": {
     "has_chinese": true,
-    "chinese_name": "伊落玛丽",
-    "source_hint": "blue archive",
-    "translated_description_zh": "蔚蓝档案中玛丽的偶像官方替换服装，属于古老塞拉菲姆成员的外观"
+    "chinese_name": "伊落玛丽（偶像）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "《蔚蓝档案》中伊落玛丽的偶像官方换装，作为偶像组合“Antique Seraphim”（古老炽天使）的成员之一。"
   },
   "tingyun_(honkai:_star_rail)": {
     "has_chinese": true,
@@ -15337,9 +15337,9 @@
   },
   "rio_(armed)_(blue_archive)": {
     "has_chinese": true,
-    "chinese_name": "调月莉音",
-    "source_hint": "blue archive",
-    "translated_description_zh": "这是《蔚蓝档案》角色Rio（调月莉音）的黑色紧身衣官方替换服装，出现在游戏的第六宣传视频中，对应Decagrammaton篇章"
+    "chinese_name": "调月莉音（临战）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "《蔚蓝档案》中千年科学学园学生会「研讨会」会长调月莉音为了应对前所未有危机而换上的特殊战斗服形态。该形态身着黑色紧身战斗服，注重现场处理、设备运用、状况分析乃至电子战等多种情况的泛用性。武器为Springfield Armory Mil-Spec M1911A1手枪，由游戏第六部预告片首次公开。"
   },
   "annie_leonhart": {
     "has_chinese": true,
@@ -15817,9 +15817,9 @@
   },
   "prinz_eugen_(unfading_smile)_(azur_lane)": {
     "has_chinese": true,
-    "chinese_name": "永不褪色的笑容",
-    "source_hint": "azur lane",
-    "translated_description_zh": "这是《碧蓝航线》角色 Prinz Eugen 的泳装主题官方替换服装。日版由德国国旗比基尼组成。中版由全覆盖黑色比基尼配以铁十字剪裁和披在肩上的军装外套组成。两版均有大腿束带和黑色颈圈"
+    "chinese_name": "欧根亲王（永不褪色的笑容）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "这是《碧蓝航线》中角色欧根亲王的泳装主题换装。日服版本为德国国旗比基尼，国服版本为带有铁十字镂空设计的全覆盖黑色比基尼，外搭披在肩上的军服外套。两个版本均配有腿环和黑色项圈。"
   },
   "katou_megumi": {
     "has_chinese": true,
@@ -16849,9 +16849,9 @@
   },
   "keqing_(opulent_splendor)_(genshin_impact)": {
     "has_chinese": true,
-    "chinese_name": "刻晴",
-    "source_hint": "genshin impact",
-    "translated_description_zh": "这是《原神》角色刻晴的官方替换服装，于2.4版本发布"
+    "chinese_name": "刻晴（霓裾翩跹）",
+    "source_hint": "genshin_impact",
+    "translated_description_zh": "《原神》角色刻晴的官方礼服皮肤，于2.4版本（2022年海灯节期间）上线。这套名为「霓裾翩跹」的衣装是刻晴的礼服装扮，设计融合了璃月的传统元素与现代晚礼服风格，衣襟映照节日焰光，裙摆轻盈瑰丽。"
   },
   "st._louis_(luxurious_wheels)_(azur_lane)": {
     "has_chinese": false,
@@ -18240,10 +18240,10 @@
     "translated_description_zh": "《高达种子命运》中的角色。ZAFT 艾斯飞行员，也是 [[Shinn Asuka]] 的朋友及最终伴侣。因在 [[超级机器人大战]] 中无法击落敌方穿梭机而臭名昭著"
   },
   "ak-15_(girls'_frontline)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "girls' frontline",
-    "translated_description_zh": "代表[[AK-15]]突击步枪的安卓角色，出自[[Girls' Frontline]]，是[[DEFY (girls' frontline)|]]团队成员，将获得[[AK-15 (MOD3) (girls' frontline)|神经升级]]。在续作[[Girls' Frontline 2: Exilium]]中，AK-15以[[Voymastina (girls' frontline 2)|]]形式出现。她有长长的灰色头发，紫色眼睛和腹肌。身着战术服装，包括露出腰部和肚脐的护甲上衣，黑色无指手套下的分离袖管，黑色裤子和黑色大腿靴。配音由[[Kaida Yuuko]]担任，插画由[[Duoyuanjun]]绘制"
+    "has_chinese": true,
+    "chinese_name": "AK-15",
+    "source_hint": "girls_frontline",
+    "translated_description_zh": "《少女前线》中的战术人形，隶属忤逆小队，原型为AK-15突击步枪。她有着灰色的长发和紫色的眼睛，身材高大，穿着露出腹部和肚脐的战术装甲服。性格严肃，做事以效率为先，但生气时非常可怕。由甲斐田裕子配音，画师为多元菌。在续作《少女前线2：追放》中以“威玛西娜”之名登场。"
   },
   "koizumi_mahiru": {
     "has_chinese": true,
@@ -19368,10 +19368,10 @@
     "translated_description_zh": "这是 Nijisanji 的 Hyakumantenbara Salome 的默认服装。她的默认服装包括一条红色连衣裙，带有朱丽叶袖和裸露肩膀，双手中指佩戴黑色手套和爪形戒指，内层为黑色高低裙配红色流苏，紫色项圈，黑色束腰，一条紫色丝带系在红色连衣裙上作为扣件，黑色菱形过膝袜，高跟鞋，以及黑色发带"
   },
   "eishin_flash_(meisterschaft)_(umamusume)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "荣进闪耀（Meisterschaft）",
     "source_hint": "umamusume",
-    "translated_description_zh": "这是[[Umamusume]]中[[Eishin Flash (Umamusume)|]]的赛车装束。该服装的图案源自[[dirndl]]，因为她来自德国。外观：* !post #7608099：当前 * !post #3075735：草"
+    "translated_description_zh": "荣进闪耀在《赛马娘Pretty Derby》中的决胜服，日英版本名称均为Meisterschaft。服装以德国传统服饰Dirndl为原型设计，包含白色荷叶边袖口衬衫、黑色紧身胸衣、白色荷叶边围裙、红色颈圈、红色荷叶边裙、黑色过膝袜和蓝色鞋子。"
   },
   "hifumi_(swimsuit)_(blue_archive)": {
     "has_chinese": true,
@@ -22938,10 +22938,10 @@
     "translated_description_zh": "东方Project角色，出现在《莲华乐园故事》第三关的Boss，是幻想乡的门卫，隶属于风见幽香。她使用镰刀，并能念动力投掷巨大地板砖攻击对手。在《莲华乐园故事》事件后她的下落不明，但根据惯例认为她仍然服侍幽香，现在守护着太阳之花园。官方设定中她有黄色眼睛、 blond hair（黄色头发），戴着带红色丝带的粉红色帽子，穿着深红粉色连衣裙并持镰刀。她的形象似乎是为了唤起凯尔特死亡灵魂ankou。她的著名台词是：“我忍不住！我忍不住！”最令人难忘的是她的舞台主题曲《Bad Apple!!》"
   },
   "mashiro_(blue_archive)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "blue archive",
-    "translated_description_zh": "该角色来自[[Blue Archive]]。是[[Justice Task Force (blue archive)|]]成员。全名为Shizuyama Mashiro。使用巨型[[Anzio Ironworks 20mm rifle]]。配音为[[Kitou Akari]]，原画师为[[popqn]]。外观包括默认姿势和泳装变体[[Mashiro (Swimsuit) (blue archive)|Swimsuit]]。外部链接：Blue Archive Wiki: Mashiro"
+    "has_chinese": true,
+    "chinese_name": "静山真白",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "《蔚蓝档案》角色，崔尼蒂综合学院正义实现委员会成员，全名静山真白。使用一把巨大的安齐奥铁工厂20毫米步枪。"
   },
   "hijikata_toshizou_(fate)": {
     "has_chinese": true,
@@ -26191,9 +26191,9 @@
   },
   "belle_(summer_skies)_(zenless_zone_zero)": {
     "has_chinese": true,
-    "chinese_name": "夏日晴空",
-    "source_hint": "zenless zone zero",
-    "translated_description_zh": "这是《绝区零》中角色贝尔的夏季主题官方替换服装。该服装包括黑色渔夫帽、白色透视衬衫束成短款上衣、橙色短裤、手镯和白色凉鞋"
+    "chinese_name": "铃（夏日晴空）",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "《绝区零》中主角铃（Belle）的夏季主题官方换装，包含黑色渔夫帽、白色透明系带短上衣、橙色短裤和白色凉鞋。"
   },
   "kiriko_(overwatch)": {
     "has_chinese": false,
@@ -27834,10 +27834,10 @@
     "translated_description_zh": ""
   },
   "kazusa_(halloween)_(blue_archive)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "blue archive",
-    "translated_description_zh": "Blue Archive 角色 Kazusa 的万圣节狼人服装。外观：* !asset #24742624: 个人资"
+    "has_chinese": true,
+    "chinese_name": "杏山和纱（万圣节）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "《蔚蓝档案》中的杏山和纱身穿万圣节狼人/狼女服装的形象。"
   },
   "misaka_worst": {
     "has_chinese": false,
@@ -34722,10 +34722,10 @@
     "translated_description_zh": "《我的英雄学院》的主人公之一，1-A班级班长，性格直率、不讲情面，但容易过度反应并非常认真。他的个性赋予他超速能力，利用他小腿后方的引擎。他有蓝色头发和戴眼镜，身材相当肌肉"
   },
   "matsumae_ohana": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "hanasaku iroha",
-    "translated_description_zh": "《花咲くいろは》的女主角。她是松前沙月的女儿，志岛瑞的孙女，志岛慧尼的侄女，年龄16岁"
+    "has_chinese": true,
+    "chinese_name": "松前绪花",
+    "source_hint": "",
+    "translated_description_zh": "《花开伊吕波》的主角，16岁。松前皋月的女儿，四十万翠的外孙女，也是四十万缘的外甥女。"
   },
   "cure_magical": {
     "has_chinese": true,
@@ -36151,9 +36151,9 @@
   },
   "belfast_(shopping_with_the_head_maid)_(azur_lane)": {
     "has_chinese": true,
-    "chinese_name": "女仆长的购物日",
-    "source_hint": "azur lane",
-    "translated_description_zh": "这是[[Azur Lane]]中[[Belfast (azur lane)|]]的一个[[official alternate costume|official costume]]（官方替换服装）。她的着装包括头戴一个[[red hat|red]] [[beret]]；头上有一个[[black bow]]，根据艺术家的不同，可能是[[hair bow|hair]]发饰或[[hat bow]]帽饰。她还佩戴[[black choker]]黑色项圈和[[off-shoulder sweater]]露肩毛衣，搭配[[black skirt|black]] [[pencil skirt]]黑色铅笔裙。她穿着[[brown pantyhose]]棕色丝袜和[[black footwear|black]] [[high heels]]黑色高跟鞋。她有时会在手臂上围着一条红色[[shawl]]披肩。h4. 外观 * !post #3688541: Profi"
+    "chinese_name": "贝尔法斯特（女仆长的购物日）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中角色贝尔法斯特的一款官方换装皮肤。她头戴红色贝雷帽，佩戴黑色蝴蝶结与黑色颈环，身穿露肩毛衣和黑色铅笔裙，搭配棕色连裤袜和黑色高跟鞋，有时手臂上还会披着红色披肩。"
   },
   "hungary_(hetalia)": {
     "has_chinese": false,
@@ -41797,9 +41797,9 @@
   },
   "himari_(armed)_(blue_archive)": {
     "has_chinese": true,
-    "chinese_name": "明星日鞠",
-    "source_hint": "blue archive",
-    "translated_description_zh": "[[Himari (Blue Archive)|]] 的战斗服装，出自 [[Blue Archive]]。在这种形态下，她骑乘 [[hover bike]]，她坚持认为那是 [[wheelchair]]"
+    "chinese_name": "明星日鞠（临战）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "《蔚蓝档案》中明星日鞠的战斗用官方换装。此形态下她骑乘一辆悬浮摩托，但她坚称这是“室外用轮椅”。"
   },
   "framme_(fire_emblem)": {
     "has_chinese": true,
@@ -44514,10 +44514,10 @@
     "translated_description_zh": "[[Original]] 角色，由 [[lynus]] 创作。一名拥有长长黑发并采用姫发型的 [[barista]]。性生活较为活跃，常常出现在 [[gangbang]] 中"
   },
   "prinz_eugen_(final_lap)_(azur_lane)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "azur lane",
-    "translated_description_zh": "这是[[Azur Lane]]中[[Prinz Eugen (azur lane)|]]的[[race queen]][[official alternate costume|costume]]。h4. 外观 * !post #4910720: Profi"
+    "has_chinese": true,
+    "chinese_name": "欧根亲王（Final Lap）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "这是《碧蓝航线》中角色欧根亲王的赛车女郎主题换装。皮肤名「Final Lap」在中文社区中通常直接沿用英文，译为「最终圈」或保留原名。该换装为Live2D皮肤，角色身着性感的赛车皇后装束，手持方格旗。"
   },
   "cyrus_(pokemon)": {
     "has_chinese": false,
@@ -60666,10 +60666,10 @@
     "translated_description_zh": "《Code Geass》中的配角"
   },
   "touma_kazusa": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "white album 2",
-    "translated_description_zh": "来自视觉小说《White Album 2》的角色"
+    "has_chinese": true,
+    "chinese_name": "冬马和纱",
+    "source_hint": "white_album",
+    "translated_description_zh": "来自视觉小说《白色相簿2》的角色。"
   },
   "kurari-chan_(iyowa)": {
     "has_chinese": false,
@@ -62604,10 +62604,10 @@
     "translated_description_zh": "来自《我的英雄学院》的角色，由Hatano Wataru配音"
   },
   "hishi_amazon_(azure_amazon)_(umamusume)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "菱亚马逊（亚马逊青金石）",
     "source_hint": "umamusume",
-    "translated_description_zh": "[[Umamusume]]'s [[Hishi Amazon (Umamusume)|]] 的赛车服装。它由一件[[two-tone shirt|two-tone]] [[midriff]] 套装，颜色为[[blue shirt|blue]] 和[[white shirt|white]]，配有[[asymmetrical sleeves]]、[[white choker]]、[[blue skirt|blue]]-[[white skirt|white]] [[layered skirt|layered]] [[pleated skirt]]、[[brown belt]]、[[thigh belt]] 和[[white shoes|white]] [[sandals]]。她的草稿版本略有不同：一件[[white shirt|white]] [[sailor shirt]]，带有[[blue sailor collar]]、[[blue neckerchief]]、[[blue skirt|blue]] [[pleated skirt]]、[[thigh strap]] 和[[blue boots|blue]] [[fold-over boots]]。h4. 外观 * !post #7607705: 当前 * !post #2670396: 草"
+    "translated_description_zh": "《赛马娘 Pretty Derby》中菱亚马逊的决胜服（赛车服）造型，名为「亚马逊青金石」（アマゾネス・ラピス / Amazoness Lapis）。该服装由蓝白双色的露脐上衣、不对称袖、蓝白分层百褶裙、白色项圈、腰带、大腿束带和白色凉鞋组成。早期草案版本则设计为带有蓝色水手领、蓝色领巾的白色水手服，搭配蓝色百褶裙、大腿束带和蓝色翻折靴。作为美浦宿舍的宿舍长，她是一位性格豪爽、热爱“单挑”的归国子女，深受大家信赖。"
   },
   "kanzaki_sumire": {
     "has_chinese": false,
@@ -71208,10 +71208,10 @@
     "translated_description_zh": "该角色出现在《Under Night In-Birth》中，是一种活体武器，早于 Licht Kreis 和 Night Blade 存在。她的主要任务是摧毁 Hollow Night 中的 Voids。她是很久以前制造的『Automatic Nerves』之一，目的是防止任何人过度消耗 EXS。在故事中，她感知到大量 EXS 并重新觉醒，瞄准击败 Paradox。在此过程中，她遇到了 Hyde，后者提出让她暂时与他同住"
   },
   "mashiro_(swimsuit)_(blue_archive)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "blue archive",
-    "translated_description_zh": "官方替换服装的官方夏季变体，角色为[[Mashiro (blue archive)|]]。配音：[[Kitou Akari]]。服装设计师：[[popqn]]。外观：* !post #5442548。外部链接：* \"Blue Archive Wiki: Mashiro (Swimsuit)\":[https://bluearchive.wiki/wiki/Mashiro_(Swimsuit"
+    "has_chinese": true,
+    "chinese_name": "静山真白（泳装）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "《蔚蓝档案》中静山真白的泳装官方换装形象。"
   },
   "mem-mem_(precure)": {
     "has_chinese": false,
@@ -74034,10 +74034,10 @@
     "translated_description_zh": "可玩的狙击手干员，出自《方舟：终末地》（Arknights），种族为Cautus。外观包括默认姿势（post #4117251）和远眺姿势（post #4117309，即‘远眺’皮肤）"
   },
   "prinz_eugen_(cordial_cornflower)_(azur_lane)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "azur lane",
-    "translated_description_zh": "这是《Azur Lane》角色 Prinz Eugen 的一个官方替换服装。外观：* !post #3632597: Profi"
+    "has_chinese": true,
+    "chinese_name": "欧根亲王（Wein Kornblume）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "这是《碧蓝航线》中角色欧根亲王的一款官方换装。该皮肤在国服客户端中直接以德文「Wein Kornblume」命名，常被玩家理解为与「矢车菊」相关的礼服主题。"
   },
   "yat_sen_(azur_lane)": {
     "has_chinese": true,
@@ -75264,10 +75264,10 @@
     "translated_description_zh": "这是 hololive 的 VTuber 雪花拉米（Yukihana Lamy）的新年官方替换服装。由蓝色和服、花卉印花和服组成，可搭配粉色披肩或粉色外套的羽织，蓝色袴裙和黑色带毛皮装饰的系带靴。官方替换发型为低双马尾，佩戴 pom pom 发饰"
   },
   "keqing_(lantern_rite)_(genshin_impact)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "keqing_(genshin_impact)",
-    "translated_description_zh": "这是角色刻晴（Genshin Impact）的官方替换服装，来自2021年灯籠节的官方艺术作品：[https://twitter.com/GenshinImpact/status/1361525713388601350"
+    "has_chinese": true,
+    "chinese_name": "刻晴（霓裾翩跹）",
+    "source_hint": "genshin_impact",
+    "translated_description_zh": "《原神》角色刻晴的海灯节官方礼服，于2021年海灯节期间发布。这套服装名为「霓裾翩跹」，是刻晴的礼服装扮，融合了璃月与异域的格调，衣襟映照佳节焰光，裙摆如风中翩旋的飞花。"
   },
   "aquila_(azur_lane)": {
     "has_chinese": true,
@@ -76656,10 +76656,10 @@
     "translated_description_zh": "《Rune Factory 4》中的女性玩家角色"
   },
   "li_dailin": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "black survival",
-    "translated_description_zh": "可玩角色，出自[[Black Survival]]与[[Eternal Return: Black Survival]]。她是中国的醉酒武术家，被迫参加Aglaia在Lumia岛上的实验。她因武术史导致多年父母忽视而厌恶自己的武术背景。奇怪的是，她喝醉时战斗力更强。她拥有非常长的棕色双马尾并扎成双丸子，黄色眼睛，胸部较小。经常看到她身上贴有几块大创可贴。她的默认服装包括[[dudou]]"
+    "has_chinese": true,
+    "chinese_name": "李黛琳",
+    "source_hint": "black_survival",
+    "translated_description_zh": "《黑色幸存者》及《永恒轮回：黑色幸存者》中的中国武术家角色。出生于香港的武术世家，因不堪家人逼迫其习武的成长经历而离家出走，过着流浪生活，只有在没钱买酒时才会打工。其名字在中文社区通用为“李黛琳”，也被称为“李花子”。她有着棕色的长发和黄色眼睛，特点之一是身上常贴有创可贴。虽然憎恶武术，但醉酒后却反而能发挥出更强的战斗能力。"
   },
   "rouxls_kaard": {
     "has_chinese": false,
@@ -77428,5 +77428,77 @@
     "chinese_name": "冈依沙瓦号（被封印的美人鱼）",
     "source_hint": "azur_lane",
     "translated_description_zh": "《碧蓝航线》中冈依沙瓦号的美人鱼/万圣节主题官方换装。"
+  },
+  "prinz_eugen_(between_tipsiness_and_a_wager)_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "欧根亲王（微醺与赌约的间隙）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "这是《碧蓝航线》中角色欧根亲王于2025年12月推出的兔女郎主题官方换装。皮肤名在日服为「ほろ酔いと駆け引きの間合い」，属于L2D动态皮肤。"
+  },
+  "belfast_(blissful_service)_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "贝尔法斯特（至福的侍奉）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中角色贝尔法斯特的一款以红色比基尼和游乐园为主题的官方换装皮肤。"
+  },
+  "orage_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "暴风雨",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中法国驱逐舰“暴风雨”的拟人化角色，是游戏与《战舰世界》联动的一部分。由星谷美绪配音。她拥有中长黑发，内层为蓝色，紫瞳，身材娇小。服装包括黑色紧身连体衣配黑色连裤袜、黑色荷叶边裙、露肩白色夹克、白袜和黑色鞋子。她属于T47级驱逐舰，基于扩大版的“大胆级”驱逐舰设计。暴风雨号从未实际建成，但其设计成为了后来T47级驱逐舰的衍生项目。她装备了可使用美国弹药的法式127毫米两用炮。该级唯一幸存的舰艇是“马耶·布雷泽”号。暴风雨是《碧蓝航线》中首批冷战时期的法国驱逐舰之一。"
+  },
+  "hsin_(wuthering_waves)": {
+    "has_chinese": true,
+    "chinese_name": "心",
+    "source_hint": "wuthering_waves",
+    "translated_description_zh": "《鸣潮》中的 upcoming 可玩角色。瑝珑 nation 中梦州的岁主。声痕位置：尾部 h4。"
+  },
+  "bennington_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "本宁顿",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中埃塞克斯级航空母舰“本宁顿号”的拟人化角色。"
+  },
+  "belle_(brilliance_of_stars)_(zenless_zone_zero)": {
+    "has_chinese": true,
+    "chinese_name": "铃（极星澄明）",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "《绝区零》中主角铃（Belle）的官方换装。该时装为Version 3.0「某个梦游者的自白」推进至指定任务后免费获取的学院风格制服。"
+  },
+  "sigrid_de_l'azur": {
+    "has_chinese": true,
+    "chinese_name": "希格莉德·德拉叙尔",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "《绝区零》中的可玩角色，冰属性强攻代理人，担任罗斯凯利法空域巡戍局总务次官。日文配音为甲斐田裕子，英文配音为Dani Chambers。"
+  },
+  "sigrid_de_l'azur_(majestic_wavechaser)": {
+    "has_chinese": true,
+    "chinese_name": "希格莉德·德拉叙尔（白波骑士）",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "该角色是《绝区零》中希格莉德·德拉叙尔的一套官方换装。她身穿带有分离式袖子的蓝白双色连体泳衣，头上戴着泳镜，颈部佩戴项圈，脚穿厚底高跟鞋。"
+  },
+  "vodyanitsa_(genshin_impact)": {
+    "has_chinese": true,
+    "chinese_name": "沃雅妮莎",
+    "source_hint": "genshin_impact",
+    "translated_description_zh": "《原神》中的一名角色，首次亮相于「超越」PV—「骤雪」。她是至冬国科洛列夫茨基剧团的首席女高音，拥有令人着迷的歌喉和优雅的舞台气质。其名字源于斯拉夫神话中的女性水精灵。角色日文由伊藤加奈惠配音，英文由Suzie Yeung配音。"
+  },
+  "odette_(genshin_impact)": {
+    "has_chinese": true,
+    "chinese_name": "奥黛塔",
+    "source_hint": "genshin_impact",
+    "translated_description_zh": "《原神》中的至冬国角色，全名奥黛塔·苏佩茜娃。她是科洛列夫茨基剧团的首席芭蕾舞者，同时也是愚人众的一员。身为冰元素神之眼持有者，她能利用芭蕾般的优雅身姿进行战斗。在日复一日的刻苦训练中，她已习惯在舞者与愚人众战士的双重身份间切换，内心对故乡至冬的寒冷与过往交织着复杂的情感。"
+  },
+  "voymastina_(girls'_frontline_2)": {
+    "has_chinese": true,
+    "chinese_name": "威玛西娜",
+    "source_hint": "girls_frontline_2",
+    "translated_description_zh": "《少女前线2：追放》中的精英人形，原型为AK-15突击步枪。她曾是前作《少女前线》中忤逆小队的成员，以“最强人形”之名著称。在续作中，她获得了新素体，并拥有为她量身定制的“断罪者”机甲。其名字结合了“狼嚎”与“獒犬”之意，呼应了她在前作中的技能“白獒之瞳”。由甲斐田裕子（日文）和李曜欢（中文）配音。"
+  },
+  "kijimuna_(fate)": {
+    "has_chinese": true,
+    "chinese_name": "奇吉姆纳",
+    "source_hint": "fate",
+    "translated_description_zh": "《Fate/Grand Order》活动中登场的NPC，是冲绳传说中“木之精”（キジムナー）的现代诠释版，昵称为“小纳”。她的真实身份为命运三女神之一的薇儿丹蒂，穿着现代风格的服装，有着该角色标志性的巨乳身材。"
   }
 }

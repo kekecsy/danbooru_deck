@@ -5,6 +5,12 @@
         "label": "机械盘",
         "path": "D:/danbooru_hot_pic",
         "lazy_scan": true
+      },
+	  {
+        "id": "大硬盘",
+        "label": "机械盘",
+        "path": "D:/hot_danbooru",
+        "lazy_scan": true
       }
     ]
   }

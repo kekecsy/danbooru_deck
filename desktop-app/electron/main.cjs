@@ -38,6 +38,11 @@ let crawlerStartPromise = null;
 let crawlerStdout = [];
 let crawlerLastError = '';
 let thumbCacheDir = '';
+// 本次 Electron 会话随机注入到 uvicorn 命令行的小 token（_danbooru_deck_token='xxxx'）。
+// 用来「正向上匹配」这是不是我们之前留下的孤儿进程；不是安全边界。
+let crawlerSessionToken = '';
+// 「spawn 失败 → 杀孤儿 → 再 spawn」这条链路的 bounded retry 计数。
+let crawlerBindRetries = 0;
 
 function windowStatePath() {
   return path.join(app.getPath('userData'), 'window-state.json');
@@ -592,10 +597,14 @@ function getPythonCommand() {
 }
 
 function getPythonSpawnArgs() {
+  // 注入 sys._danbooru_deck_token='<8位hex>' 到 -c 字符串里，
+  // 这样 wmic 拿到的 python.exe CommandLine 里就有这个 token，孤儿识别能匹配。
+  // uvicorn 不读 sys 上的这个属性，纯当个关联键用，开销可忽略。
+  const token = crawlerSessionToken || 'no-token';
   return [
     '-u',
     '-c',
-    "import uvicorn; uvicorn.run('main:app', host='127.0.0.1', port=8000, reload=False, access_log=False, log_level='warning')"
+    `import uvicorn, sys; sys._danbooru_deck_token='${token}'; uvicorn.run('main:app', host='127.0.0.1', port=8000, reload=False, access_log=False, log_level='warning')`
   ];
 }
 
@@ -623,70 +632,139 @@ async function waitForCrawlerReady(retries = 40) {
   return false;
 }
 
-async function ensureCrawlerService() {
-  try {
-    await apiFetchJson('/api/status');
-    return { ok: true, alreadyRunning: true };
-  } catch {
-    // continue
+// 启动 uvicorn 子进程，bind 失败时尝试回收孤儿后 retry 1 次。
+// 拆出来便于 ensureCrawlerService 在 retry 路径里重入。
+async function spawnCrawlerProcess() {
+  const python = getPythonCommand();
+  if (!python) {
+    throw new Error('未找到可用的 Python 解释器');
   }
 
+  crawlerLastError = '';
+  crawlerStdout = [];
+  fs.mkdirSync(hotPicDir, { recursive: true });
+  crawlerProcess = spawn(python.command, getBackendSpawnArgs(python), {
+    cwd: dataRoot,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      PYTHONIOENCODING: 'utf-8',
+      DANBOORU_DECK_DATA_DIR: dataRoot,
+      DANBOORU_DECK_RESOURCE_DIR: isDev ? sourceRoot : ''
+    }
+  });
+
+  crawlerProcess.stdout.on('data', chunk => {
+    const lines = backendOutputLines(chunk.toString());
+    crawlerStdout.push(...lines.slice(-20));
+    crawlerStdout = crawlerStdout.slice(-200);
+  });
+
+  crawlerProcess.stderr.on('data', chunk => {
+    const text = chunk.toString();
+    const errors = backendErrorLines(text);
+    if (errors.length) crawlerLastError = errors.join('\n');
+    crawlerStdout.push(...backendOutputLines(text).slice(-20));
+    crawlerStdout = crawlerStdout.slice(-200);
+  });
+
+  crawlerProcess.on('exit', code => {
+    crawlerProcess = null;
+    if (code !== 0) {
+      crawlerLastError = crawlerLastError || `抓虫服务退出，代码 ${code}`;
+    }
+  });
+
+  const ready = await waitForCrawlerReady();
+  if (!ready) {
+    const errText = crawlerLastError || '抓虫服务启动超时';
+    // bind 失败 → 识别是不是我们之前留下的孤儿，是则杀之再重试 1 次
+    if (crawlerBindRetries < 1 && /address already in use|Errno\s*10048|\[Errno\s*\d+\]\s+error while attempting to bind/i.test(errText)) {
+      crawlerBindRetries += 1;
+      const pids = await findPidsOnPort(8000);
+      let killed = 0;
+      for (const pid of pids) {
+        const { ours } = await isOurOrphan(pid, crawlerSessionToken);
+        if (ours) {
+          console.log(`[crawler] killing previous orphan pid=${pid}`);
+          await killCrawlerTree(pid);
+          killed += 1;
+        }
+      }
+      if (killed > 0) {
+        // 抛出特殊错误让 ensureCrawlerService 走 retry 路径
+        throw new Error('__RETRY_AFTER_ORPHAN_KILL__');
+      }
+    }
+    throw new Error(errText);
+  }
+  crawlerBindRetries = 0;  // 成功就清零，让下次还能用 retry
+}
+
+async function ensureCrawlerService() {
+  // 进程内 dedup：第一道关就检查，保证并发调用者都 await 同一个 in-flight 启动
+  // 流程（探测 → 扫孤儿 → spawn → ready 检查），避免两个调用各起一个 python 抢 8000。
   if (crawlerStartPromise) {
     await crawlerStartPromise;
     return { ok: true, alreadyRunning: false };
   }
+  // 本次启动流程的 retry 预算只算这次调用，下次 ensureCrawlerService 再重置。
+  // 避免「上次 bind 失败过一次 → 这次同样 bind 失败却不重试」的不合理状态。
+  crawlerBindRetries = 0;
 
+  // 整个启动流程包成一个 promise，外面只用一处 await + catch + finally。
   crawlerStartPromise = (async () => {
-    const python = getPythonCommand();
-    if (!python) {
-      throw new Error('未找到可用的 Python 解释器');
+    // 1) 探测：如果 8000 已经有监听者，先确认是不是「我们的」
+    let probeOk = false;
+    try { await apiFetchJson('/api/status'); probeOk = true; } catch {}
+
+    if (probeOk) {
+      const pids = await findPidsOnPort(8000);
+      if (!pids.length) return { ok: true, alreadyRunning: true };  // 200 上了但 netstat 没拿到，理论不该发生
+      let owned = false;
+      for (const pid of pids) {
+        const { ours } = await isOurOrphan(pid, crawlerSessionToken);
+        if (ours) { owned = true; break; }
+      }
+      if (owned) return { ok: true, alreadyRunning: true };
+      // 外来进程占着端口：拒绝使用，给用户明确错误（不静默蒙混）
+      const infos = (await Promise.all(pids.map(p => getProcessInfo(p)))).filter(Boolean);
+      const desc = infos.length
+        ? infos.map((i, idx) => `${i.name || '?'} (PID ${pids[idx]})`).join('、')
+        : `未知进程 (PID ${pids.join(', ')})`;
+      const msg = `端口 8000 被其他进程占用：${desc}。`
+                + '如需继续，请先关闭该进程（任务管理器 → 详细信息 → 结束进程，'
+                + '或 `netstat -ano | findstr :8000` 找到 PID 后 `taskkill /F /PID <pid>`）。';
+      crawlerLastError = msg;
+      throw new Error(msg);
     }
 
-    crawlerLastError = '';
-    crawlerStdout = [];
-    fs.mkdirSync(hotPicDir, { recursive: true });
-    crawlerProcess = spawn(python.command, getBackendSpawnArgs(python), {
-      cwd: dataRoot,
-      windowsHide: true,
-      env: {
-        ...process.env,
-        PYTHONIOENCODING: 'utf-8',
-        DANBOORU_DECK_DATA_DIR: dataRoot,
-        DANBOORU_DECK_RESOURCE_DIR: isDev ? sourceRoot : ''
+    // 2) 端口空着，但万一上一轮留了「我们的孤儿」，防御性扫一次
+    const stragglers = await findPidsOnPort(8000);
+    for (const pid of stragglers) {
+      const { ours } = await isOurOrphan(pid, crawlerSessionToken);
+      if (ours) {
+        console.log(`[crawler] sweep pre-spawn orphan pid=${pid}`);
+        await killCrawlerTree(pid);
       }
-    });
-
-    crawlerProcess.stdout.on('data', chunk => {
-      const lines = backendOutputLines(chunk.toString());
-      crawlerStdout.push(...lines.slice(-20));
-      crawlerStdout = crawlerStdout.slice(-200);
-    });
-
-    crawlerProcess.stderr.on('data', chunk => {
-      const text = chunk.toString();
-      const errors = backendErrorLines(text);
-      if (errors.length) crawlerLastError = errors.join('\n');
-      crawlerStdout.push(...backendOutputLines(text).slice(-20));
-      crawlerStdout = crawlerStdout.slice(-200);
-    });
-
-    crawlerProcess.on('exit', code => {
-      crawlerProcess = null;
-      if (code !== 0) {
-        crawlerLastError = crawlerLastError || `抓虫服务退出，代码 ${code}`;
-      }
-    });
-
-    const ready = await waitForCrawlerReady();
-    if (!ready) {
-      throw new Error(crawlerLastError || '抓虫服务启动超时');
     }
+
+    // 3) 真正 spawn
+    await spawnCrawlerProcess();
+    return { ok: true, alreadyRunning: false };
   })();
 
   try {
-    await crawlerStartPromise;
-    return { ok: true, alreadyRunning: false };
+    return await crawlerStartPromise;
+  } catch (err) {
+    if (err?.message === '__RETRY_AFTER_ORPHAN_KILL__') {
+      // bounded retry：清掉当前 promise 再重入，这次会重新探测 + 走新的 spawn 流程
+      crawlerStartPromise = null;
+      return ensureCrawlerService();
+    }
+    throw err;
   } finally {
+    // 成功 / 失败（非 retry）都清掉，dedup 才能让下一次调用重新触发
     crawlerStartPromise = null;
   }
 }
@@ -824,6 +902,15 @@ ipcMain.handle('file:exists', async (_event, targetPath) => {
   return resolvedPath ? fs.existsSync(resolvedPath) : false;
 });
 
+// 剪贴板读写 fallback：navigator.clipboard 在某些 Electron 版本/焦点条件下会抛错，
+// 给 InputContextMenu.vue 的粘贴功能当主进程兜底。
+ipcMain.handle('clipboard:read-text', () => {
+  try { return clipboard.readText() || ''; } catch (e) { return ''; }
+});
+ipcMain.handle('clipboard:write-text', (_event, text) => {
+  try { clipboard.writeText(String(text ?? '')); return true; } catch (e) { return false; }
+});
+
 ipcMain.handle('file:save-png', async (_event, payload) => {
   const { suggestedName, bytes } = payload || {};
   if (!bytes) return { ok: false, canceled: true };
@@ -866,6 +953,115 @@ function getBackendSpawnArgs(python) {
   return isDev ? [...python.args, ...getPythonSpawnArgs()] : python.args;
 }
 
+// === 端口 8000 孤儿探测 + 杀进程树 ===
+// 背景：crawlerProcess.kill() 在 Windows 上只 TerminateProcess 当前子节点，
+// 遇到 uvicorn 未来开 reload / 启子进程会漏；更糟的是 App 强杀（Task Manager / 断电）
+// 整个 before-quit 都不触发，留下的孤儿下一次 bind 直接 [Errno 10048]。
+// 这组 helper：探测端口、识别「是不是我们之前留下的」、是则 taskkill /F /T 整棵杀。
+// 任何一步失败都 swallow，不向 renderer 抛额外错误。
+
+function runCommand(command, args, { timeoutMs = 5000 } = {}) {
+  return new Promise(resolve => {
+    let stdout = '', stderr = '';
+    let settled = false;
+    const finish = (code) => {
+      if (settled) return;
+      settled = true;
+      resolve({ code: code ?? -1, stdout, stderr });
+    };
+    let proc;
+    try {
+      proc = spawn(command, args, { windowsHide: true });
+    } catch (err) {
+      resolve({ code: -1, stdout, stderr: String(err) });
+      return;
+    }
+    proc.stdout?.on('data', d => { stdout += d.toString(); });
+    proc.stderr?.on('data', d => { stderr += d.toString(); });
+    proc.on('error', () => finish(-1));
+    proc.on('exit', code => finish(code));
+    setTimeout(() => {
+      try { proc.kill(); } catch {}
+      finish(-2);
+    }, timeoutMs);
+  });
+}
+
+async function findPidsOnPort(port) {
+  if (process.platform !== 'win32') {
+    // POSIX 端暂不展开（lsof 不一定在用户机器上；当前 dev 都在 Windows）
+    return [];
+  }
+  // netstat -ano 输出形如：
+  //   TCP    127.0.0.1:8000    0.0.0.0:0    LISTENING    1234
+  const { stdout } = await runCommand('netstat', ['-ano', '-p', 'TCP'], { timeoutMs: 4000 });
+  const pids = new Set();
+  const re = new RegExp(`\\s127\\.0\\.0\\.1:${port}\\s+\\S+\\s+LISTENING\\s+(\\d+)`, 'i');
+  for (const line of stdout.split(/\r?\n/)) {
+    const m = line.match(re);
+    if (m) pids.add(Number(m[1]));
+  }
+  return Array.from(pids);
+}
+
+async function getProcessInfo(pid) {
+  if (!pid || !Number.isFinite(pid)) return null;
+  if (process.platform === 'win32') {
+    const { stdout } = await runCommand(
+      'wmic',
+      ['process', 'where', `ProcessId=${pid}`, 'get', 'Name,CommandLine', '/format:list'],
+      { timeoutMs: 4000 }
+    );
+    // 输出形如：Name=python.exe\r\nCommandLine=...\r\n
+    const out = { name: '', commandLine: '' };
+    for (const line of stdout.split(/\r?\n/)) {
+      const idx = line.indexOf('=');
+      if (idx < 0) continue;
+      const k = line.slice(0, idx).trim();
+      const v = line.slice(idx + 1).trim();
+      if (k === 'Name') out.name = v;
+      else if (k === 'CommandLine') out.commandLine = v;
+    }
+    return out.name ? out : null;
+  }
+  try {
+    const buf = fs.readFileSync(`/proc/${pid}/cmdline`);
+    return { name: '', commandLine: buf.toString('utf8').replace(/\0/g, ' ').trim() };
+  } catch {
+    return null;
+  }
+}
+
+async function isOurOrphan(pid, token) {
+  const info = await getProcessInfo(pid);
+  if (!info) return { ours: false, info: null };
+  const name = (info.name || '').toLowerCase();
+  const cmd = info.commandLine || '';
+  const isOurExe = name === 'python.exe' || name === 'python' || name === 'crawler-backend.exe';
+  // token 是本次会话注入到 -c 字符串里的 sys._danbooru_deck_token='xxxx'，
+  // 出现即代表「这是上一个 Danbooru Deck 启动的 uvicorn」。
+  const hasToken = !!token && cmd.includes(`_danbooru_deck_token='${token}'`);
+  return { ours: isOurExe && hasToken, info };
+}
+
+async function killCrawlerTree(pid) {
+  if (!pid) return;
+  if (process.platform === 'win32') {
+    // /T 杀整棵树（覆盖未来 uvicorn 起的 reloader / 子进程）
+    await runCommand('taskkill', ['/F', '/T', '/PID', String(pid)], { timeoutMs: 5000 });
+  } else {
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+    await delay(800);
+    try { process.kill(pid, 'SIGKILL'); } catch {}
+  }
+  // 等端口真正空出来（最多 ~3s）
+  for (let i = 0; i < 6; i += 1) {
+    const still = await findPidsOnPort(8000);
+    if (!still.length) return;
+    await delay(500);
+  }
+}
+
 function backendOutputLines(text) {
   return String(text || '')
     .split(/\r?\n/)
@@ -874,11 +1070,48 @@ function backendOutputLines(text) {
     .filter(line => !/^INFO:\s+/i.test(line));
 }
 
+// uvicorn 启动失败的 bind 错误形如：
+//   [Errno 10048] error while attempting to bind on address ('127.0.0.1', 8000): only one usage of each socket address ...
+// 它**不带** `ERROR:` / `CRITICAL:` 前缀，原正则直接漏掉，导致用户只看到「抓虫服务启动超时」而无任何线索。
+// 另：capture Traceback 时把紧随的多行（File "..." / line N / xxxError: ...）一并捞进 crawlerLastError。
+const BIND_ERROR_RE = /\[Errno\s*\d+\]\s+error while attempting to bind/i;
 function backendErrorLines(text) {
-  return String(text || '')
-    .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(line => /^(ERROR|CRITICAL):\s+/i.test(line) || /^Traceback\b/i.test(line));
+  const lines = String(text || '').split(/\r?\n/).map(l => l.trim());
+  const out = [];
+  let inTraceback = false;
+  for (const line of lines) {
+    if (!line) {
+      // 空行结束 traceback 块
+      if (inTraceback) inTraceback = false;
+      continue;
+    }
+    if (/^Traceback\b/i.test(line)) {
+      inTraceback = true;
+      out.push(line);
+      continue;
+    }
+    if (/^(ERROR|CRITICAL):\s+/i.test(line)) {
+      inTraceback = false;
+      out.push(line);
+      continue;
+    }
+    if (BIND_ERROR_RE.test(line)) {
+      // 整个 bind 错误行收下来，紧接着 uvicorn 还会再印一行 "only one usage..." 描述，
+      // 这一行没 `ERROR:` 前缀但和上一行是同一个错误，单独吸收
+      out.push(line);
+      const nextIdx = lines.indexOf(line) + 1;
+      if (nextIdx < lines.length) {
+        const nxt = lines[nextIdx];
+        if (nxt && /^(only one usage|通常每个|每个套接字)/i.test(nxt)) {
+          out.push(nxt);
+        }
+      }
+      inTraceback = false;
+      continue;
+    }
+    if (inTraceback) out.push(line);
+  }
+  return out;
 }
 
 ipcMain.handle('caption:read', async (_event, imagePath) => {
@@ -947,20 +1180,50 @@ ipcMain.handle('caption:copy-image', async (_event, payload) => {
   if (resolved.toLowerCase().endsWith('.gif')) {
     try {
       const buffer = fs.readFileSync(resolved);
+
+      // 从 GIF 头解析画布尺寸（字节 6-7 = width LE, 8-9 = height LE）。
+      // nativeImage.createFromPath 对动图常返回 empty（toast 一直显示 0×0），
+      // 直接读头最稳。GIF89a/GIF87a 都一定有这段 magic。
+      let headerW = 0;
+      let headerH = 0;
+      if (buffer.length >= 10
+          && buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
+        headerW = buffer.readUInt16LE(6);
+        headerH = buffer.readUInt16LE(8);
+      }
+
       clipboard.clear();
-      // 写 'image/gif' 走系统剪贴板的 GIF 通道，粘贴到浏览器/聊天框仍是动图
+      // 主通道：'image/gif' 走系统剪贴板的 GIF 通道，
+      // 浏览器 / 聊天软件粘贴仍是动图。
       clipboard.writeBuffer('image/gif', buffer);
-      // nativeImage 只能拿首帧尺寸；toast 展示首帧大小够用
-      const firstFrame = nativeImage.createFromPath(resolved);
-      const size = firstFrame.isEmpty() ? { width: 0, height: 0 } : firstFrame.getSize();
-      // writeBuffer 没有标准 readBuffer 校验；用文件字节数和剪贴板字节数交叉确认
       const written = clipboard.readBuffer('image/gif');
+      const animatedOk = written.length === buffer.length;
+
+      // 兜底：很多桌面 app（画图 / Office / 部分 IM / 老编辑器）只读平台标准
+      // 图像格式（Windows CF_DIB、macOS public.png、Linux image/png），对
+      // 'image/gif' 通道直接无视——粘贴出来是空，误以为没复制成功。
+      // 把首帧也写到平台标准通道，两个格式并存，target app 按自己支持的格式优先读。
+      // 顺序：clear → writeBuffer(image/gif) → writeImage(...)，
+      // writeImage 不会清掉已设的 image/gif。
+      // nativeImage 对动图常返回 empty，写不进去时只保留 image/gif 主通道。
+      let frameOk = false;
+      const firstFrame = nativeImage.createFromPath(resolved);
+      if (!firstFrame.isEmpty()) {
+        clipboard.writeImage(firstFrame);
+        const frameReadBack = clipboard.readImage();
+        frameOk = !frameReadBack.isEmpty();
+      }
+
       return {
-        ok: written.length === buffer.length,
-        width: size.width,
-        height: size.height,
+        // 动图或首帧只要有一个真进剪贴板就算复制成功
+        ok: animatedOk || frameOk,
+        width: headerW,
+        height: headerH,
         bytes: buffer.length,
-        isGif: true
+        isGif: true,
+        // 让前端区分 toast 文案：动图 vs 只塞了首帧 vs 完全失败
+        animated: animatedOk,
+        hasFirstFrame: frameOk,
       };
     } catch (error) {
       return { ok: false, error: error.message };
@@ -1138,9 +1401,32 @@ function migrateLegacyPortableData() {
   }
 }
 
+// === 单实例锁：避免两个 Electron 同时跑、各起一个 python 抢 8000 ===
+// dev + prod 并存也跑不起来（两者都抢 8000），所以这个锁是真无副作用。
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  // 另一个 Danbooru Deck 已在运行；本次启动立刻退出，避免两实例争抢 8000。
+  // 用 app.exit 而不是 app.quit：前者跳过 lifecycle hook，更适合「还没初始化就退」。
+  app.exit(0);
+} else {
+  // 第二个实例启动时聚焦第一个实例的窗口（Electron 标准 pattern）
+  app.on('second-instance', () => {
+    const wins = BrowserWindow.getAllWindows();
+    const w = wins[0];
+    if (!w) return;
+    if (w.isMinimized()) w.restore();
+    w.show();
+    w.focus();
+  });
+}
+
 app.whenReady().then(() => {
+  if (!gotSingleInstanceLock) return;  // 双保险：拿不到锁就不继续初始化
   migrateLegacyPortableData();
   fs.mkdirSync(hotPicDir, { recursive: true });
+  // 本次会话 token：用于「正向上匹配」8000 上的监听者是不是我们之前留下的孤儿。
+  // 8 位 hex = 32 bit 熵，碰撞概率 ~1/2^32，可接受（不是安全边界）。
+  crawlerSessionToken = crypto.randomBytes(4).toString('hex');
   Menu.setApplicationMenu(null);
   thumbCacheDir = path.join(app.getPath('userData'), 'thumb-cache');
   protocol.handle('local', (request) => {
@@ -1162,8 +1448,33 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
-  if (crawlerProcess && !crawlerProcess.killed) {
-    crawlerProcess.kill();
+// === crawler 进程清理：挂多个 lifecycle hook 防孤儿 ===
+// 旧版本只在 before-quit 里 .kill()，但 Task Manager 强杀 / Electron 崩溃 / 断电
+// 都不走 before-quit，留下 python 占着 8000。补 will-quit / quit / 进程信号，
+// Windows 上用 taskkill /F /T 杀整棵树（包括未来 uvicorn 起的 reloader 等子进程）。
+function killCrawlerTreeSync() {
+  const proc = crawlerProcess;
+  if (!proc || proc.killed) return;
+  const pid = proc.pid;
+  if (pid) {
+    if (process.platform === 'win32') {
+      // taskkill 是独立进程，fire-and-forget；父进程可以接着退出
+      try { spawn('taskkill', ['/F', '/T', '/PID', String(pid)], { windowsHide: true, detached: true }); } catch {}
+    } else {
+      try { process.kill(pid, 'SIGTERM'); } catch {}
+    }
   }
-});
+  // 兜底：也调用 Node 的 .kill() 走 TerminateProcess
+  try { proc.kill(); } catch {}
+}
+for (const ev of ['before-quit', 'will-quit', 'quit']) {
+  app.on(ev, killCrawlerTreeSync);
+}
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+  process.on(sig, () => {
+    killCrawlerTreeSync();
+    // 不要再调 app.quit()，避免递归；让进程自然退出
+  });
+}
+// 最后一道防线：进程退出前再尝试一次
+process.on('exit', killCrawlerTreeSync);

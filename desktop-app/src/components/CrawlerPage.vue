@@ -7,11 +7,13 @@ import RefreshRangeModal from './crawler/RefreshRangeModal.vue';
 import ArtistFavoriteModal from './crawler/ArtistFavoriteModal.vue';
 import CharacterFavoriteModal from './crawler/CharacterFavoriteModal.vue';
 import BrowseOverlay from './crawler/BrowseOverlay.vue';
+import SearchHistoryDropdown from './SearchHistoryDropdown.vue';
 import TranslationModal from './crawler/TranslationModal.vue';
 import TranslateDetailModal from './crawler/TranslateDetailModal.vue';
 import SelectionListModal from './crawler/SelectionListModal.vue';
 import BrowseSelectionModal from './crawler/BrowseSelectionModal.vue';
 import CryptoToolModal from './crawler/CryptoToolModal.vue';
+import MergeViewerDataModal from './crawler/MergeViewerDataModal.vue';
 import { parsePastedIds } from '../utils/idCodec.js';
 
 const emit = defineEmits(['edit-image', 'caption-image']);
@@ -71,31 +73,75 @@ async function toggleProxy() {
   }
 }
 
+// 初始 mode 也要用下面这一份来推导 startPage/endPage 初始值：watch(form.mode)
+// 是非 immediate 的，启动时 mode 不会"变"，所以 form 初始值必须按 mode 选
+// 对应的 habits 字段，否则会出现「打开就在 popular 却看到 rank 的 1-40 页」这种串台。
+// 旧实现无脑写 habits.rank_start/_end，所以才把 popular 的 1-50 盖成 rank 的 1-40。
+// 与下面 watch 的默认值保持一致：rank→16, popular→35, tags→5。
+const _initialMode = (habits.mode === 'collect_ids' || habits.mode === 'download_ids' || habits.mode === 'popular_range')
+  ? 'rank'
+  : (habits.mode || 'rank');
+const _initialStartDefault = _initialMode === 'popular' ? 1 : _initialMode === 'tags' ? 1 : 1;
+const _initialEndDefault = _initialMode === 'popular' ? 35 : _initialMode === 'tags' ? 5 : 16;
 const form = ref({
-  startPage: habits.rank_start || 1,
-  endPage: habits.rank_end || 16,
+  startPage: habits[`${_initialMode}_start`] || _initialStartDefault,
+  endPage: habits[`${_initialMode}_end`] || _initialEndDefault,
   // 用 typeof 判断而不是 || ：用户可能故意把过滤标签清空（=不过滤任何 tag），
   // 那种情况下应保留空串而不是回退到默认 "furry, futanari"
   tags: typeof habits.tags === 'string' ? habits.tags : 'furry, futanari, guro',
-  mode: habits.mode || 'rank',
+  mode: _initialMode,
   targetDate: '',
   startDate: '',
   endDate: '',
   idsText: '',
   tagQuery: typeof habits.tagQuery === 'string' ? habits.tagQuery : '',
-  tagSource: habits.tagSource === 'gelbooru' ? 'gelbooru' : 'danbooru'
+  tagSource: habits.tagSource === 'gelbooru' ? 'gelbooru' : 'danbooru',
+  // 「日期热门 / 日期范围」合到一个 mode 里，下面用 dateRange 决定单日 vs 范围
+  dateRange: false,
+  // popular·按ID下载 专用：True（默认）= log.json 已记录的 id 跳过；False = 强制重下（补齐 50 页场景）
+  skipLogged: true
+});
+// 排行榜类的子操作：两档（download=两阶段 / collect_only=仅收ID）。与 popularAction 互不干扰。
+// 历史上有过第三档 'download_by_ids'，但「按ID下载」语义上是针对日期 folder 的，
+// 移到 popularAction 下，rank 不再持有这个状态。
+const rankAction = ref('download');
+// 日期热门类的子操作：四档
+//   - download=两阶段（默认）
+//   - collect_only=仅收ID
+//   - recover=补全/补齐（仅单日）
+//   - download_by_ids=按ID下载（仅单日；针对日期 folder，与 rank 无关）
+// 与 rankAction 互不干扰（不同 mode 各自管自己的子操作状态）。
+const popularAction = ref('download');
+// 「按ID下载」子操作迁移到 popularAction 下后，全局条件统一走这个 computed：
+// 包括日期同步、ID 粘贴区、下载策略行、resolveActualMode 等。
+// 放在 popularAction 后面、下面的 form↔gallery watch 前面：
+// watch 注册时会同步跑 getter 建立依赖 + immediate=true 的 callback，
+// 若 isDownloadByIdsMode 还在 TDZ 会抛 ReferenceError 把组件挂载搞挂。
+const isDownloadByIdsMode = computed(() =>
+  form.value.mode === 'popular' && popularAction.value === 'download_by_ids'
+);
+// 下载协程数：夹到 [1, 16]，默认 4。改动会持久化到 habits，下个会话自动恢复
+const downloadConcurrency = ref(
+  Number.isFinite(habits.downloadConcurrency) && habits.downloadConcurrency >= 1 && habits.downloadConcurrency <= 16
+    ? habits.downloadConcurrency : 4
+);
+watch(downloadConcurrency, (v) => {
+  const clamped = Math.max(1, Math.min(16, Math.round(Number(v) || 4)));
+  if (clamped !== v) downloadConcurrency.value = clamped;
+  habits.downloadConcurrency = downloadConcurrency.value;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 });
 
 watch(() => form.value.mode, (newMode) => {
-  // 切 mode 会触发 applyDefaultDatesForMode 默认填"昨天"，
+  // 切 mode 会触发 applyDefaultDatesForMode 默认填"画廊日期 / 昨天"，
   // 这一帧内的 form 变化不应再触发 form→gallery 同步。
   isModeSwitching = true;
-  if (['rank', 'collect_ids'].includes(newMode)) {
-    form.value.startPage = habits[`${newMode}_start`] || 1;
-    form.value.endPage = habits[`${newMode}_end`] || 16;
-  } else if (['popular', 'popular_range'].includes(newMode)) {
-    form.value.startPage = habits[`${newMode}_start`] || 1;
-    form.value.endPage = habits[`${newMode}_end`] || 35;
+  if (newMode === 'rank') {
+    form.value.startPage = habits.rank_start || 1;
+    form.value.endPage = habits.rank_end || 16;
+  } else if (newMode === 'popular') {
+    form.value.startPage = habits.popular_start || 1;
+    form.value.endPage = habits.popular_end || 35;
   } else if (newMode === 'tags') {
     form.value.startPage = habits.tags_start || 1;
     form.value.endPage = habits.tags_end || 5;
@@ -137,14 +183,22 @@ function dateTokenLabel(v) {
 }
 function applyDefaultDatesForMode(mode) {
   if (mode === 'popular') {
-    if (!form.value.targetDate) form.value.targetDate = yesterdayString();
-  } else if (mode === 'popular_range') {
-    if (!form.value.startDate) form.value.startDate = yesterdayString();
-    if (!form.value.endDate) form.value.endDate = yesterdayString();
+    // 切到「日期热门」时优先用画廊当前选中日期作为默认目标日期；
+    // 画廊为空 / 是 tag 文件夹时才回退到昨天。修复用户报修的"日期热门目标日期
+    // 不跟随画廊日历"问题——之前无条件写 yesterday 会和画廊当前日期错位，
+    // 必须先点画廊的"上一天/下一天"才能让 gallery→form watch 把 form 拉回画廊日期。
+    // 用局部 regex 不用 ISO_DATE：ISO_DATE 在文件靠后位置才声明，避免 TDZ 报错。
+    const galleryDate = gallery.value.selectedDate;
+    const galleryHasDate = !!galleryDate && /^\d{4}-\d{2}-\d{2}$/.test(galleryDate);
+    const defaultDate = galleryHasDate ? galleryDate : yesterdayString();
+    if (form.value.dateRange) {
+      if (!form.value.startDate) form.value.startDate = defaultDate;
+      if (!form.value.endDate) form.value.endDate = defaultDate;
+    } else if (!form.value.targetDate) {
+      form.value.targetDate = defaultDate;
+    }
   }
 }
-// 初始模式若是 popular / popular_range，进来就把日期填成昨天
-applyDefaultDatesForMode(form.value.mode);
 
 // ---------------- 起始页 / 结束页「最近使用」历史 ----------------
 // 每个模式（rank / popular / popular_range / collect_ids）按 start / end 各自存最近 2 个值
@@ -177,6 +231,26 @@ function applyRecentPage(field, value) {
   if (field === 'start') form.value.startPage = value;
   else form.value.endPage = value;
 }
+
+// 「补全/补齐」子操作专属：原实现硬编码 50 页（用户已确认这是合理默认）。
+// 切到该子操作时，若 endPage<50 提到 50（不覆盖用户主动设的更大值），
+// 保持与原 `recoverPopular()` 函数行为一致。
+function onPickPopularRecover() {
+  popularAction.value = 'recover';
+  if ((Number(form.value.endPage) || 0) < 50) {
+    form.value.endPage = 50;
+  }
+}
+
+// 「按ID下载」子操作专属：仅在单日模式有效，UI 上对应按钮 v-if 隐藏；
+// 这里再多一道防御：watch dateRange=true 时若 popularAction 落在单日专属的子操作
+// （recover / download_by_ids），自动重置成 'download'。否则 resolveActualMode
+// 会把 popular_range + download_by_ids 错位翻译成 popular_range 跑。
+watch(() => form.value.dateRange, (newVal) => {
+  if (newVal && (popularAction.value === 'recover' || popularAction.value === 'download_by_ids')) {
+    popularAction.value = 'download';
+  }
+});
 
 function deleteRecentPage(mode, field, value) {
   const rp = { ...(habits.recentPages || {}) };
@@ -227,8 +301,6 @@ const gallery = ref({
   filterFormat: 'all',
   filterRatings: [],   // 多选：['s','q','e'] 的子集；空数组 = 不筛选（显示全部分级）
   sortBy: habits.sortBy || 'default',
-  hotOnly: false,
-  hotThreshold: habits.hotThreshold || 50,
   // 每页张数：默认 15（笔记本屏）；大屏可调高。过高会一次渲染很多卡片，缩略图 IPC + 网格布局会变卡
   pageSize: habits.pageSize || 15,
   cardSize: habits.cardSize || 150,
@@ -236,13 +308,19 @@ const gallery = ref({
   thumbSize: habits.thumbSize != null ? habits.thumbSize : 360,
   // 点开/切换大图是否联网刷新该图 score/收藏数：默认关，离线不报错；开关在工具栏「翻译」右侧
   refreshOnView: habits.refreshOnView ?? false,
-  page: 1
+  page: 1,
+  // 库根目录列表（来自 main.cjs loadLibraryRoots()）：用于「合并 viewer_data」跨盘工具
+  // 至少含一个默认项 { id: 'default', label: 'hot_pic', path: <绝对路径> }，外置盘按 library_roots.json 追加
+  libraryRoots: []
 });
+// 初始模式若是 popular，进来就把日期填成昨天 / 画廊日期。
+// 必须在 gallery 定义之后调：函数体内访问 gallery.value.selectedDate，
+// const 在 TDZ 阶段会抛 ReferenceError。
+applyDefaultDatesForMode(form.value.mode);
 const showGalleryPanel = ref(habits.showGalleryPanel !== false);
 
-watch(() => [gallery.value.sortBy, gallery.value.hotThreshold, gallery.value.cardSize, gallery.value.thumbSize, gallery.value.refreshOnView, gallery.value.pageSize], () => {
+watch(() => [gallery.value.sortBy, gallery.value.cardSize, gallery.value.thumbSize, gallery.value.refreshOnView, gallery.value.pageSize], () => {
   habits.sortBy = gallery.value.sortBy;
-  habits.hotThreshold = gallery.value.hotThreshold;
   habits.cardSize = gallery.value.cardSize;
   habits.thumbSize = gallery.value.thumbSize;
   habits.refreshOnView = gallery.value.refreshOnView;
@@ -275,10 +353,34 @@ let isModeSwitching = false;
 watch(() => gallery.value.selectedDate, (newDate) => {
   if (!newDate) return;
   const mode = form.value.mode;
-  if (mode === 'popular' || mode === 'download_ids') {
+  if (mode === 'popular' && !form.value.dateRange) {
     if (form.value.targetDate !== newDate) form.value.targetDate = newDate;
-  } else if (mode === 'popular_range') {
+  } else if (mode === 'popular' && form.value.dateRange) {
     if (form.value.startDate !== newDate) form.value.startDate = newDate;
+  } else if (isDownloadByIdsMode.value) {
+    // 「按ID下载」子操作：目标日期跟随右侧 GalleryCalendar，
+    // 同时主动 fetch 新日期 folder 的待下载 ID 写回 idsText，
+    // 解决"切到 B 日期 → 粘贴区仍是 A 的 ID"这个频繁补日期的痛点。
+    if (form.value.targetDate !== newDate) {
+      form.value.targetDate = newDate;
+      fetchCollectedIdsForDate(newDate, {
+        onSuccess: (fetchedDate, payload) => {
+          // 防竞态：用户在 fetch 期间又切了日期 → 丢弃过期结果，让新日期的 watch 接管
+          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
+          form.value.idsText = payload.ids.join('\n');
+          showToast(`已加载 ${fetchedDate} 的 ${payload.ids.length} 个待下载 ID`, 'success');
+        },
+        onEmpty: (fetchedDate) => {
+          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
+          form.value.idsText = '';
+          showToast(`${fetchedDate} folder 没有待下载 ID，可粘贴自定义 ID`, 'info');
+        },
+        onError: (fetchedDate, err) => {
+          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
+          showToast(`加载 ${fetchedDate} 的 ID 失败：${err.message}`, 'error');
+        },
+      });
+    }
   }
 });
 
@@ -286,44 +388,137 @@ watch(() => gallery.value.selectedDate, (newDate) => {
 watch(() => [form.value.targetDate, form.value.startDate], ([newTarget, newStart]) => {
   if (isModeSwitching) return;
   const mode = form.value.mode;
-  let dateToLoad = null;
-  if (mode === 'popular' || mode === 'download_ids') {
-    if (newTarget && ISO_DATE.test(newTarget) && newTarget !== gallery.value.selectedDate) {
-      dateToLoad = newTarget;
+  if (mode === 'popular') {
+    const candidate = form.value.dateRange ? newStart : newTarget;
+    if (candidate && ISO_DATE.test(candidate) && candidate !== gallery.value.selectedDate) {
+      loadGallery(candidate);
     }
-  } else if (mode === 'popular_range') {
-    if (newStart && ISO_DATE.test(newStart) && newStart !== gallery.value.selectedDate) {
-      dateToLoad = newStart;
-    }
+  } else if (isDownloadByIdsMode.value) {
+    // 「按ID下载」目前没有自己的日期选择器，targetDate 由右侧 gallery 同步过来；
+    // 这里保持单一来源：不再反向写 gallery，避免与上面 watch 互相回环。
   }
-  if (dateToLoad) loadGallery(dateToLoad);
 });
+
+// 切到「按ID下载」组合时，主动把 form.targetDate 校准成 gallery 当前日期。
+// 场景：用户先在 popular 模式选过日期，form.targetDate 残留了 popular 的值，
+// 然后切到 popular+按ID下载 — gallery 没动，上面的 watch 不会触发，
+// 残留值会让提示文案/hint 指向错误 folder。watcher 注册时会立即跑一次，
+// 所以打开页面直接落在该组合时也会被校准到 gallery 的当前日期。
+watch([() => form.value.mode, rankAction, popularAction], () => {
+  // 复用一个助手：gallery 校准 + 拉取并回填 idsText（防竞态）
+  const calibrateAndFetch = () => {
+    const galleryDate = gallery.value.selectedDate;
+    if (galleryDate && galleryDate !== form.value.targetDate) {
+      form.value.targetDate = galleryDate;
+    }
+    const target = (form.value.targetDate || '').trim();
+    if (target) {
+      fetchCollectedIdsForDate(target, {
+        onSuccess: (fetchedDate, payload) => {
+          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
+          form.value.idsText = payload.ids.join('\n');
+          showToast(`已加载 ${fetchedDate} 的 ${payload.ids.length} 个待下载 ID`, 'success');
+        },
+        onEmpty: (fetchedDate) => {
+          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
+          form.value.idsText = '';
+          showToast(`${fetchedDate} folder 没有待下载 ID，可粘贴自定义 ID`, 'info');
+        },
+        onError: (fetchedDate, err) => {
+          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
+          showToast(`加载 ${fetchedDate} 的 ID 失败：${err.message}`, 'error');
+        },
+      });
+    }
+  };
+  // 「按ID下载」组合（已迁到 popular 下）
+  if (isDownloadByIdsMode.value) {
+    calibrateAndFetch();
+  }
+}, { immediate: true });
 
 const task = ref({
   isRunning: false,
   isStopping: false,
   isPaused: false,
   jobId: '',
+  mode: '',                 // 后端 status.mode：rank / popular / tags / collect_ids / download_ids ...
   outcome: 'idle',
   errorMessage: '',
-  logs: ['桌面端已启动。'],
-  totalLogCount: 1,
+  // 进度条数据：替代原 logs / totalLogCount / maximized / hideSuccess / expandedLogIdx。
+  // /api/status 每秒拉一次，task_download_ids 入口在 main.py 设 total，worker 累加 success / fail。
+  progress: { total: 0, success: 0, fail: 0 },
+  // 抓取 ID 阶段的页进度（按当前 scope 统计；total=0 时不渲染条）。
+  // 后端 collect 循环里写 page_current / page_total，进入 download 时清零。
+  // done = 已完整跑完的页数（不论成功失败），用于算出"成功 X 页"。
+  pageProgress: { current: 0, total: 0, done: 0 },
+  // 运行中实时失败页 / 失败图计数：来自 /api/status 的 failed_pages / failed_ids，
+  // 让用户在不点击失败横幅时也能直观看到「当前已经有 N 页抓失败」，配 runningPhaseText 一起渲染。
+  runningFailedPages: 0,
+  runningFailedIds: 0,
   backendError: '',
   backendErrorExpanded: false,
-  backendTail: [],
-  maximized: false,
-  hideSuccess: true,
-  expandedLogIdx: -1
+  backendTail: []
 });
-// 下载失败横幅：后端 /api/status 透出 failed_pages（页级 [{folder, page}]）和
-// failed_ids（图级 [{folder, ids:[...]}]）。任务结束后弹横幅，一键定向重跑：
-// 页级重跑整页，图级用 download_ids 只重跑失败的 id（id 仍留在 folder 的 ids_data.json 里）。
-const failedPages = ref({
-  list: [], kind: 'pages', mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false,
-  signature: '', sourceQueueItemId: null
+// 进度条上方的阶段提示：只在任务运行/暂停/停止中显示。
+// 区分依据是 task.progress.total —— 只有 task_download_ids 入口在 main.py 里设 total_planned，
+// 所以 total > 0 等价于「已进入按 ID 下载阶段」；否则是「抓取 ID / 抓取页面列表」阶段。
+// collect 阶段如果后端给了 page_total，会顺带显示「N/M 页」。
+const runningPhaseText = computed(() => {
+  if (!task.value.isRunning && !task.value.isPaused && !task.value.isStopping) return '';
+  if (task.value.isStopping) return '正在停止…';
+  if (task.value.isPaused) return '已暂停';
+  if (task.value.progress.total > 0) return '正在下载…';
+  const pp = task.value.pageProgress;
+  if (pp && pp.total > 0) {
+    return `正在抓取ID…（${pp.current}/${pp.total} 页）`;
+  }
+  return '正在抓取ID…';
 });
-const queuedFailureReports = ref([]);
-const dismissedFailureSignatures = new Set();
+// 实时失败计数：有失败时紧跟在阶段提示后面，拼成 "阶段 · ⚠ 失败 3 页 / 1 图" 形式。
+// 每次 failed_pages 增长都会自动更新（依赖 task.runningFailedPages/Ids），点击会聚焦失败横幅。
+const runningFailureHint = computed(() => {
+  const pages = task.value.runningFailedPages || 0;
+  const ids = task.value.runningFailedIds || 0;
+  if (!pages && !ids) return '';
+  const parts = [];
+  if (pages) parts.push(`${pages} 页`);
+  if (ids) parts.push(`${ids} 图`);
+  return ` · ⚠ 失败 ${parts.join(' / ')}`;
+});
+// 抓 ID 阶段（collect）的页级成功/失败计数：done - failed = 成功页数。
+// done 来自后端 page_done_count（grabber 返回后 +1，不论成功失败）；
+// failed 来自后端 failed_pages 数组长度（仅 record_failed_page 后才计入）。
+// 两个值都是从后端 /api/status 透出的权威数据，前端不再做本地累加，避免双源不一致。
+const pageFetchSucceeded = computed(() => {
+  const done = task.value.pageProgress?.done || 0;
+  const failed = task.value.runningFailedPages || 0;
+  return Math.max(0, done - failed);
+});
+// 失败页 / 失败图：后端 /api/status 透出 failed_pages（页级 [{folder, page}]）和
+// failed_ids（图级 [{folder, ids:[...]}]）。不弹横幅 —— 用户通过「运行动态日志」
+// 区里简洁的"需手动重试的页：5, 6"提示 + × 关闭 自己看自己决。
+// 之前 buildRetryQueueItem 用 form.value.tags 而不是原任务 tags，已连带删除。
+
+// 简洁的"需重试页范围"提示：失败页有变化时更新；用户点 × 关闭。
+// 用 folder+pages 拼接的 signature 去重（task 内部同一组失败只刷一次）。
+// dismissedSignatures 记住用户已关闭的组，同一 job 内不再反复刷出。
+const retryPagesHint = ref({ show: false, signature: '', pages: [], text: '' });
+const dismissedHintSignatures = new Set();
+function showRetryPagesHint(report) {
+  const sig = (report.folder || 'unknown') + '::' + report.pages.map(p => p.page).join(',');
+  if (dismissedHintSignatures.has(sig)) return;
+  retryPagesHint.value = {
+    show: true,
+    signature: sig,
+    pages: report.pages,
+    text: `需手动重试的页：${report.pages.map(p => p.page).join(', ')}（在入队面板配置同样 mode+pages 范围重新入队）`,
+  };
+}
+function dismissRetryPagesHint() {
+  if (retryPagesHint.value.signature) dismissedHintSignatures.add(retryPagesHint.value.signature);
+  retryPagesHint.value = { show: false, signature: '', pages: [], text: '' };
+}
 const viewer = ref({
   open: false,
   key: '',            // 当前大图的稳定唯一键（localPath||filename）。用键而非索引锁定当前图，
@@ -444,6 +639,13 @@ function loadSelectionToCryptoInput() {
 }
 const parsedPastedIds = computed(() => parsePastedIds(form.value.idsText));
 const isPastedCompressed = computed(() => /dbids:[0-9a-z.]+/i.test(form.value.idsText || ''));
+// 「按ID下载」子操作没有自己的日期选择器，日期由右侧 GalleryCalendar 同步过来。
+// 提示文案统一从这里取：选了具体日期就亮出来，没选就兜底今天，避免出现
+// 「将下载到今天的图库」跟实际 folder 不一致的迷惑。
+const downloadByIdsTargetDateLabel = computed(() => {
+  const iso = /^\d{4}-\d{2}-\d{2}$/.test(form.value.targetDate || '') ? form.value.targetDate : '';
+  return iso || todayString();
+});
 function onThumbClick(event, item) {
   if (event.ctrlKey || event.metaKey) {
     if (!selection.value.enabled) setSelectionEnabled(true);
@@ -580,20 +782,10 @@ const galleryPendingDate = ref('');
 let galleryLoadSequence = 0;
 let committedGalleryDate = '';
 let pollTimer = null;
-const logBodyRef = ref(null);
-
-watch(() => task.value.totalLogCount, async () => {
-  if (task.value.maximized && logBodyRef.value) {
-    await nextTick();
-    logBodyRef.value.scrollTop = logBodyRef.value.scrollHeight;
-  }
-});
 
 const filteredLocalImages = computed(() => {
   const keyword = gallery.value.search.trim().toLowerCase();
   const format = gallery.value.filterFormat;
-  const hotOnly = gallery.value.hotOnly;
-  const threshold = gallery.value.hotThreshold;
   const source = gallery.value.images;
 
   let result = source.filter(item => {
@@ -602,12 +794,13 @@ const filteredLocalImages = computed(() => {
       if (format === 'zip' && !['zip', 'gif'].includes(ext)) return false;
       if (format === 'video' && !['mp4', 'webm', 'avi', 'mov', 'mkv'].includes(ext)) return false;
       if (format === 'image' && !['jpg', 'jpeg', 'png', 'webp', 'bmp', 'avif'].includes(ext)) return false;
-      if (format === 'favorited' && !isCardFavorited(item)) return false;
+      if (format === 'favorited_artist' && !itemHasFavoritedArtist(item)) return false;
+      if (format === 'favorited_character' && !itemHasFavoritedCharacter(item)) return false;
+      if (format === 'not_favorited_artist' && itemHasFavoritedArtist(item)) return false;
+      if (format === 'not_favorited_character' && itemHasFavoritedCharacter(item)) return false;
       if (format === 'captioned' && !hasCaption(item)) return false;
       if (format === 'not_captioned' && hasCaption(item)) return false;
     }
-
-    if (hotOnly && (item.score || 0) < threshold) return false;
 
     if (gallery.value.filterRatings.length && !gallery.value.filterRatings.includes(item.rating || '')) return false;
 
@@ -724,35 +917,133 @@ const blockLabels = computed(() => // 块下拉选项："1-50" / "51-100" ...
 );
 
 const galleryStats = computed(() => {
+  // 只保留总数 / 已筛选数；分数均/中位这类统计信息取消展示（右侧改放边框含义图例）
   const all = gallery.value.images;
   const filtered = filteredLocalImages.value;
-  // 一趟遍历收集 >0 的分数并累加均值，再对（更小的）正分子集排序求中位数，
-  // 避免原先 map+filter+spread+sort 的多次分配与多趟遍历（上千图时明显更省）
-  let sum = 0;
-  const scores = [];
-  for (let i = 0; i < filtered.length; i++) {
-    const s = filtered[i].score || 0;
-    if (s > 0) { scores.push(s); sum += s; }
-  }
-  const avg = scores.length ? Math.round(sum / scores.length) : 0;
-  scores.sort((a, b) => a - b);
-  const median = scores.length ? scores[Math.floor(scores.length / 2)] : 0;
-  return { total: all.length, filtered: filtered.length, avg, median };
+  return { total: all.length, filtered: filtered.length };
 });
 
-// 搜索防抖：输入框绑 searchInput 即时回显，250ms 后才写回 gallery.search（真正参与过滤）
+// 输入框绑 searchInput 即时回显；显式提交（Enter / 搜索按钮 / 选历史 / 清空）才写回 gallery.search 真正参与过滤
 const searchInput = ref(gallery.value.search);
-let searchDebounceTimer = null;
-function onSearchInput() {
-  if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
-  searchDebounceTimer = setTimeout(() => { gallery.value.search = searchInput.value; }, 250);
-}
-// 程序化写入（清空按钮 / 查看器点 token 跳转）：立即同步两端并绕过防抖，避免回显与过滤关键字错位
+const searchHistoryRef = ref(null);
+// 程序化写入（清空按钮 / 查看器点 token 跳转）：立即同步两端，避免回显与过滤关键字错位
 function setSearch(keyword) {
-  if (searchDebounceTimer) { clearTimeout(searchDebounceTimer); searchDebounceTimer = null; }
   const v = keyword || '';
   searchInput.value = v;
   gallery.value.search = v;
+  if (v.trim()) pushSearchHistory(v);
+}
+// 用户在输入框上按 Enter / 点「搜索」按钮 → 提交当前输入并关掉下拉
+function commitGallerySearch() {
+  showSearchHistory.value = false;
+  setSearch(searchInput.value);
+}
+// 点了下拉里某条历史 → 复用 setSearch 提交（同时把这条刷新到历史最前）
+function onPickSearchHistory(entry) {
+  showSearchHistory.value = false;
+  setSearch(entry);
+}
+
+// 搜索历史：作者/角色搜索（顶部搜索框）和 tag 浏览（BrowseOverlay）分开保存，各 10 条上限
+const SEARCH_HISTORY_KEY = 'crawlerSearchHistory';
+const TAG_SEARCH_HISTORY_KEY = 'crawlerTagSearchHistory';
+const SEARCH_HISTORY_MAX = 10;
+const searchHistory = ref(loadHistory(SEARCH_HISTORY_KEY));
+const tagSearchHistory = ref(loadHistory(TAG_SEARCH_HISTORY_KEY));
+const showSearchHistory = ref(false);
+const showTagSearchHistory = ref(false);
+function loadHistory(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter(s => typeof s === 'string' && s.trim()).slice(0, SEARCH_HISTORY_MAX) : [];
+  } catch (e) {
+    return [];
+  }
+}
+function saveHistory(key, list) {
+  try { localStorage.setItem(key, JSON.stringify(list.slice(0, SEARCH_HISTORY_MAX))); } catch (e) { /* localStorage 满 / 不可用时静默 */ }
+}
+// 把 q 推进 history：去重（大小写不敏感）、移到最前、超出上限截尾
+function pushHistoryEntry(list, q) {
+  const v = String(q || '').trim();
+  if (!v) return list;
+  const filtered = list.filter(x => x.toLowerCase() !== v.toLowerCase());
+  return [v, ...filtered].slice(0, SEARCH_HISTORY_MAX);
+}
+function pushSearchHistory(q) {
+  const next = pushHistoryEntry(searchHistory.value, q);
+  if (next[0] === searchHistory.value[0] && next.length === searchHistory.value.length) return; // 没变
+  searchHistory.value = next;
+  saveHistory(SEARCH_HISTORY_KEY, next);
+}
+function pushTagSearchHistory(q) {
+  const next = pushHistoryEntry(tagSearchHistory.value, q);
+  if (next[0] === tagSearchHistory.value[0] && next.length === tagSearchHistory.value.length) return;
+  tagSearchHistory.value = next;
+  saveHistory(TAG_SEARCH_HISTORY_KEY, next);
+}
+function removeSearchHistoryEntry(q) {
+  searchHistory.value = searchHistory.value.filter(x => x !== q);
+  saveHistory(SEARCH_HISTORY_KEY, searchHistory.value);
+}
+function removeTagSearchHistoryEntry(q) {
+  tagSearchHistory.value = tagSearchHistory.value.filter(x => x !== q);
+  saveHistory(TAG_SEARCH_HISTORY_KEY, tagSearchHistory.value);
+}
+function clearSearchHistory() {
+  searchHistory.value = [];
+  saveHistory(SEARCH_HISTORY_KEY, []);
+}
+function clearTagSearchHistory() {
+  tagSearchHistory.value = [];
+  saveHistory(TAG_SEARCH_HISTORY_KEY, []);
+}
+
+// 常用 tag（独立于搜索历史）：用户可保存反复使用的 tag 片段（例如 official_art），
+// 点 chip 就把这一段追加到当前 query，避开每次重新手打。
+const SAVED_TAGS_KEY = 'crawlerSavedTags';
+const SAVED_TAGS_MAX = 20;
+const savedTags = ref(loadSavedTags());
+function loadSavedTags() {
+  try {
+    const raw = localStorage.getItem(SAVED_TAGS_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.filter(s => typeof s === 'string' && s.trim()).slice(0, SAVED_TAGS_MAX) : [];
+  } catch (e) { return []; }
+}
+function persistSavedTags(list) {
+  try { localStorage.setItem(SAVED_TAGS_KEY, JSON.stringify(list.slice(0, SAVED_TAGS_MAX))); }
+  catch (e) { /* localStorage 满 / 不可用时静默 */ }
+}
+function addSavedTag(tag) {
+  const v = String(tag || '').trim();
+  if (!v) return;
+  // 去重 + 新的放最前 + 截到上限
+  const next = [v, ...savedTags.value.filter(x => x !== v)].slice(0, SAVED_TAGS_MAX);
+  if (next[0] === savedTags.value[0] && next.length === savedTags.value.length) return;
+  savedTags.value = next;
+  persistSavedTags(next);
+}
+function removeSavedTag(tag) {
+  const next = savedTags.value.filter(x => x !== tag);
+  if (next.length === savedTags.value.length) return;
+  savedTags.value = next;
+  persistSavedTags(next);
+}
+// BrowseOverlay 点了某条 tag 历史 → 覆写 query 并触发搜索
+function pickTagSearchHistory(q) {
+  showTagSearchHistory.value = false;
+  if (!q) return;
+  browse.value.query = q;
+  browse.value.selectAllPhase = 0;
+  runBrowseSearch(1);
+}
+// 作者/角色搜索历史下拉：失焦延时关（让 mousedown.prevent 抢先触发，避免点条目时关闭后无响应）
+function onSearchHistoryBlur() {
+  setTimeout(() => { showSearchHistory.value = false; }, 150);
 }
 
 const jumpInput = ref(1);
@@ -782,24 +1073,11 @@ function nextBlock() { gotoBlock(currentBlock.value + 1); }
 function onBlockSelect(e) { gotoBlock(Number(e.target.value)); } // select value 是字符串
 
 function appendLog(message) {
+  // 旧版本会把 message 塞进 task.logs 列表渲染，下载 700 ID 刷出几百行非常吵。
+  // 现在 UI 用进度条替代文本日志，appendLog 退化成 console 包装：开发者工具里仍能看到
+  // 完整时间线（操作反馈、阶段切换、错误摘要等），但不污染界面。
   if (!message) return;
-  task.value.logs.push(message);
-  task.value.totalLogCount += 1;
-  // 保留最近 500 条用于渲染，避免 DOM 节点过多导致卡顿；
-  // totalLogCount 单独记录运行至今的全量数量，避免“计数停在 320”的错觉
-  if (task.value.logs.length > 500) {
-    task.value.logs = task.value.logs.slice(-500);
-  }
-}
-
-function clearLogs() {
-  task.value.logs = [];
-  task.value.totalLogCount = 0;
-  task.value.expandedLogIdx = -1;
-}
-
-function toggleLogExpand(idx) {
-  task.value.expandedLogIdx = task.value.expandedLogIdx === idx ? -1 : idx;
+  try { console.log('[crawler]', message); } catch { /* noop */ }
 }
 
 function dismissBackendError() {
@@ -807,46 +1085,19 @@ function dismissBackendError() {
   task.value.backendErrorExpanded = false;
 }
 
-function toggleLogMaximize() {
-  task.value.maximized = !task.value.maximized;
+// 进度条工具：把"成功/失败"绝对数转成 bar 段宽百分比。
+// 灰色未下载段不需要独立 div，bar 容器自身的 rgba 灰背景就是那段。
+// 默认分母用 progress.total（下载阶段的 success/fail 段），传 secondTotal 时
+// 改用 pageProgress.total（页进度条）。
+function pct(n, secondTotal) {
+  const total = secondTotal != null ? secondTotal : task.value.progress.total;
+  if (!total) return 0;
+  return Math.max(0, Math.min(100, (n / total) * 100));
 }
-
-function toggleLogHeader() {
-  // 缩小态：日志体收起，点击整条头部即可放大查看；
-  // 放大态：只用右上角「缩小」图标收起，避免误触把日志收走
-  if (task.value.maximized) return;
-  task.value.maximized = true;
-}
-
-// 按行匹配“下载完成 / 文件已存在 / 正在下载 ...”这类逐张日志，
-// 用户表示更关心异常和概要，因此默认收起这些噪音。
-const SUCCESS_NOISE_PATTERNS = [
-  /^正在下载[:：]/,
-  /^下载完成[:：]/,
-  /^文件已存在[:：]/
-];
-
-function isSuccessNoise(line) {
-  if (!line) return false;
-  return SUCCESS_NOISE_PATTERNS.some(re => re.test(line));
-}
-
-const visibleLogs = computed(() => {
-  if (!task.value.hideSuccess) {
-    return task.value.logs.map((line, idx) => ({ line, idx }));
-  }
-  const out = [];
-  for (let i = 0; i < task.value.logs.length; i += 1) {
-    const line = task.value.logs[i];
-    if (isSuccessNoise(line)) continue;
-    out.push({ line, idx: i });
-  }
-  return out;
-});
-
-const hiddenSuccessCount = computed(() => {
-  if (!task.value.hideSuccess) return 0;
-  return task.value.logs.filter(isSuccessNoise).length;
+// 进度条 hover 提示文本，给鼠标停留时看具体数字用
+const progressTooltip = computed(() => {
+  const p = task.value.progress;
+  return `成功 ${p.success} / 失败 ${p.fail} / 总计 ${p.total}`;
 });
 
 function splitTags(value) {
@@ -1019,6 +1270,8 @@ async function loadGallery(date, silent = false, preserveView = false) {
     // tag 文件夹由 IPC/后端透传，IPC fallback 没有此字段时给空数组兜底
     gallery.value.availableTags = Array.isArray(data.availableTags) ? data.availableTags : [];
     gallery.value.today = data.today;
+    // 库根目录列表（main.cjs 透传）—— 跨盘合并 viewer_data 工具需要
+    gallery.value.libraryRoots = Array.isArray(data.libraryRoots) ? data.libraryRoots : [];
     gallery.value.images = normalizedImages;
     if (preserveView) {
       // 保持当前页与排序快照：新下载的图按既定设计落到末尾，
@@ -1173,9 +1426,72 @@ async function convertAllZipsToGif() {
   }
 }
 
-async function reloadCurrentGallery() {
+// 跨盘合并 viewer_data.json：把 source 目录里的 viewer_data 增量追加到 target 目录。
+// 用途：本地 hot_pic 下的热门下载，迁移到外置盘后，本地 viewer_data 里仍残留
+// 这些图片的元数据，但目标盘 viewer_data 是独立维护的，需要把本地的增量同步过去。
+// 后端用 post_url 做主 key 去重，重写合并项的 local_path 到目标盘路径，幂等可重复执行。
+//
+// Electron 的 window.prompt / window.confirm 在 renderer 里是空实现（点完没反应），
+// 真正的选择 / 预览 / 确认全部在 MergeViewerDataModal.vue 里做。这里只负责：
+// 1) 跑前的前置条件检查  2) 把当前 date / libraryRoots 喂给 modal
+// 3) 合并成功（modal emit 'success'）后 toast + 必要时 reload 图库
+const mergeViewerDataModal = ref({
+  open: false,
+  date: '',
+  roots: []
+});
+
+function mergeViewerData() {
   const date = gallery.value.selectedDate;
-  if (!date || loadingGallery.value) return;
+  if (!date) {
+    showToast('请先选中一个日期', 'warn');
+    return;
+  }
+  if (task.value.isRunning || task.value.isStopping) {
+    showToast('已有爬虫任务在跑，请等待完成', 'warn');
+    return;
+  }
+  const roots = gallery.value.libraryRoots || [];
+  if (roots.length < 2) {
+    showToast('库根目录少于 2 个（默认 hot_pic + 至少一个外置盘），无法合并', 'warn');
+    return;
+  }
+  mergeViewerDataModal.value = {
+    open: true,
+    date,
+    roots
+  };
+}
+
+function closeMergeViewerDataModal() {
+  if (mergeViewerDataModal.value.open) {
+    mergeViewerDataModal.value.open = false;
+  }
+}
+
+async function onMergeViewerDataSuccess({ result, source }) {
+  showToast(
+    `合并完成：新增 ${result.merged_count} 条，已写入 ${result.target_path}`,
+    'success'
+  );
+  // 合并源是当前 gallery 对应的目录时，刷新图库让新数据可见
+  const firstLib = gallery.value.images[0]?.libraryId;
+  if (source.isDefault || firstLib === source.id) {
+    await reloadCurrentGallery();
+  }
+}
+
+async function reloadCurrentGallery() {
+  // loadGallery 用 `thumbUrl: old?.thumbUrl || ''` 保留旧缩略图，hydrateThumbs 又有
+  // `if (item.thumbUrl) return;` 守护 —— 对日期切换避免"视频/gif 缩略图闪一下"是好事，
+  // 但 zip→gif 转换后会卡在旧 zip 缩略图上。reload 路径提前把 zip 项目的 thumbUrl
+  // 清空：loadGallery 保留空值，hydrateThumbs 重新走 zip 分支的 file.exists 检查。
+  const date = gallery.value.selectedDate;
+  const isZipItem = (it) => (it?.filename || '').toLowerCase().endsWith('.zip');
+  (gallery.value.images || []).filter(isZipItem).forEach(it => {
+    it.thumbUrl = '';
+    it.loaded = false;
+  });
   const previousCount = gallery.value.images.length;
   await loadGallery(date, false, true);
   const addedCount = Math.max(0, gallery.value.images.length - previousCount);
@@ -1238,75 +1554,6 @@ function hasCaption(item) {
   return !!item.filename && captionedSet.value.has(`name:${item.filename}`);
 }
 
-function failureReportSignature(report) {
-  const kind = report.kind || 'pages';
-  const items = (report.list || [])
-    .map(item => `${item.folder || ''}:${kind === 'ids' ? (item.id || '') : (Number(item.page) || 0)}`)
-    .sort()
-    .join('|');
-  return [kind, report.jobId || '', report.mode || '', report.tagSource || '', report.tagQuery || '', items].join('::');
-}
-
-function showNextFailureReport() {
-  const next = queuedFailureReports.value.shift();
-  if (next) failedPages.value = { ...next, retrying: false };
-}
-
-function enqueueFailureReport(report, currentQueueItem) {
-  report.signature = failureReportSignature(report);
-  if (!report.signature || dismissedFailureSignatures.has(report.signature)) return;
-  if (currentQueueItem) {
-    const reports = currentQueueItem.failureReports || [];
-    if (!reports.some(item => item.signature === report.signature)) reports.push(report);
-    currentQueueItem.failureReports = reports;
-  }
-  if (failedPages.value.signature === report.signature) {
-    failedPages.value = { ...failedPages.value, ...report, retrying: failedPages.value.retrying };
-    return;
-  }
-  if (queuedFailureReports.value.some(item => item.signature === report.signature)) return;
-  if (failedPages.value.list.length) queuedFailureReports.value.push(report);
-  else failedPages.value = report;
-}
-
-function captureFailureReport(status) {
-  if (status.is_running || status.is_stopping) return;
-  const currentQueueItem = queueRunning.value && queueIndex.value >= 0
-    ? taskQueue.value[queueIndex.value]
-    : null;
-  const commonMeta = {
-    jobId: status.job_id || '',
-    mode: status.mode || '',
-    tagQuery: status.tag_query || '',
-    tagSource: status.tag_source || 'danbooru',
-    retrying: false,
-    signature: '',
-    sourceQueueItemId: currentQueueItem?.id ?? null,
-  };
-
-  // 页级失败（页面列表抓取失败）：按 folder 分组，重试整页
-  if (Array.isArray(status.failed_pages) && status.failed_pages.length) {
-    const byFolder = new Map();
-    for (const item of status.failed_pages) {
-      const folder = item?.folder || '';
-      if (!byFolder.has(folder)) byFolder.set(folder, []);
-      byFolder.get(folder).push({ ...item });
-    }
-    for (const list of byFolder.values()) {
-      enqueueFailureReport({ ...commonMeta, kind: 'pages', list }, currentQueueItem);
-    }
-  }
-
-  // 图级失败（图片下载失败）：后端已按 folder 分组 [{folder, ids:[...]}]，重试对应的 id
-  if (Array.isArray(status.failed_ids) && status.failed_ids.length) {
-    for (const group of status.failed_ids) {
-      const folder = group?.folder || '';
-      const list = (group?.ids || []).map(id => ({ folder, id: String(id) }));
-      if (list.length) enqueueFailureReport({ ...commonMeta, kind: 'ids', list }, currentQueueItem);
-    }
-  }
-}
-
 let statusSyncInFlight = null;
 async function syncStatus() {
   if (statusSyncInFlight) return statusSyncInFlight;
@@ -1327,9 +1574,34 @@ async function syncStatusOnce() {
     task.value.isStopping = !!status.is_stopping;
     task.value.isPaused = !!status.is_paused;
     task.value.jobId = status.job_id || '';
+    task.value.mode = status.mode || '';
     task.value.outcome = status.outcome || (status.is_running ? 'running' : 'idle');
     task.value.errorMessage = status.error_message || '';
     task.value.backendError = status.backendError || '';
+
+    // 进度条数据：后端每帧回吐 {total, success, fail}；JobRegistry.primary() 保证新 job 启动时
+    // 自动切到新 job，这里不用 prevJobId 兜底
+    if (status.progress) {
+      task.value.progress = {
+        total: status.progress.total || 0,
+        success: status.progress.success || 0,
+        fail: status.progress.fail || 0,
+      };
+    }
+    if (status.page_progress) {
+      task.value.pageProgress = {
+        current: status.page_progress.current || 0,
+        total: status.page_progress.total || 0,
+        done: status.page_progress.done || 0,
+      };
+    }
+
+    // 实时失败计数：/api/status 每帧透出 failed_pages / failed_ids，运行中也累加。
+    // 任务结束（is_running=false）后保留最后一次值，让用户有时间看「最后 N 页失败」再启动新任务。
+    task.value.runningFailedPages = Array.isArray(status.failed_pages) ? status.failed_pages.length : 0;
+    task.value.runningFailedIds = Array.isArray(status.failed_ids)
+      ? status.failed_ids.reduce((sum, g) => sum + ((g.ids || []).length || 0), 0)
+      : 0;
 
     mergeBackendLogs(status.backendLogs);
     (status.new_logs || []).forEach(appendLog);
@@ -1339,9 +1611,20 @@ async function syncStatusOnce() {
       await refreshGalleryIndex(gallery.value.selectedDate);
     }
 
-    // 失败页属于已经完成的具体任务，不能被下一个队列项的空状态覆盖。
-    // 同一份报告关闭后也不能被后端 30 秒保留窗口反复弹回。
-    captureFailureReport(status);
+    // 失败页变化时弹出简洁的"需手动重试"提示（用户 × 关闭后同 signature 不再弹）。
+    // 不再用 failedPages 横幅 + 重试队列项 —— 任务继续走 / 暂停走原暂停按钮，
+    // 想重试就重新入队（带正确的 mode / pages / tag_query / filter_tags）。
+    if (Array.isArray(status.failed_pages) && status.failed_pages.length) {
+      const byFolder = new Map();
+      for (const item of status.failed_pages) {
+        const folder = item?.folder || '';
+        if (!byFolder.has(folder)) byFolder.set(folder, []);
+        byFolder.get(folder).push(item);
+      }
+      for (const [folder, list] of byFolder.entries()) {
+        showRetryPagesHint({ folder, pages: list });
+      }
+    }
 
     if (status.new_images?.length) {
       // 后端返回的 new_images 是模块全局 daily_viewer_data 的增量切片 —— tag 下载期间
@@ -1370,6 +1653,15 @@ async function syncStatusOnce() {
           return true;
         });
 
+        // 任务运行中、且单批新图 >= 20 张时，自动跳到第 1 页让用户立刻看到新下载的图。
+        // 旧逻辑只 unshift + hydrate 当前页：若用户在第 3、5 页就完全看不到顶上新增的图，
+        // 必须手动点回第 1 页。20 张阈值是用户偏好的「每下载 20 张就看到」颗粒度；
+        // 小批量（< 20）继续走 in-place，不打断用户浏览；任务完成/暂停时也不跳（让用户
+        // 自己决定是否切到第 1 页）。
+        if (task.value.isRunning && appended.length >= 20) {
+          gallery.value.page = 1;
+        }
+
         await hydrateThumbs(pagedLocalImages.value);
       }
     }
@@ -1378,7 +1670,25 @@ async function syncStatusOnce() {
       if (status.outcome === 'error' || status.error_message) {
         showToast("抓取任务异常停止！", "error");
       } else if (status.outcome === 'stopped') {
-        showToast("抓取任务已停止", "info");
+        // 区分"主动停止时有 ids_data 落盘"vs"主动停止但没收集到任何 ID"——
+        // 前者后端 finalize_on_stop 会把 pending_ids 写到 ids_data.json，count > 0 时
+        // 显式告诉用户「已增量保存 N 个 ID 到 2026-08-22/ids_data.json」；后者保持旧文案。
+        // 适用于 collect_ids / popular_collect_ids / popular_range_collect_ids / popular_recover
+        // 以及 rank/popular/tags 仍处于 collect 阶段时被停止；download_ids 模式 pending_ids
+        // 还有未下的 ID 时也会命中（count > 0）。
+        const savedCount = Number(status.last_saved_ids_count || 0);
+        if (savedCount > 0) {
+          const folderLabel = status.target_folder || targetFolder || '当前目录';
+          const displayPath = `${folderLabel}/ids_data.json`;
+          const fullPath = status.last_ids_data_path || displayPath;
+          showToast(
+            `已增量保存 ${savedCount} 个 ID 到 ${displayPath}`,
+            'info'
+          );
+          appendLog(`[stop] 已保存 ${savedCount} 个 ID → ${fullPath}`);
+        } else {
+          showToast("抓取任务已停止", "info");
+        }
       } else if (status.outcome === 'completed_with_failures') {
         showToast("任务完成，但有页面需要重试", "warning");
       } else {
@@ -1388,9 +1698,12 @@ async function syncStatusOnce() {
       // B 的盘上数据没变，reload 只会白白跳回第 1 页 + 重排，还会打断 B 正在进行的刷新。
       // 复用上面 new_images 同款 target_folder 门控；preserveView=true 让同日期 reload
       // 也保持当前页与排序快照（新图落末尾，等用户主动「重新排序」）。
+      // 同日期下走 reloadCurrentGallery（= 右侧「↻ 刷新图库」按钮），行为完全一致：
+      // 清 zip 缩略图、保留当前页、追加「已刷新 ... 新增 N 张」toast。tag / popular / 按ID下载
+      // 这三种 mode 的 target_date 都联动右侧画廊日期，命中这条分支即可。
       const finishedFolder = targetFolder;
       if (finishedFolder && finishedFolder === gallery.value.selectedDate) {
-        await loadGallery(gallery.value.selectedDate, false, true);
+        await reloadCurrentGallery();
       } else {
         await refreshGalleryIndex(gallery.value.selectedDate);
       }
@@ -1411,37 +1724,75 @@ async function ensureService() {
   }
 }
 
+// 根据当前 form + 子操作 算出实际传给后端的 mode
+function resolveActualMode() {
+  if (form.value.mode === 'rank') {
+    if (rankAction.value === 'collect_only') return 'collect_ids';
+    // rank 不再有 'download_by_ids'：按用户反馈"按ID下载"是针对日期 folder 的，
+    // 已迁到 popularAction 下。这里不兼容旧 rank+download_by_ids 状态。
+    return 'rank';
+  }
+  if (form.value.mode === 'popular') {
+    // 日期热门 · 子操作翻译：单日/范围 + 4 档子操作 → 5 个后端 mode
+    // （日期范围下不开放「补全/补齐」和「按ID下载」：前者后端 popular_recover 不支持跨日，
+    // 后者按 ID 下载语义上就是针对具体日期 folder，范围下无意义；UI 已隐藏 + watch 自动重置）
+    if (form.value.dateRange) {
+      if (popularAction.value === 'collect_only') return 'popular_range_collect_ids';
+      return 'popular_range';
+    }
+    if (popularAction.value === 'collect_only') return 'popular_collect_ids';
+    if (popularAction.value === 'recover') return 'popular_recover';
+    if (popularAction.value === 'download_by_ids') return 'download_ids';
+    return 'popular';
+  }
+  return form.value.mode;
+}
+
 async function startTask() {
   if (queueRunning.value) {
     showToast('顺序队列运行中，请先停止队列', 'info');
     return;
   }
+  // 新任务开始：清掉上一轮遗留的「需手动重试」提示和 dismiss 记录，
+  // 避免把旧 job 的失败页带过来误导。新 job 跑出来的失败页会重新弹。
+  retryPagesHint.value = { show: false, signature: '', pages: [], text: '' };
+  dismissedHintSignatures.clear();
   try {
+    // resolveActualMode() 现在已统一处理 popular / popular_range / popular_*
+    // 翻译，无需再在 startTask 内额外覆盖。
+    const actualMode = resolveActualMode();
     const payload = {
       start_page: Number(form.value.startPage) || 1,
       end_page: Number(form.value.endPage) || 1,
       tags: form.value.tags || '',
-      mode: form.value.mode || 'rank',
+      mode: actualMode,
       target_date: form.value.targetDate || '',
       start_date: form.value.startDate || '',
       end_date: form.value.endDate || '',
       tag_query: form.value.tagQuery || '',
-      tag_source: form.value.tagSource || 'danbooru'
+      tag_source: form.value.tagSource || 'danbooru',
+      download_concurrency: downloadConcurrency.value
     };
     if (payload.mode === 'download_ids') {
       const ids = parsePastedIds(form.value.idsText);
       if (ids.length) payload.ids = ids;
+      // popular·按ID下载 专用：透传复选框状态；其他 download_ids 入口不传，走后端默认 True
+      if (isDownloadByIdsMode.value) {
+        payload.skip_logged = !!form.value.skipLogged;
+      }
     } else if (payload.mode === 'tags') {
       if (!payload.tag_query.trim()) {
         showToast('请填写 tag 查询串（例如：hatsune_miku rating:safe）', 'error');
         return;
       }
-      pushRecentPage(payload.mode, 'start', payload.start_page);
-      pushRecentPage(payload.mode, 'end', payload.end_page);
+      pushRecentPage('tags', 'start', payload.start_page);
+      pushRecentPage('tags', 'end', payload.end_page);
     } else {
-      // 记录这次实际使用的起始页/结束页，方便下次一键填回
-      pushRecentPage(payload.mode, 'start', payload.start_page);
-      pushRecentPage(payload.mode, 'end', payload.end_page);
+      // 记录这次实际使用的起始页/结束页，方便下次一键填回。
+      // rank/collect_ids/download_ids 三个操作共用同一组页码习惯，记到 'rank' 上避免污染。
+      const habitMode = form.value.mode === 'rank' ? 'rank' : (form.value.mode === 'popular' ? 'popular' : 'rank');
+      pushRecentPage(habitMode, 'start', payload.start_page);
+      pushRecentPage(habitMode, 'end', payload.end_page);
     }
     const result = await window.desktopAPI.crawler.start(payload);
     if (result?.ok === false) {
@@ -1456,109 +1807,6 @@ async function startTask() {
     appendLog(`启动失败: ${error.message}`);
   }
 }
-
-// 一键重试失败项：区分「页级失败」和「图级失败」。
-// - kind='pages'：页面列表抓取失败，用对应 mode + pages 定向重跑整页。
-// - kind='ids'：图片下载失败，用 download_ids 模式对该 folder 只重跑这些 id
-//   （这些 id 仍留在该 folder 的 ids_data.json 里，成功后后端会自动移除）。
-// 因后端 MAX_CONCURRENT=1，多组时先跑第一组，剩余组在该 job 结束后横幅会再次出现。
-async function retryFailedPages() {
-  if (failedPages.value.retrying || task.value.isRunning || task.value.isStopping) {
-    showToast('请等待当前任务结束后再重试', 'info');
-    return;
-  }
-  const list = failedPages.value.list || [];
-  if (!list.length) return;
-  const retrySignature = failedPages.value.signature;
-  const kind = failedPages.value.kind || 'pages';
-
-  let payload;
-  let retryDesc;
-  if (kind === 'ids') {
-    // 按 folder 分组（用户场景单 folder=单组），取第一组
-    const byFolder = new Map();
-    for (const it of list) {
-      const folder = it.folder || '';
-      if (!byFolder.has(folder)) byFolder.set(folder, []);
-      byFolder.get(folder).push(String(it.id));
-    }
-    const [folder, ids] = byFolder.entries().next().value;
-    const uniqIds = [...new Set(ids)];
-    payload = {
-      start_page: 1,
-      end_page: 1,
-      tags: form.value.tags || '',
-      mode: 'download_ids',
-      target_date: folder,
-      ids: uniqIds,
-    };
-    retryDesc = `${uniqIds.length} 张图片`;
-  } else {
-    // 页级失败：按 folder 分组
-    const byFolder = new Map();
-    for (const it of list) {
-      const folder = it.folder || '';
-      if (!byFolder.has(folder)) byFolder.set(folder, []);
-      byFolder.get(folder).push(Number(it.page));
-    }
-    const [folder, pages] = byFolder.entries().next().value;
-    const uniqPages = [...new Set(pages)].sort((a, b) => a - b);
-    const mode = failedPages.value.mode || 'popular';
-
-    payload = {
-      start_page: Math.min(...uniqPages),
-      end_page: Math.max(...uniqPages),
-      tags: form.value.tags || '',
-      mode,
-      pages: uniqPages,
-    };
-    // tag 文件夹以 "tag_" 开头；日期文件夹是 YYYY-MM-DD
-    const isTagFolder = typeof folder === 'string' && folder.startsWith('tag_');
-    if (mode === 'tags' || isTagFolder) {
-      payload.mode = 'tags';
-      payload.tag_query = failedPages.value.tagQuery || '';
-      payload.tag_source = failedPages.value.tagSource || form.value.tagSource || 'danbooru';
-      if (!payload.tag_query.trim()) {
-        showToast('缺少 tag 查询串，无法重试该 tag 任务', 'error');
-        return;
-      }
-    } else if (mode === 'popular' || mode === 'popular_range') {
-      payload.mode = 'popular';
-      payload.target_date = folder;
-    } // rank: 无需 folder
-    retryDesc = `${uniqPages.length} 页：${uniqPages.join(', ')}`;
-  }
-
-  failedPages.value.retrying = true;
-  try {
-    const result = await window.desktopAPI.crawler.start(payload);
-    if (result?.ok === false) {
-      appendLog(`重试失败: ${result.msg || '启动失败'}`);
-      showToast(result.msg || '重试发起失败', 'error');
-      return;
-    }
-    appendLog(result.msg || `已发起重试 ${retryDesc}`);
-    showToast(`正在重试 ${retryDesc}`, 'info');
-    // 移除的是本次已处理的报告；其他队列项的失败报告继续排队，不会被刷新掉。
-    if (failedPages.value.signature === retrySignature) {
-      failedPages.value = { list: [], kind: 'pages', mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false, signature: '', sourceQueueItemId: null };
-      showNextFailureReport();
-    }
-    await syncStatus();
-  } catch (error) {
-    appendLog(`重试失败: ${error.message}`);
-    showToast('重试发起失败: ' + error.message, 'error');
-  } finally {
-    if (failedPages.value.signature === retrySignature) failedPages.value.retrying = false;
-  }
-}
-
-function dismissFailedPages() {
-  if (failedPages.value.signature) dismissedFailureSignatures.add(failedPages.value.signature);
-  failedPages.value = { list: [], kind: 'pages', mode: '', tagQuery: '', tagSource: 'danbooru', retrying: false, signature: '', sourceQueueItemId: null };
-  showNextFailureReport();
-}
-
 async function pauseTask() {
   try {
     const result = await window.desktopAPI.crawler.pause();
@@ -1600,13 +1848,6 @@ const queueAbort = ref(false);      // 停止队列的中断旗标
 const queueSkipItemId = ref(null);  // 仅跳过当前项；与停止整个队列严格分开
 const queueIndex = ref(-1);         // 当前正在跑的项下标（-1 = 没在跑）
 const justAddedId = ref(null);      // 刚加入队列的项 id：驱动一次入场高亮脉冲
-// 多任务队列面板折叠态：默认折叠省左栏空间，记住用户偏好
-const queuePanelOpen = ref(habits.queuePanelOpen ?? false);
-function toggleQueuePanel() {
-  queuePanelOpen.value = !queuePanelOpen.value;
-  habits.queuePanelOpen = queuePanelOpen.value;
-  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
-}
 const pendingQueueCount = computed(() =>
   taskQueue.value.filter(item => item.status === 'pending').length
 );
@@ -1615,6 +1856,19 @@ const MODE_NAMES = {
   rank: '排行榜', popular: '日期热门', popular_range: '日期范围',
   tags: '标签下载', collect_ids: '仅收集ID', download_ids: '按ID下载',
 };
+// 「排行榜」模式下的子操作：决定实际传给后端的 mode
+// （已不包含 download_by_ids：该动作迁到 popularAction 下）
+const RANK_ACTION_LABELS = {
+  download: '下载', collect_only: '仅收集ID'
+};
+// 「日期热门」模式下的子操作：四档（下载 / 仅收集ID / 补全/补齐 / 按ID下载），
+// popularAction 与 rankAction 互不干扰（不同 mode 各自管自己的子操作状态）。
+// 「补全/补齐」和「按ID下载」仅在单日（!dateRange）时可用：
+// - recover：日期范围下隐藏（与后端 popular_recover 不支持跨日一致）
+// - download_by_ids：按 ID 下载语义上是针对具体日期 folder 的，范围下无意义
+const POPULAR_ACTION_LABELS = {
+  download: '下载', collect_only: '仅收集ID', recover: '补全/补齐', download_by_ids: '按ID下载'
+};
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -1622,8 +1876,29 @@ function queueItemLabel(it) {
   const name = MODE_NAMES[it.mode] || it.mode;
   if (it.mode === 'tags') return `${name}[${it.tagSource === 'gelbooru' ? 'Gelbooru' : 'Danbooru'}]「${it.tagQuery || ''}」 ${it.startPage}-${it.endPage}页`;
   if (it.mode === 'download_ids') return `${name} ${dateTokenLabel(it.targetDate)} (${parsePastedIds(it.idsText || '').length}个ID)`;
-  if (it.mode === 'popular') return `${name} ${dateTokenLabel(it.targetDate)} ${it.startPage}-${it.endPage}页`;
-  if (it.mode === 'popular_range') return `${name} ${dateTokenLabel(it.startDate)}~${dateTokenLabel(it.endDate)}`;
+  if (it.mode === 'collect_ids') return `${name} ${it.startPage}-${it.endPage}页`;
+  if (it.mode === 'popular') {
+    // 队列里始终保留 mode='popular'，子操作通过 popularAction 字段区分。
+    // buildQueuePayload 在 runQueue 阶段才翻译成后端 mode。
+    const sub = POPULAR_ACTION_LABELS[it.popularAction] || '';
+    const subMark = (sub && it.popularAction !== 'download') ? `·${sub}` : '';
+    // 按ID下载子操作没有页码概念：直接从 idsText 解析 ID 数 + 目标日期展示
+    if (!it.dateRange && it.popularAction === 'download_by_ids') {
+      const idsCount = parsePastedIds(it.idsText || '').length;
+      const datePart = it.targetDate ? ` · ${dateTokenLabel(it.targetDate)}` : '';
+      return `${name}·${sub} (${idsCount}个ID${datePart})`;
+    }
+    if (it.dateRange) {
+      return `${name}${subMark} ${dateTokenLabel(it.startDate)}~${dateTokenLabel(it.endDate)} ${it.startPage}-${it.endPage}页`;
+    }
+    return `${name}${subMark} ${dateTokenLabel(it.targetDate)} ${it.startPage}-${it.endPage}页`;
+  }
+  if (it.mode === 'popular_range') return `${name} ${dateTokenLabel(it.startDate)}~${dateTokenLabel(it.endDate)} ${it.startPage}-${it.endPage}页`;
+  if (it.mode === 'rank') {
+    // rank 不再有 'download_by_ids' 子项，落到这里只有 download / collect_only 两档
+    const sub = RANK_ACTION_LABELS[it.rankAction] || '';
+    return sub && it.rankAction !== 'download' ? `${name}·${sub} ${it.startPage}-${it.endPage}页` : `${name} ${it.startPage}-${it.endPage}页`;
+  }
   return `${name} ${it.startPage}-${it.endPage}页`;
 }
 
@@ -1642,21 +1917,51 @@ function snapshotFormToItem() {
     tagQuery: f.tagQuery || '',
     tagSource: f.tagSource || 'danbooru',
     idsText: f.idsText || '',
+    rankAction: rankAction.value,
+    // 透传 skipLogged 供入队后跑时沿用：用户勾选/取消勾选的状态不能因为入队就丢
+    skipLogged: f.skipLogged !== false,
+    popularAction: popularAction.value,
+    dateRange: !!f.dateRange,
     status: 'pending',
     error: '',
     failureReports: [],
   };
 }
 
-// 统一的入队反馈：推入 taskQueue 末尾 + 自动展开面板 + 短暂高亮脉冲 + toast。
-// 用于 addCurrentToQueue（表单快照）和 downloadBrowseSelected（browse 弹窗勾选）。
-function enqueueItem(item, successMessage) {
+// 统一的入队反馈：插入队列 + 短暂高亮脉冲 + toast。
+// 用于 addCurrentToQueue（表单快照）、downloadBrowseSelected（browse 弹窗勾选）。
+// insertIndex 不传时走 push 末尾；传了合法位置（0..length）则用 splice 插入到指定下标。
+function enqueueItem(item, successMessage, insertIndex) {
   item.label = item.label || queueItemLabel(item);
-  taskQueue.value.push(item);
-  queuePanelOpen.value = true;
+  if (typeof insertIndex === 'number' && insertIndex >= 0 && insertIndex <= taskQueue.value.length) {
+    taskQueue.value.splice(insertIndex, 0, item);
+  } else {
+    taskQueue.value.push(item);
+  }
   justAddedId.value = item.id;
   setTimeout(() => { if (justAddedId.value === item.id) justAddedId.value = null; }, 1100);
   showToast(successMessage || `已加入队列：${item.label}`, 'success');
+}
+
+// 读取某日期 folder 的 ids_data.json（「仅收集ID」模式的产物），返回数字 ID 列表。
+// 抽出来给两处复用：
+//   1) addCurrentToQueue：idsText 为空时自动消费 folder 的待下载 ID
+//   2) watch(gallery.selectedDate) 在 popular+按ID下载 模式下：切日期时主动重新 fetch，
+//      写回 idsText，省去"清空 + 入队"两次操作（用户频繁补日期场景）
+// 回调拿到 (fetchedDate, payload/err) 以便调用方做"过期丢弃"防竞态
+// —— 用户在 fetch 期间又切了日期时，丢弃当前结果让新日期的 watch 接管。
+function fetchCollectedIdsForDate(date, { onSuccess, onEmpty, onError } = {}) {
+  const d = (date || '').trim();
+  fetch(`http://127.0.0.1:8000/api/collected_ids?date=${encodeURIComponent(d)}`)
+    .then(r => r.json())
+    .then(payload => {
+      if (!payload?.ok || !payload.ids?.length) {
+        onEmpty && onEmpty(d, payload);
+        return;
+      }
+      onSuccess && onSuccess(d, payload);
+    })
+    .catch(err => onError && onError(d, err));
 }
 
 function addCurrentToQueue() {
@@ -1666,24 +1971,20 @@ function addCurrentToQueue() {
     showToast('标签下载需要先填 tag 查询串', 'error');
     return;
   }
-  if (f.mode === 'download_ids') {
-    // 空 idsText：先看 folder 自己的 ids_data.json 是否有待下载 ID
-    // （「仅收集ID」/上次 download_ids 未消费完的产物），有就灌回 textarea，
-    // 让用户看到具体多少个、也能编辑后再入队；没有再报错。
+  // 「按ID下载」子操作：空 idsText 时先看 folder 自己的 ids_data.json 是否有待下载 ID
+  // 1) 日期热门（popular·单日）—— 已从 rank 迁到这里
+  if (isDownloadByIdsMode.value) {
     if (!parsePastedIds(f.idsText || '').length) {
       const date = (f.targetDate || '').trim();
-      fetch(`http://127.0.0.1:8000/api/collected_ids?date=${encodeURIComponent(date)}`)
-        .then(r => r.json())
-        .then(payload => {
-          if (!payload?.ok || !payload.ids?.length) {
-            showToast('folder 里没有待下载 ID，请先「仅收集ID」或在文本框粘贴', 'error');
-            return;
-          }
+      fetchCollectedIdsForDate(date, {
+        onSuccess: (fetchedDate, payload) => {
           f.idsText = payload.ids.join('\n');
           const item = snapshotFormToItem();
-          enqueueItem(item, `已加入队列：消费 folder 的 ${payload.ids.length} 个待下载 ID`);
-        })
-        .catch(err => showToast(`读取 folder ID 失败：${err.message}`, 'error'));
+          enqueueItem(item, `已加入队列：消费 ${fetchedDate} folder 的 ${payload.ids.length} 个待下载 ID`);
+        },
+        onEmpty: () => showToast('folder 里没有待下载 ID，请先「仅收集ID」或在文本框粘贴', 'error'),
+        onError: (err) => showToast(`读取 folder ID 失败：${err.message}`, 'error'),
+      });
       return;
     }
   }
@@ -1792,24 +2093,48 @@ function clearQueue() {
 }
 
 function buildQueuePayload(it) {
+  // rank / popular 模式根据子操作翻译成后端实际 mode
+  let actualMode = it.mode || 'rank';
+  if (actualMode === 'rank') {
+    if (it.rankAction === 'collect_only') actualMode = 'collect_ids';
+    // rank 不再有 'download_by_ids' 子项：按 ID 下载已迁到 popularAction 下
+  }
+  if (actualMode === 'popular') {
+    if (it.dateRange) {
+      if (it.popularAction === 'collect_only') actualMode = 'popular_range_collect_ids';
+      else actualMode = 'popular_range';
+    } else {
+      if (it.popularAction === 'collect_only') actualMode = 'popular_collect_ids';
+      else if (it.popularAction === 'recover') actualMode = 'popular_recover';
+      else if (it.popularAction === 'download_by_ids') actualMode = 'download_ids';
+      // else 'popular' (两阶段)
+    }
+  }
   const payload = {
     start_page: Number(it.startPage) || 1,
     end_page: Number(it.endPage) || 1,
     tags: it.tags || '',
-    mode: it.mode || 'rank',
+    mode: actualMode,
     target_date: resolveDateToken(it.targetDate || ''),
     start_date: resolveDateToken(it.startDate || ''),
     end_date: resolveDateToken(it.endDate || ''),
     tag_query: it.tagQuery || '',
     tag_source: it.tagSource || 'danbooru',
+    download_concurrency: downloadConcurrency.value
   };
   if (payload.mode === 'download_ids') {
     const ids = parsePastedIds(it.idsText || '');
     if (ids.length) payload.ids = ids;
+    // popular·按ID下载 子项：用入队时的 skipLogged 快照；其他 download_ids 入口走默认 true
+    if (it.mode === 'popular' && it.popularAction === 'download_by_ids') {
+      payload.skip_logged = it.skipLogged !== false;
+    }
   }
-  // popular / popular_range 缺日期时兜底昨天（snapshot 时通常已填，这里双保险）
-  if (payload.mode === 'popular' && !payload.target_date) payload.target_date = yesterdayString();
-  if (payload.mode === 'popular_range') {
+  // popular* / popular_range* 缺日期时兜底昨天（snapshot 时通常已填，这里双保险）
+  if (payload.mode === 'popular' || payload.mode === 'popular_collect_ids' || payload.mode === 'popular_recover') {
+    if (!payload.target_date) payload.target_date = yesterdayString();
+  }
+  if (payload.mode.startsWith('popular_range')) {
     if (!payload.start_date) payload.start_date = yesterdayString();
     if (!payload.end_date) payload.end_date = yesterdayString();
   }
@@ -1850,7 +2175,30 @@ async function runQueue() {
       item.status = 'running';
       try {
         const payload = buildQueuePayload(item);
-        const result = await window.desktopAPI.crawler.start(payload);
+        let result = await window.desktopAPI.crawler.start(payload);
+        // popular_recover 专用：盘没接时后端返回 DRIVE_UNPLUGGED，弹确认框询问是否
+        // 临时改写到本地 HOT_PIC_DIR。确认后重发 force_local=true，下载到本地，
+        // 完成后由用户手动把新增图片 move 到原盘做增量更新。
+        if (!result?.ok && result?.code === 'DRIVE_UNPLUGGED') {
+          const localPath = result.local_path || '(本地默认目录)';
+          const ok = confirm(
+            `${result.msg}\n\n` +
+            `点击「确定」将图片临时下载到本地：\n${localPath}\n\n` +
+            `完成后请手动把 ${localPath} 下的新增文件 move 到原盘对应目录。\n\n` +
+            `点击「取消」跳过本项。`
+          );
+          if (ok) {
+            appendLog(`[队列 ${i + 1}/${n}] 用户确认 force_local，改写本地 ${localPath}`);
+            const retryPayload = { ...payload, force_local: true };
+            result = await window.desktopAPI.crawler.start(retryPayload);
+          } else {
+            appendLog(`[队列 ${i + 1}/${n}] 用户取消 force_local，跳过本项`);
+            item.status = 'skipped';
+            item.error = '用户取消（盘没接）';
+            skippedCount += 1;
+            continue;
+          }
+        }
         if (!result?.ok) {
           item.status = 'error';
           item.error = result?.msg || '启动失败';
@@ -1937,6 +2285,30 @@ function queueStatusIcon(it) {
   return { pending: '○', running: '⏳', done: '✓', warning: '↻', skipped: '⏭', error: '⚠' }[it.status] || '○';
 }
 
+// 复制队列项的 error 文本，方便贴到聊天里排查
+async function copyQueueError(it) {
+  const text = (it && it.error) || '';
+  if (!text) return;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      // 兜底：旧 Electron / 不支持 clipboard API 时走 document.execCommand
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); } catch { /* noop */ }
+      document.body.removeChild(ta);
+    }
+    showToast('已复制错误信息', 'success');
+  } catch (e) {
+    showToast(`复制失败：${e?.message || e}`, 'error');
+  }
+}
+
 async function openLocal(item) {
   await window.desktopAPI.gallery.openLocalFile(item.localPath);
 }
@@ -1960,8 +2332,13 @@ async function convertGif(item) {
     });
     const result = await res.json();
     if (result.ok) {
-      showToast("转换成功，正在打开...", "success");
-      await window.desktopAPI.gallery.openLocalFile(result.gif_path);
+      // 不再自动打开 GIF：批量转 / 单张转 时用户通常在继续看别的卡片或勾选下一张。
+      // 要预览就在画廊点该卡片（或右键「打开」）。
+      showToast("转换成功，已生成 .gif 配套文件", "success");
+      // 刷新当前日期图库，让该 zip 卡片立刻显示 gif 缩略图/标志位
+      if (gallery.value.selectedDate) {
+        await reloadCurrentGallery();
+      }
     } else {
       showToast("转换失败: " + result.msg, "error");
     }
@@ -2208,6 +2585,17 @@ async function stopRefreshScores() {
   } catch (_) { /* noop */ }
 }
 
+// 工具栏下拉互斥：显示 / 刷新热度 / 翻译 三个下拉菜单的触发按钮都用了 @click.stop
+// （@click.stop 的初衷是：阻止冒泡到 document click 后立刻被 onDocClickFor*Menu 把自己关掉）。
+// 副作用是点其他下拉的触发按钮时，document click 不会触发，原本打开的那个下拉就关不掉，
+// 多个下拉同时展开会互相重叠，看着很乱。解决：每次「打开」某个下拉时，主动把另外两个收起来。
+// 「关闭」时不主动收其他（用户是显式收起的，别动他的状态）；外部点击关闭仍走 onDocClickFor*Menu。
+function closeOtherToolbarDropdowns(exceptKey) {
+  if (exceptKey !== 'display') displayMenu.value.open = false;
+  if (exceptKey !== 'refresh') refreshMenu.value.open = false;
+  if (exceptKey !== 'translate') translateMenu.value.open = false;
+}
+
 // 「刷新热度」下拉菜单：把原先的 3 个按钮（本页/范围/全部）合并到一个入口
 const refreshMenu = ref({ open: false });
 function toggleRefreshMenu() {
@@ -2219,7 +2607,9 @@ function toggleRefreshMenu() {
     showToast('请先选择日期', 'error');
     return;
   }
-  refreshMenu.value.open = !refreshMenu.value.open;
+  const willOpen = !refreshMenu.value.open;
+  if (willOpen) closeOtherToolbarDropdowns('refresh');
+  refreshMenu.value.open = willOpen;
 }
 function onRefreshChoice(scope) {
   refreshMenu.value.open = false;
@@ -2243,7 +2633,9 @@ function toggleTranslateMenu() {
     // 没选日期时直接走文件导入也是合理的，但翻译角色需要日期，
     // 这里先打开菜单让用户选择，菜单里翻译角色项会被 disable
   }
-  translateMenu.value.open = !translateMenu.value.open;
+  const willOpen = !translateMenu.value.open;
+  if (willOpen) closeOtherToolbarDropdowns('translate');
+  translateMenu.value.open = willOpen;
 }
 function onTranslateChoice(action) {
   translateMenu.value.open = false;
@@ -2259,12 +2651,15 @@ function onDocClickForTranslateMenu(e) {
   }
 }
 
-// 「显示 ▾」下拉菜单：把纯显示偏好（排序/格式筛选/卡片大小/缩略图分辨率/每页张数/
-// 高分/看图刷新）收进一个入口，避免工具栏一排 ~11 个控件在常规窗口宽度下参差换行。
+// 「显示 ▾」下拉菜单：把纯显示偏好（排序/格式筛选/卡片大小/缩略图分辨率/每页张数）
+// 收进一个入口，避免工具栏一排控件在常规窗口宽度下参差换行。
+// 「看图刷新热度」开关改放刷新热度下拉里（与"刷新范围"语义同源），这里不再放。
 // 这些都绑定 gallery.*，已有 habits watcher 持久化，菜单只是换个容器展示同样的 v-model。
 const displayMenu = ref({ open: false });
 function toggleDisplayMenu() {
-  displayMenu.value.open = !displayMenu.value.open;
+  const willOpen = !displayMenu.value.open;
+  if (willOpen) closeOtherToolbarDropdowns('display');
+  displayMenu.value.open = willOpen;
 }
 function onDocClickForDisplayMenu(e) {
   if (!displayMenu.value.open) return;
@@ -2397,6 +2792,8 @@ function refreshBrowsePage() {
   if (browse.value.loading) return;
   if (browse.value.source === 'collected') {
     loadCollectedPage(browse.value.page);
+  } else if (browse.value.source === 'rank') {
+    runRankSearch(browse.value.page);
   } else {
     runBrowseSearch(browse.value.page);
   }
@@ -2437,6 +2834,25 @@ function openCollectedBrowse() {
   browse.value.collectedDate = d;
   browse.value.targetDate = d;
   loadCollectedIds(d, 1);
+}
+
+// 打开「Rank 浏览」：复用同一个 browse 弹窗，source='rank'，自动拉第 1 页 order:rank。
+// 不需要 tag 查询串；类比 openCollectedBrowse 的"打开即看"行为。
+function openRankBrowse() {
+  browse.value.source = 'rank';
+  browse.value.open = true;
+  browse.value.posts = [];
+  browse.value.error = '';
+  browse.value.page = 1;
+  // 重新打开弹窗 = 全新一次浏览会话，勾选/快照一起清掉
+  browse.value.selected = new Set();
+  browse.value.selectedItems = new Map();
+  browse.value.selectAllPhase = 0;
+  browseSelectionListOpen.value = false;
+  // 显式清空 query，防止从 tag 模式切过来残留
+  browse.value.query = '';
+  if (!browse.value.targetDate) browse.value.targetDate = todayString();
+  runRankSearch(1);
 }
 
 function closeBrowse() {
@@ -2528,6 +2944,7 @@ async function runBrowseSearch(page = 1) {
     showToast('请填写 tag 查询串（例如：hatsune_miku rating:safe）', 'error');
     return;
   }
+  pushTagSearchHistory(q);
   browse.value.loading = true;
   browse.value.error = '';
   try {
@@ -2544,9 +2961,39 @@ async function runBrowseSearch(page = 1) {
     browse.value.page = data.page || page;
     browse.value.hasMore = !!data.has_more;
     // 跨页/跨搜索累积：selected / selectedItems 不会因为换页或换搜索而清空。
-    // 全选三态 phase 也保留——之前积累的勾选和「全选」按钮状态彼此独立。
+    // 全选三态 phase 由调用方在「切页 / 新搜索」时主动清零（见 browseGoPage 和模板里的
+    // run-search / load-collected handler），让按钮文案回到「全选（除已下载）」。
+    // 「刷新分数」走的是同页 re-fetch，不清 phase。
     if (!browse.value.posts.length) {
       browse.value.error = '没有结果（tag 可能无效，或该页已到末尾）';
+    }
+  } catch (e) {
+    browse.value.error = '请求失败：' + (e.message || e);
+    showToast(browse.value.error, 'error');
+  } finally {
+    browse.value.loading = false;
+  }
+}
+
+// rank 模式翻页/刷新：与 runBrowseSearch 同形，URL 走 /api/browse_rank，不需要 query
+async function runRankSearch(page = 1) {
+  browse.value.loading = true;
+  browse.value.error = '';
+  try {
+    const url = `http://127.0.0.1:8000/api/browse_rank?page=${page}&limit=${browse.value.limit}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) {
+      browse.value.posts = [];
+      browse.value.error = data.msg || '获取失败';
+      showToast(browse.value.error, 'error');
+      return;
+    }
+    browse.value.posts = data.posts || [];
+    browse.value.page = data.page || page;
+    browse.value.hasMore = !!data.has_more;
+    if (!browse.value.posts.length) {
+      browse.value.error = `没有结果（order:rank 第 ${page} 页可能已到末尾）`;
     }
   } catch (e) {
     browse.value.error = '请求失败：' + (e.message || e);
@@ -2559,10 +3006,33 @@ async function runBrowseSearch(page = 1) {
 function browseGoPage(delta) {
   const next = browse.value.page + delta;
   if (next < 1) return;
+  // 切到新的一页：当前页的全选三态作废，按钮回到「全选（除已下载）」，
+  // 避免文案误导（之前累积的 phase 反映的是上一页的循环进度）。
+  browse.value.selectAllPhase = 0;
   if (browse.value.source === 'collected') {
     loadCollectedPage(next);
+  } else if (browse.value.source === 'rank') {
+    runRankSearch(next);
   } else {
     runBrowseSearch(next);
+  }
+}
+
+// 直接跳到指定页（来自 Tag/Rank 浏览弹窗的「跳到 N 页」输入框）。
+// 与 browseGoPage 唯一区别：参数是绝对页码而不是 ±1 增量。
+// 没有上界保护 —— Danbooru 自己在超页时返回空 page 数组，hasMore=false 会自动禁用「下一页」按钮。
+function browseGoToPage(page) {
+  let n = Number(page);
+  if (!Number.isFinite(n) || n < 1) return;
+  n = Math.floor(n);
+  if (n === browse.value.page) return; // 同页不重发请求
+  browse.value.selectAllPhase = 0;
+  if (browse.value.source === 'collected') {
+    loadCollectedPage(n);
+  } else if (browse.value.source === 'rank') {
+    runRankSearch(n);
+  } else {
+    runBrowseSearch(n);
   }
 }
 
@@ -2614,9 +3084,20 @@ function browseSelectAllVisible() {
     b.selectedItems = items;
     b.selectAllPhase = 2;
   } else {
-    // phase === 2: 复原
-    b.selected = new Set();
-    b.selectedItems = new Map();
+    // phase === 2: 复原 —— 只清掉当前页的勾选，保留其它页已经选好的
+    // （selected 是跨页累加器，不能整盘清掉，否则会误伤切页前的成果）
+    const currentIds = new Set(browseFiltered.value.map(p => p.id));
+    const s = new Set();
+    const items = new Map();
+    for (const id of b.selected) {
+      if (!currentIds.has(id)) {
+        s.add(id);
+        const post = b.selectedItems.get(id);
+        if (post) items.set(id, post);
+      }
+    }
+    b.selected = s;
+    b.selectedItems = items;
     b.selectAllPhase = 0;
   }
 }
@@ -2727,7 +3208,8 @@ const browseMultiPage = ref({
 });
 
 // 拉取第 N 页的 posts（不修改 browse.value.posts，不动 selected，只读）。
-// tag 模式走 /api/browse_tags?page=N；collected 模式按 collectedIds 切片并用 id: 语法。
+// tag 模式走 /api/browse_tags?page=N；collected 模式按 collectedIds 切片并用 id: 语法；
+// rank 模式走 /api/browse_rank?page=N。
 async function fetchBrowsePagePosts(page) {
   const b = browse.value;
   const limit = b.limit;
@@ -2743,6 +3225,13 @@ async function fetchBrowsePagePosts(page) {
     // 按收集顺序排，缺失的丢掉
     const byId = new Map((data.posts || []).map(pp => [String(pp.id), pp]));
     return slice.map(id => byId.get(String(id))).filter(Boolean);
+  }
+  if (b.source === 'rank') {
+    const url = `http://127.0.0.1:8000/api/browse_rank?page=${page}&limit=${limit}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.msg || '获取预览失败');
+    return data.posts || [];
   }
   const q = (b.query || '').trim();
   if (!q) throw new Error('没有 tag 查询串');
@@ -2936,7 +3425,18 @@ async function openCharacterDictionary(rawTag = '') {
 // 复用一个 state，避免复制 dismiss / teleport 那套逻辑。
 // 旧版本直接打开字典弹窗，缺点是用户看不到 rawTag，搜索或复制原名要去翻字典。
 // 现在固定弹一个菜单，菜单上仅显示 rawTag（英文原 tag），让用户认得当前是哪个。
-const charContextMenu = ref({ open: false, x: 0, y: 0, rawTag: '', kind: 'character' });
+// isInMultiSelect / multiSelectCount 控制菜单底部多选区（复制 N 个 / 搜索 N 个），
+// 仅当右键命中一个已经在多选集合里的 tag 时才显示。
+const charContextMenu = ref({
+  open: false, x: 0, y: 0, rawTag: '', kind: 'character',
+  isInMultiSelect: false, multiSelectCount: 0,
+});
+
+// viewer 里多选 tag：跟 selection.ids: Set<string> 同款；用 raw tag 作为唯一键。
+// Danbooru 查询层不区分 artist / character，所以单一 Set 足够，
+// 视觉反馈（is-multi-selected 外环）由 isTagMultiSelected(rawArtistTag/charRaw) 现算。
+const tagMultiSelect = ref(new Set());
+const TAG_MULTISELECT_MAX_BROWSE = 2;  // tag 浏览一般只支持 2 个 tag，超出时取前 2 + 警告 toast
 
 function onCharacterContextMenu(event, item, index) {
   // 调试：先确认 handler 有没有真的跑到
@@ -2958,7 +3458,7 @@ function onCharacterContextMenu(event, item, index) {
   if (y + MENU_H + MARGIN > window.innerHeight) y = window.innerHeight - MENU_H - MARGIN;
   if (x < MARGIN) x = MARGIN;
   if (y < MARGIN) y = MARGIN;
-  charContextMenu.value = { open: true, x, y, rawTag, kind: 'character' };
+  charContextMenu.value = { open: true, x, y, rawTag, kind: 'character', isInMultiSelect: tagMultiSelect.value.has(rawTag), multiSelectCount: tagMultiSelect.value.size };
   console.debug('[char-ctx] menu opened', { x, y, rawTag, kind: 'character' });
 }
 
@@ -2984,7 +3484,7 @@ function onArtistContextMenu(event, item, index) {
   if (y + MENU_H + MARGIN > window.innerHeight) y = window.innerHeight - MENU_H - MARGIN;
   if (x < MARGIN) x = MARGIN;
   if (y < MARGIN) y = MARGIN;
-  charContextMenu.value = { open: true, x, y, rawTag, kind: 'artist' };
+  charContextMenu.value = { open: true, x, y, rawTag, kind: 'artist', isInMultiSelect: tagMultiSelect.value.has(rawTag), multiSelectCount: tagMultiSelect.value.size };
 }
 
 function closeCharContextMenu() {
@@ -3007,6 +3507,95 @@ async function charMenuCopyRawTag() {
   } catch (e) {
     showToast(`复制失败：${e.message}`, 'error');
   }
+}
+
+// ============== viewer tag 多选 + tag 浏览 ==============
+
+// 多选集合：viewer 里 Ctrl/Cmd+左键 点画师/角色 chip 加入/移除
+function toggleTagMultiSelect(rawTag) {
+  if (!rawTag) return;
+  if (tagMultiSelect.value.has(rawTag)) tagMultiSelect.value.delete(rawTag);
+  else tagMultiSelect.value.add(rawTag);
+  // 强制重新赋值 Set：Vue 3 对 Set/Map 原生支持 add/delete 响应式，但跟现有代码（selection.ids
+  // 那种模式）保持一致用 new Set 整体赋值，行为可预期且可调试。
+  tagMultiSelect.value = new Set(tagMultiSelect.value);
+}
+
+function isTagMultiSelected(rawTag) {
+  return !!rawTag && tagMultiSelect.value.has(rawTag);
+}
+
+function clearTagMultiSelect() {
+  if (tagMultiSelect.value.size === 0) return;
+  tagMultiSelect.value = new Set();
+}
+
+// 「用这个 tag 串去 browse」统一入口：复用 openBrowse() 的全套重置（source/open/targetDate/
+// selected/posts/page），再覆写 targetDate（跟当前 gallery 日期同步）+ query，最后触发首页搜索。
+// openBrowse() 内部已经把 selected/selectedItems/selectAllPhase 全部清空，跟用户切到新 query 语义一致。
+function openBrowseWithQuery(query) {
+  const q = String(query || '').trim();
+  if (!q) return;
+  openBrowse();
+  const d = gallery.value.selectedDate;
+  if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) browse.value.targetDate = d;
+  browse.value.query = q;
+  runBrowseSearch(1);
+}
+
+// viewer 里画师 / 角色 chip 的统一 click handler：
+// - 普通左键：原行为 applySearch + closeViewer（过滤当前日期画廊）
+// - Ctrl/Cmd+左键：toggleTagMultiSelect（不关闭 viewer，让用户连点多选）
+function onViewerTagClick(event, item, index, kind /* 'artist' | 'character' */) {
+  if (event.ctrlKey || event.metaKey) {
+    event.preventDefault();
+    event.stopPropagation();
+    const raw = kind === 'artist' ? rawArtistTag(item, index) : rawCharacterTag(item, index);
+    if (!raw) { showToast('该 tag 为空', 'warning'); return; }
+    toggleTagMultiSelect(raw);
+    return;
+  }
+  const token = kind === 'artist'
+    ? (item?.artistTokens?.[index] || '未知')
+    : (item?.characterTokens?.[index] || '');
+  applySearch(token);
+  closeViewer();
+}
+
+// 单 tag：「搜索 Tag」用右键的 raw tag 打开 BrowseOverlay
+function charMenuSearchTag() {
+  const tag = charContextMenu.value.rawTag;
+  closeCharContextMenu();
+  if (tag) openBrowseWithQuery(tag);
+}
+
+// 多 tag：「复制 N 个 Tag」把所有选中 raw tag 空格分隔写剪贴板
+async function charMenuCopyMultipleTags() {
+  const tags = Array.from(tagMultiSelect.value);
+  closeCharContextMenu();
+  if (!tags.length) return;
+  const text = tags.join(' ');
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast(`已复制 ${tags.length} 个 tag（空格分隔）`, 'success');
+  } catch (e) {
+    showToast(`复制失败：${e.message}`, 'error');
+  }
+}
+
+// 多 tag：「用 N 个 Tag 搜索」打开 BrowseOverlay，>2 时只取前 2 + warning toast
+function charMenuSearchMultipleTags() {
+  const tags = Array.from(tagMultiSelect.value);
+  closeCharContextMenu();
+  if (!tags.length) return;
+  let q;
+  if (tags.length > TAG_MULTISELECT_MAX_BROWSE) {
+    q = tags.slice(0, TAG_MULTISELECT_MAX_BROWSE).join(' ');
+    showToast(`已选 ${tags.length} 个 tag，tag 浏览通常只支持 ${TAG_MULTISELECT_MAX_BROWSE} 个；只取前 ${TAG_MULTISELECT_MAX_BROWSE} 个搜索`, 'warning');
+  } else {
+    q = tags.join(' ');
+  }
+  openBrowseWithQuery(q);
 }
 
 // 任意点击 / 滚动 / Esc 都关菜单；只挂一次，组件卸载自动解绑
@@ -3312,6 +3901,59 @@ function isCardFavorited(item) {
   return false;
 }
 
+// 拆分版：只判断画师 token 集合是否命中收藏（用于"仅收藏画师"/"仅非收藏画师"筛选）
+// 排除"未知"画师占位符，与 isCardFavorited / favArtistBadgeTitle 行为保持一致。
+function itemHasFavoritedArtist(item) {
+  for (const a of (item?.artistTokens || [])) {
+    if (a && a !== '未知' && favoritedArtistSet.value.has(a)) return true;
+  }
+  return false;
+}
+// 拆分版：只判断角色 token 集合是否命中收藏。
+function itemHasFavoritedCharacter(item) {
+  for (const c of (item?.characterTokens || [])) {
+    if (c && favoritedCharacterSet.value.has(c)) return true;
+  }
+  return false;
+}
+
+// 收藏画师/角色角标的悬浮提示：把命中的画师 / 角色列出来，
+// 让用户知道"为什么这张被标了 ★ 收藏"。
+function favArtistBadgeTitle(item) {
+  const parts = [];
+  for (const a of (item.artistTokens || [])) {
+    if (a && a !== '未知' && favoritedArtistSet.value.has(a)) parts.push(`画师：${a}`);
+  }
+  for (const c of (item.characterTokens || [])) {
+    if (c && favoritedCharacterSet.value.has(c)) parts.push(`角色：${c}`);
+  }
+  return parts.length ? `命中收藏的${parts.join('、')}` : '命中收藏';
+}
+
+// AI 标签：检查 meta / general / 兜底 tag_string 里是否含 ai-assisted / ai-generated。
+// Danbooru 实际把 ai-generated / ai-assisted 归到 tag_string_meta，旧条目也可能只写入
+// tag_string_general（极个别老数据），所以三个字段都查一遍。返回命中的标签名（用于 title）。
+function aiTagOf(item) {
+  const tg = item?.tags;
+  if (!tg) return null;
+  // tag_string 在 Danbooru JSON 里是 general + meta 的合集；优先用它做精确匹配。
+  const combined = (tg.tag_string || '') + ' ' + (tg.tag_string_meta || '') + ' ' + (tg.tag_string_general || '');
+  const tokens = combined.split(/\s+/).filter(Boolean);
+  if (tokens.includes('ai-generated')) return 'ai-generated';
+  if (tokens.includes('ai-assisted')) return 'ai-assisted';
+  return null;
+}
+
+// 整张卡片的 tooltip：把收藏画师/角色 + AI 标签都列出来。
+// 视觉不再靠角标传达（已改用边缘光圈），所以 title 要把"为什么发光"讲清楚。
+function cardBadgeTitle(item) {
+  const parts = [];
+  if (isCardFavorited(item)) parts.push(favArtistBadgeTitle(item));
+  const ai = aiTagOf(item);
+  if (ai) parts.push(`Danbooru 标签：${ai}`);
+  return parts.join('\n');
+}
+
 async function loadFavSnapshot() {
   try {
     const [aRes, cRes, iRes] = await Promise.all([
@@ -3585,6 +4227,7 @@ function closeViewer() {
   viewer.value.open = false;
   viewer.value.imageUrl = '';
   viewer.value.zoom = 1;
+  clearTagMultiSelect();
 }
 
 async function copyViewerImage() {
@@ -3602,7 +4245,16 @@ async function copyViewerImage() {
   if (result?.ok) {
     if (result.isGif) {
       const kb = Math.round((result.bytes || 0) / 1024);
-      showToast(`已复制完整 GIF ${result.width}×${result.height}（${kb}KB，保留多帧动画）`, 'success');
+      // animated=true: 动图进了 image/gif 通道 → 浏览器/IM 粘出仍是动图
+      // animated=false, hasFirstFrame=true: 目标 app 只读 CF_DIB，只能粘出首帧
+      // 两条都没成不会走到这里（main.cjs ok=false）
+      if (result.animated) {
+        showToast(`已复制完整 GIF ${result.width}×${result.height}（${kb}KB，保留多帧动画）`, 'success');
+      } else if (result.hasFirstFrame) {
+        showToast(`已复制 GIF 首帧 ${result.width}×${result.height}（${kb}KB，目标应用不支持 GIF 多帧）`, 'warning');
+      } else {
+        showToast(`复制失败：GIF 已写入但目标应用读取不到`, 'error');
+      }
     } else {
       showToast(`已复制图片 ${result.width}×${result.height}（上限 2000px）`, 'success');
     }
@@ -3611,38 +4263,13 @@ async function copyViewerImage() {
   }
 }
 
-function getLogType(line) {
-  if (!line) return 'log-info';
-
-  // 「成功 X / 跳过 Y / 失败 Z」这种页结概要：按真实失败数判定，
-  // Z=0 时不应该挂红 ×，否则永远是错误样式
-  const summary = line.match(/成功\s+(\d+)\s*\/\s*跳过\s+(\d+)\s*\/\s*失败\s+(\d+)/);
-  if (summary) {
-    const failed = parseInt(summary[3], 10);
-    return failed > 0 ? 'log-error' : 'log-success';
-  }
-
-  const text = line.toLowerCase();
-  if (text.includes('失败') || text.includes('错误') || text.includes('error') || text.includes('异常')) return 'log-error';
-  if (text.includes('成功') || text.includes('完成') || text.includes('finish')) return 'log-success';
-  if (text.includes('跳过') || text.includes('skip')) return 'log-warn';
-  return 'log-info';
-}
-
-function getLogIcon(line) {
-  const type = getLogType(line);
-  if (type === 'log-error') return '×';
-  if (type === 'log-success') return '✓';
-  if (type === 'log-warn') return '！';
-  return '›';
-}
-
 async function stepViewer(offset) {
   if (!viewerItems.value.length) return;
   const cur = viewerIndex.value;
   if (cur < 0) return;
   const next = Math.min(Math.max(0, cur + offset), viewerItems.value.length - 1);
   if (next === cur) return;
+  clearTagMultiSelect();
   viewer.value.key = itemKey(viewerItems.value[next]);
   await syncViewerImage();
   if (gallery.value.refreshOnView) refreshSinglePost(viewerItem.value);
@@ -3668,6 +4295,12 @@ function onViewerWheel(event) {
 }
 
 async function onKeyDown(event) {
+  // viewer 打开时，Esc 优先清多选态（不清 viewer，避免用户误按 Esc 丢失上下文）
+  if (viewer.value.open && tagMultiSelect.value.size > 0 && event.key === 'Escape') {
+    event.preventDefault();
+    clearTagMultiSelect();
+    return;
+  }
   if (viewer.value.open && event.key === 'Escape') {
     closeViewer();
     return;
@@ -3730,14 +4363,14 @@ function toggleRatingFilter(rating) {
 
 watch(() => gallery.value.filterFormat, () => { gallery.value.page = 1; });
 watch(() => gallery.value.filterRatings, () => { gallery.value.page = 1; }, { deep: true });
+// 切日期：清空 tag 多选态（新日期的 tag 跟旧日期无关）
+watch(() => gallery.value.selectedDate, () => { clearTagMultiSelect(); });
 watch(() => gallery.value.sortBy, (newSort) => {
   gallery.value.page = 1;
   if (newSort === 'score' || newSort === 'fav') {
     rebuildSortSnapshot();
   }
 });
-watch(() => gallery.value.hotOnly, () => { gallery.value.page = 1; });
-
 watch(activePage, n => { jumpInput.value = n; });
 
 watch(localTotalPages, total => {
@@ -3799,15 +4432,25 @@ onBeforeUnmount(() => {
 });
 
 const modeDescription = computed(() => {
-  switch (form.value.mode) {
-    case 'rank': return '获取当日 Danbooru 排行榜最受欢迎的图片并自动下载。';
-    case 'popular': return '根据指定日期，获取 Explore 页面当天的热门图片。';
-    case 'popular_range': return '设定起始与结束日期，批量抓取这段时间内所有的热门图片。';
-    case 'collect_ids': return '网络状况不佳时的极速模式：仅拉取列表和元数据，不下载图片本体。';
-    case 'download_ids': return '从已收集的 ID 列表中进行批量下载。';
-    case 'tags': return `按 ${form.value.tagSource === 'gelbooru' ? 'Gelbooru' : 'Danbooru'} tag 查询下载到 tag 文件夹。`;
-    default: return '选择模式后配置参数，点击加入队列追加任务。';
+  if (form.value.mode === 'rank') {
+    if (rankAction.value === 'collect_only') return '网络状况不佳时的极速模式：仅拉取排行榜列表和元数据，不下载图片本体。';
+    return '获取当日 Danbooru 排行榜：先按页收集所有 ID，再按 ID 批量下载（中间可暂停/停止）。';
   }
+  if (form.value.mode === 'popular') {
+    const sub = popularAction.value;
+    if (form.value.dateRange) {
+      if (sub === 'collect_only') return '日期范围仅收集 ID：按日期迭代逐日收齐所有 ID，不下载图片。';
+      return '日期范围两阶段：每个日期 folder 都先收齐所有 ID，再按 ID 批量下载，跨日自动落盘并防风控。';
+    }
+    if (sub === 'recover') return '热门·补全/补齐：按文件存在性判定热门页前 N 页。本地文件在 → 跳过；本地文件不在 → 下载（log 缓存 URL 优先）。可入队、暂停/继续，过程写 ids_data.json。';
+    if (sub === 'collect_only') return '日期热门仅收集 ID：只拉取该日热门列表，不下载图片本体。';
+    if (sub === 'download_by_ids') return '日期热门·按ID下载：粘贴 ID 列表或消费目标日期 folder 已收集的待下载 ID，针对该日期 folder 批量下载。';
+    return '日期热门两阶段：先按页收齐所有 ID，再按 ID 批量下载（中间可暂停/停止）。';
+  }
+  if (form.value.mode === 'tags') {
+    return `按 ${form.value.tagSource === 'gelbooru' ? 'Gelbooru' : 'Danbooru'} tag 查询下载到 tag 文件夹。`;
+  }
+  return '选择模式后配置参数，点击加入队列追加任务。';
 });
 
 // 前端按和后端 sanitize_tag_folder 同样的规则预览将要生成的文件夹名
@@ -3835,13 +4478,16 @@ const tagFolderPreview = computed(() => {
           <p class="inline-note">{{ modeDescription }}</p>
         </div>
         <div class="crawler-head-actions">
+          <!-- 第 1 行：设置类（教程 / SFW / 直连 / 隐藏图库）。
+               这 4 个都属于「开关 / 配置」类语义，把它们放在第一行；
+               第 2 行放「浏览 / 收集 / 协程」三件套，让两行的功能有清晰分组。 -->
           <button class="ghost hosts-btn" @click="openTutorials" title="教程：修改 hosts 直连 Danbooru / 安装 ffmpeg（用于 zip→gif）">教程</button>
           <button
             class="ghost safe-mode-btn"
             :class="{ 'is-safe': safeMode, 'is-unsafe': !safeMode }"
             @click="toggleSafeMode"
             :title="safeMode ? '当前走 safebooru.donmai.us（无 R-18）。点击切换为完整 danbooru' : '当前走 danbooru.donmai.us（含 NSFW）。点击切回 SFW'"
-          >{{ safeMode ? 'SFW' : '全部内容' }}</button>
+          >{{ safeMode ? 'SFW' : 'NSFW' }}</button>
           <button
             class="ghost proxy-mode-btn"
             :class="{ 'is-proxy': useProxy, 'is-direct': !useProxy }"
@@ -3849,41 +4495,58 @@ const tagFolderPreview = computed(() => {
             :title="useProxy ? '当前走代理下载。关掉代理软件后请点这里切到「直连」，否则下载会连不上死代理端口' : '当前直连下载（不走代理）。开了代理软件可点这里切回「走代理」'"
           >{{ useProxy ? '走代理' : '直连' }}</button>
           <button
-            class="ghost"
-            @click="openBrowse"
-            title="按 tag 像 Danbooru 原网页一样预览缩略图，勾选后下载到指定日期"
-          >Tag 浏览</button>
-          <button
-            class="ghost"
-            @click="openCollectedBrowse"
-            title="查看「仅收集ID」模式收集到的 ID 的在线预览图，勾选后下载"
-          >查看收集ID</button>
-          <button
             class="ghost gallery-toggle-btn"
             @click="showGalleryPanel = !showGalleryPanel"
             :title="showGalleryPanel ? '隐藏右侧本地图库' : '显示右侧本地图库'"
           >{{ showGalleryPanel ? '隐藏图库' : '显示图库' }}</button>
+          <!-- 第 2 行：浏览 / 收集 / 协程 -->
+          <button
+            class="ghost"
+            @click="openBrowse"
+            title="按 tag 像 Danbooru 原网页一样预览缩略图，勾选后下载到指定日期"
+          >Tag</button>
+          <button
+            class="ghost"
+            @click="openRankBrowse"
+            title="按 Danbooru 排行榜 order:rank 分页预览缩略图，勾选后下载到指定日期"
+          >Rank</button>
+          <button
+            class="ghost"
+            @click="openCollectedBrowse"
+            title="查看「仅收集ID」模式收集到的 ID 的在线预览图，勾选后下载"
+          >收集ID</button>
+          <label class="concurrency-field concurrency-field-inline" title="下载协程数：1=最稳，4=平衡，8+=速度优先但易撞风控。rank/日期/标签 都用它">
+            <span>并发</span>
+            <input type="number" min="1" max="16" step="1" v-model.number="downloadConcurrency" class="concurrency-input" />
+          </label>
         </div>
       </div>
 
       <div class="mode-selector">
         <button class="mode-chip" :class="{ active: form.mode === 'rank' }" @click="form.mode = 'rank'"
-          title="按 Danbooru 排行榜抓取并下载图片">排行榜</button>
+          title="按 Danbooru 排行榜：先收集所有 ID，再按 ID 批量下载">排行榜</button>
         <button class="mode-chip" :class="{ active: form.mode === 'popular' }" @click="form.mode = 'popular'"
-          title="按指定日期获取热门帖子并下载">日期热门</button>
-        <button class="mode-chip" :class="{ active: form.mode === 'popular_range' }" @click="form.mode = 'popular_range'"
-          title="按指定日期范围获取热门帖子并下载">日期范围</button>
+          title="按指定日期（或日期范围）获取热门帖子并下载">日期热门</button>
         <button class="mode-chip" :class="{ active: form.mode === 'tags' }" @click="form.mode = 'tags'"
           title="按 tag 查询下载到独立的 tag_xxx 文件夹，与日期文件夹并行">标签下载</button>
-        <button class="mode-chip" :class="{ active: form.mode === 'collect_ids' }" @click="form.mode = 'collect_ids'"
-          title="网不好时只收集 ID，不下载图片">仅收集ID</button>
-        <button class="mode-chip" :class="{ active: form.mode === 'download_ids' }" @click="form.mode = 'download_ids'"
-          title="从已收集的 ID 列表批量下载">按ID下载</button>
+      </div>
+
+      <!-- 排行榜子操作栏：默认「下载」（先收 ID 再下）；点「仅收集ID」可只跑 ID 收集阶段。
+           排行榜的目标文件夹是「今日」（没有日期语义），
+           「按ID下载」语义上是针对日期 folder 的，已迁到「日期热门」栏下。 -->
+      <div v-if="form.mode === 'rank'" class="rank-action-bar">
+        <div class="seg-group">
+          <button type="button" class="seg-btn" :class="{ active: rankAction === 'download' }"
+            @click="rankAction = 'download'" title="默认：先按页收齐所有 ID，再按 ID 批量下载">下载</button>
+          <button type="button" class="seg-btn" :class="{ active: rankAction === 'collect_only' }"
+            @click="rankAction = 'collect_only'" title="只跑 ID 收集阶段：网不好时把 ID 先存到 folder 里，等网好再回来按 ID 下载">仅收集ID</button>
+        </div>
       </div>
 
       <!-- 中间可滚动区：表单/按钮/失败横幅/多任务队列/状态/错误条都放这里，超高时内部滚动，永不溢出卡片 -->
       <div class="control-scroll">
-      <div class="field-grid pages-grid" v-if="form.mode !== 'download_ids'">
+      <!-- 「按 ID 下载」子操作没有页码概念：数据源是 ID 列表/folder；其它 rank 子操作和 popular 都还要页码 -->
+      <div class="field-grid pages-grid" v-if="(form.mode === 'rank') || (form.mode === 'popular' && !isDownloadByIdsMode)">
         <label class="page-field">
           <span>起始页</span>
           <div class="page-field-row">
@@ -3933,32 +4596,39 @@ const tagFolderPreview = computed(() => {
           </div>
         </label>
       </div>
-      <label class="field-full" v-if="['popular', 'download_ids'].includes(form.mode)">
-        <span>目标日期 <span class="muted compact-text">{{ form.mode === 'popular' ? '(默认昨天，可改)' : '(留空则用今天)' }}</span></span>
+
+      <!-- 日期热门 / 日期范围：合到一个 mode（popular），用 dateRange 切单日/范围。
+           操作（popularAction）四档，默认「下载」（两阶段）。
+           「补全/补齐」和「按ID下载」仅在单日（!dateRange）时可用：
+             - recover：后端 popular_recover 不支持跨日
+             - download_by_ids：按 ID 下载语义上针对具体日期 folder，范围下无意义
+           下载协程数统一在头部，与 rank/tags 共享。 -->
+      <div v-if="form.mode === 'popular'" class="date-mode-row">
+        <div class="seg-group" title="单日 vs 范围：单日=一个日期 folder，范围=跨日按天迭代">
+          <button type="button" class="seg-btn" :class="{ active: !form.dateRange }" @click="form.dateRange = false">单日</button>
+          <button type="button" class="seg-btn" :class="{ active: form.dateRange }" @click="form.dateRange = true">日期范围</button>
+        </div>
+        <div class="seg-group">
+          <button type="button" class="seg-btn" :class="{ active: popularAction === 'download' }"
+            @click="popularAction = 'download'" title="默认：先按页收齐所有 ID，再按 ID 批量下载">下载</button>
+          <button type="button" class="seg-btn" :class="{ active: popularAction === 'collect_only' }"
+            @click="popularAction = 'collect_only'" title="只跑 ID 收集阶段：网不好时把 ID 先存到 folder 里，等网好再按 ID 下载">仅收集ID</button>
+          <button v-if="!form.dateRange" type="button" class="seg-btn" :class="{ active: popularAction === 'recover' }"
+            @click="onPickPopularRecover" title="按文件存在性补全热门页前 N 页：本地文件在 → 跳过；本地文件不在 → 下载（log 缓存 URL 优先）。可入队、暂停/继续，过程写 ids_data.json。仅在单日时可用">补全/补齐</button>
+          <button v-if="!form.dateRange" type="button" class="seg-btn" :class="{ active: popularAction === 'download_by_ids' }"
+            @click="popularAction = 'download_by_ids'" title="针对日期热门 folder 按 ID 下载：粘贴 ID 列表，或消费 folder 之前收集的待下载 ID。目标日期跟随右侧 GalleryCalendar 联动。仅在单日时可用">按ID下载</button>
+        </div>
+      </div>
+      <label class="field-full" v-if="form.mode === 'popular' && !form.dateRange">
+        <span>目标日期 <span class="muted compact-text">（默认昨天，可改）</span></span>
         <TaskDatePicker
           v-model="form.targetDate"
-          :placeholder="form.mode === 'popular' ? '默认昨天' : '留空则用今天'"
+          placeholder="默认昨天"
           :available-dates="gallery.availableDates"
           :date-folders="gallery.availableDateFolders"
         />
       </label>
-      <label class="field-full" v-if="form.mode === 'download_ids'">
-        <span>
-          粘贴 ID 列表
-        </span>
-        <textarea
-          v-model="form.idsText"
-          rows="2"
-          placeholder="1) 压缩：dbids:6tewdt.dw&#10;2) 明文： 行分隔 / 逗号分隔 或 URL"
-          style="font-family: Consolas, monospace; font-size: 12px; resize: vertical; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,0.6);"
-        />
-        <div class="muted compact-text" style="margin-top: 4px;">
-          已解析到 <strong>{{ parsedPastedIds.length }}</strong> 个 ID
-          <span v-if="isPastedCompressed"> · 🗜 识别为压缩格式</span>
-          <span v-if="parsedPastedIds.length"> · 将下载到{{ form.targetDate || '今天' }}的图库</span>
-        </div>
-      </label>
-      <div class="field-grid" v-if="form.mode === 'popular_range'">
+      <div class="field-grid" v-if="form.mode === 'popular' && form.dateRange">
         <label>
           <span>起始日期</span>
           <TaskDatePicker
@@ -3977,6 +4647,36 @@ const tagFolderPreview = computed(() => {
             :date-folders="gallery.availableDateFolders"
           />
         </label>
+      </div>
+
+      <!-- 标签下载无独立协程行：协程数在头部共享 -->
+
+      <!-- 日期热门·按ID下载：粘贴/消费 folder 的 ID（已从排行榜栏迁到这里） -->
+      <label class="field-full" v-if="isDownloadByIdsMode">
+        <span>粘贴 ID 列表</span>
+        <textarea
+          v-model="form.idsText"
+          rows="2"
+          placeholder="1) 压缩：dbids:6tewdt.dw&#10;2) 明文： 行分隔 / 逗号分隔 或 URL"
+          style="font-family: Consolas, monospace; font-size: 12px; resize: vertical; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: rgba(255,255,255,0.6);"
+        />
+        <div class="muted compact-text" style="margin-top: 4px;">
+          已解析到 <strong>{{ parsedPastedIds.length }}</strong> 个 ID
+          <span v-if="isPastedCompressed"> · 🗜 识别为压缩格式</span>
+          <span v-if="parsedPastedIds.length"> · 将下载到 <strong style="color: var(--accent-deep);">{{ downloadByIdsTargetDateLabel }}</strong> 的图库（跟右侧画廊日期联动）</span>
+        </div>
+      </label>
+      <!-- log.json 去重策略：和上面的 ID 列表同级成块，套用项目现成的 seg-group 模式（顶部
+           popularAction 都在用），和子操作栏视觉完全一致。独立的 field-full 而非
+           嵌套 label：避免点击文本框区域误触切换。 -->
+      <div class="field-full dl-strategy-row" v-if="isDownloadByIdsMode">
+        <span>下载策略</span>
+        <div class="seg-group">
+          <button type="button" class="seg-btn" :class="{ active: form.skipLogged }"
+            @click="form.skipLogged = true" title="默认：log 命中即跳过（去重）">已下载则跳过</button>
+          <button type="button" class="seg-btn" :class="{ active: !form.skipLogged }"
+            @click="form.skipLogged = false" title="补齐 50 页时遇到「log 里有记录但文件其实丢了」切到这档重新拉一次">强制重下</button>
+        </div>
       </div>
       <label class="field-full" v-if="form.mode === 'tags'">
         <span>Tag 来源</span>
@@ -4006,41 +4706,19 @@ const tagFolderPreview = computed(() => {
 
       <div class="button-row">
         <button class="tq-add-btn" @click="addCurrentToQueue" title="把当前配置追加到顺序队列">入队</button>
-        <button class="secondary" @click="pauseTask" :disabled="!task.isRunning || task.isPaused">暂停</button>
-        <button class="secondary" @click="resumeTask" :disabled="!task.isRunning || !task.isPaused">继续</button>
-        <button class="ghost" @click="stopTaskOrQueue" :disabled="!task.isRunning" :title="queueRunning ? '结束当前任务并停止整个顺序队列' : '结束当前任务'">停止</button>
+        <!-- 暂停/继续/停止 已搬到下方「顺序队列」面板的 actions 区，与运行/跳过/清除
+             排在一起（都属于"任务运行时控制"，与"入队"这种"配置提交"语义不同） -->
       </div>
 
-      <!-- 失败横幅：页级=页面抓取失败重跑整页；图级=图片下载失败按 id 重跑，一键定向重试 -->
-      <div v-if="failedPages.list.length" class="failed-pages-banner">
-        <span class="fpb-text">
-          <template v-if="failedPages.kind === 'ids'">
-            ⚠ 有 {{ failedPages.list.length }} 张图片下载失败（已自动重试）：ID {{ failedPages.list.slice(0, 20).map(p => p.id).join(', ') }}{{ failedPages.list.length > 20 ? ' …' : '' }}
-          </template>
-          <template v-else>
-            ⚠ 有 {{ failedPages.list.length }} 页抓取失败（已自动重试）：第 {{ failedPages.list.map(p => p.page).join(', ') }} 页
-          </template>
-          <small v-if="queuedFailureReports.length"> · 另有 {{ queuedFailureReports.length }} 份待处理报告</small>
-        </span>
-        <div class="fpb-actions">
-          <button class="fpb-retry" @click="retryFailedPages" :disabled="failedPages.retrying || task.isRunning || task.isStopping">
-            {{ failedPages.retrying ? '重试中…' : (task.isRunning || task.isStopping ? '任务结束后可重试' : (failedPages.kind === 'ids' ? '重试这些图片' : '重试这些页')) }}
-          </button>
-          <button class="fpb-dismiss" @click="dismissFailedPages" title="忽略这份报告，且不再重复弹出">✕</button>
-        </div>
-      </div>
-
-      <!-- 顺序任务队列：运行中可继续追加任务，可删除未运行任务。默认折叠，省左栏空间 -->
+      <!-- 顺序任务队列：常驻展开，运行中可继续追加任务，可删除未运行任务 -->
       <div class="task-queue-panel">
-        <div class="tq-header" @click="toggleQueuePanel" title="点击展开/收起顺序任务队列">
+        <div class="tq-header">
           <span class="tq-title">
-            <span class="tq-chevron" :class="{ open: queuePanelOpen }">▸</span>
             顺序队列<span v-if="queueRunning" class="tq-running-badge">运行中 {{ queueIndex + 1 }}/{{ taskQueue.length }}</span>
-            <span v-else-if="!queuePanelOpen && taskQueue.length" class="tq-count-badge">{{ taskQueue.length }}项</span>
+            <span v-else-if="taskQueue.length" class="tq-count-badge">{{ taskQueue.length }}项</span>
           </span>
         </div>
 
-        <div v-show="queuePanelOpen">
         <TransitionGroup v-if="taskQueue.length" name="tq" tag="div" class="tq-list">
           <div
             v-for="(it, i) in taskQueue"
@@ -4064,21 +4742,37 @@ const tagFolderPreview = computed(() => {
             <span class="tq-item-status">{{ queueStatusIcon(it) }}</span>
             <span class="tq-item-label">{{ it.label }}</span>
             <span class="tq-item-ops">
+              <button v-if="it.status === 'error' && it.error" class="tq-mini tq-copy" @click.stop="copyQueueError(it)" title="复制错误信息">⎘</button>
               <button class="tq-mini tq-del" @click="removeQueueItem(i)" :disabled="it.status === 'running'" title="移除">×</button>
             </span>
+            <!-- 错误 / 等待重试的说明直接内联显示，Electron 里 :title tooltip 几乎不可见 -->
+            <div v-if="(it.status === 'error' || it.status === 'warning') && it.error" class="tq-item-error">
+              {{ it.error }}
+            </div>
           </div>
         </TransitionGroup>
         <div v-else class="tq-empty">
           上方“加入队列”会把当前配置追加到这里，任务按列表顺序依次执行。
         </div>
 
-        <div v-if="taskQueue.length" class="tq-actions">
-          <button class="tq-run" @click="runQueue" :disabled="queueRunning || task.isRunning || task.isStopping || !pendingQueueCount" :title="`按顺序依次执行队列里的待执行任务（${pendingQueueCount} 项）`">运行</button>
-          <button class="secondary" @click="skipCurrentQueueItem" :disabled="!queueRunning || queueIndex < 0 || !task.isRunning || task.isStopping || queueSkipItemId !== null" title="结束当前任务，但保留队列并继续下一项">跳过</button>
-          <button class="ghost" @click="clearQueue" :disabled="queueRunning && taskQueue.every(item => item.status === 'running')" :title="queueRunning ? '清除尚未执行的项（不影响正在跑的任务）' : '清空整个队列'">清除</button>
+        <div v-if="task.isRunning || task.isPaused || taskQueue.length" class="tq-actions">
+          <!-- 任务运行控制：暂停 / 继续 / 停止。这组按钮单条任务跑（即使没入队）时也要显示，
+               所以 v-if 条件放宽为「任务在跑 / 已暂停 / 队列非空」三个之一。 -->
+          <div class="tq-action-group">
+            <span class="tq-action-label">任务控制</span>
+            <button class="secondary" @click="pauseTask" :disabled="!task.isRunning || task.isPaused">暂停</button>
+            <button class="secondary" @click="resumeTask" :disabled="!task.isRunning || !task.isPaused">继续</button>
+            <button class="ghost" @click="stopTaskOrQueue" :disabled="!task.isRunning" :title="queueRunning ? '结束当前任务并停止整个顺序队列' : '结束当前任务'">停止</button>
+          </div>
+          <!-- 队列控制：运行 / 跳过 / 清除。仅队列里有项时启用，否则 disabled 也不隐藏
+               —— 让用户随时知道"队列存在但还没运行"也能点"清除"清空。 -->
+          <div class="tq-action-group" v-if="taskQueue.length">
+            <span class="tq-action-label">队列</span>
+            <button class="tq-run" @click="runQueue" :disabled="queueRunning || task.isRunning || task.isStopping || !pendingQueueCount" :title="`按顺序依次执行队列里的待执行任务（${pendingQueueCount} 项）`">运行</button>
+            <button class="secondary" @click="skipCurrentQueueItem" :disabled="!queueRunning || queueIndex < 0 || !task.isRunning || task.isStopping || queueSkipItemId !== null" title="结束当前任务，但保留队列并继续下一项">跳过</button>
+            <button class="ghost" @click="clearQueue" :disabled="queueRunning && taskQueue.every(item => item.status === 'running')" :title="queueRunning ? '清除尚未执行的项（不影响正在跑的任务）' : '清空整个队列'">清除</button>
+          </div>
         </div>
-        </div>
-        <!-- /v-show queuePanelOpen -->
       </div>
 
       <div class="status-pills">
@@ -4103,61 +4797,91 @@ const tagFolderPreview = computed(() => {
       </div>
       <!-- /control-scroll -->
 
-      <div class="modern-log-wrapper" :class="{ 'is-maximized': task.maximized }">
-        <div class="modern-log-header" @click="toggleLogHeader">
+      <div class="modern-log-wrapper">
+        <div class="modern-log-header">
           <div class="log-header-left">
-            <span class="status-dot" :class="{ 'is-active': task.isRunning }"></span>
+            <span class="status-dot" :class="{ 'is-active': task.isRunning && !task.isPaused }"></span>
             <span class="log-title">运行动态</span>
           </div>
-          <div class="log-header-right" @click.stop>
-            <!-- 缩小态只保留「放大」图标；显示全部/清空属于查看日志时才用得到的操作，放大后再出现 -->
-            <template v-if="task.maximized">
-              <button
-                class="log-toolbar-btn"
-                :class="{ active: task.hideSuccess }"
-                @click="task.hideSuccess = !task.hideSuccess"
-                :title="task.hideSuccess ? '当前隐藏单张下载/已存在日志，点击切换为显示全部' : '当前显示全部日志，点击只看异常与概要'"
-              >{{ task.hideSuccess ? '只看异常+概要' : '显示全部' }}</button>
-              <button class="log-toolbar-btn" @click="clearLogs" title="清空当前日志">清空</button>
-            </template>
+        </div>
+        <div class="progress-panel">
+          <!-- 阶段提示：仅在任务运行/暂停/停止中显示，区分"抓取ID"与"下载" -->
+          <div v-if="runningPhaseText || runningFailureHint" class="progress-phase">
+            <span>{{ runningPhaseText }}</span>
+            <span v-if="runningFailureHint" class="running-failure-hint">{{ runningFailureHint }}</span>
+          </div>
+          <!-- 页进度条：仅在 collect 阶段（pageProgress.total>0 且 progress.total=0）显示，
+               单一色块，没有"失败"分段 —— 抓取页只有成功/抓取中两种状态。
+               旧版有"重试中"琥珀色微闪效果（isRetrying class），整个机制已下线。 -->
+          <div
+            v-if="task.pageProgress.total > 0 && task.progress.total === 0"
+            class="progress-bar"
+            :title="`第 ${task.pageProgress.current} / ${task.pageProgress.total} 页`"
+          >
+            <div
+              class="progress-seg progress-seg-page"
+              :style="{ width: pct(task.pageProgress.current, task.pageProgress.total) + '%' }"
+            ></div>
+          </div>
+          <!-- 需手动重试的页范围：失败页变化时由 syncStatusOnce 驱动更新，× 关闭。
+               比之前的"重试这些页"按钮 + auto-pause 横幅简洁：不做任何 auto 行为，
+               只在运行动态日志区给一行提示，用户自决。 -->
+          <div
+            v-if="retryPagesHint.show"
+            class="retry-pages-hint"
+            role="status"
+          >
+            <span class="retry-pages-text">{{ retryPagesHint.text }}</span>
             <button
-              class="log-icon-btn"
-              @click="toggleLogMaximize"
-              :title="task.maximized ? '缩小日志面板' : '放大日志面板（覆盖抓图任务卡片）'"
-            >
-              <svg v-if="!task.maximized" viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-label="放大">
-                <polyline points="15 3 21 3 21 9"></polyline>
-                <polyline points="9 21 3 21 3 15"></polyline>
-                <line x1="21" y1="3" x2="14" y2="10"></line>
-                <line x1="3" y1="21" x2="10" y2="14"></line>
-              </svg>
-              <svg v-else viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-label="缩小">
-                <polyline points="4 14 10 14 10 20"></polyline>
-                <polyline points="20 10 14 10 14 4"></polyline>
-                <line x1="14" y1="10" x2="21" y2="3"></line>
-                <line x1="3" y1="21" x2="10" y2="14"></line>
-              </svg>
-            </button>
+              type="button"
+              class="retry-pages-close"
+              title="关闭"
+              aria-label="关闭提示"
+              @click="dismissRetryPagesHint"
+            >×</button>
+          </div>
+          <!-- 单条分段 bar：仅当后端给了 total（task_download_ids 模式）才渲染；
+               单阶段 rank / popular / tags 走 _process_posts_concurrent 没有"总目标数"概念，
+               total 一直是 0，bar 不显示，下方汇总文字照常更新。 -->
+          <div
+            v-if="task.progress.total > 0"
+            class="progress-bar"
+            :title="progressTooltip"
+          >
+            <div
+              class="progress-seg progress-seg-success"
+              :style="{ width: pct(task.progress.success) + '%' }"
+            ></div>
+            <div
+              v-if="task.progress.fail > 0"
+              class="progress-seg progress-seg-fail"
+              :style="{ width: pct(task.progress.fail) + '%' }"
+            ></div>
+          </div>
+          <div class="progress-summary">
+            <template v-if="task.progress.total > 0">
+              <!-- 下载阶段：显示「成功+失败 / 总数」 -->
+              <span>{{ task.progress.success + task.progress.fail }}/{{ task.progress.total }} 完成</span>
+              <span v-if="task.progress.fail" class="progress-fail-tail">，{{ task.progress.fail }} 失败</span>
+            </template>
+            <template v-else-if="task.pageProgress.total > 0">
+              <!-- 抓 ID 阶段（collect）：页进度 + 页级成功/失败数。
+                   之前只显示"扫到 N/M 页"：用户看不到这一波抓下来有多少页成功、多少页放弃，
+                   要等任务结束看失败横幅才知道。
+                   pageFetchSucceeded = done - failed：
+                     - done 来自后端 page_done_count（grabber 返回后 +1，含成功 + 失败）
+                     - failed 来自后端 failed_pages 数组长度（record_failed_page 后才计入）
+                   故意不算 image-level success_count/fail_count（那是下载阶段的图级统计）。 -->
+              <span>扫到 {{ task.pageProgress.current }} / {{ task.pageProgress.total }} 页</span>
+              <span v-if="pageFetchSucceeded" class="progress-success-tail"> · 成功 {{ pageFetchSucceeded }} 页</span>
+              <span v-if="task.runningFailedPages" class="progress-fail-tail"> · 失败 {{ task.runningFailedPages }} 页</span>
+            </template>
+            <template v-else>
+              <span>{{ task.progress.success }} 已完成</span>
+              <span v-if="task.progress.fail" class="progress-fail-tail">，{{ task.progress.fail }} 失败</span>
+            </template>
           </div>
         </div>
-        <transition name="log-expand">
-          <div class="modern-log-body" v-show="task.maximized" ref="logBodyRef">
-            <div v-if="task.hideSuccess && hiddenSuccessCount" class="modern-log-hint">
-              已折叠 {{ hiddenSuccessCount }} 条单张下载/已存在日志（点击右上「显示全部」可查看）
-            </div>
-            <div
-              class="modern-log-line"
-              v-for="entry in visibleLogs"
-              :key="entry.idx"
-              :class="[getLogType(entry.line), { 'is-expanded': task.expandedLogIdx === entry.idx }]"
-              @click="toggleLogExpand(entry.idx)"
-              :title="task.expandedLogIdx === entry.idx ? '点击收起' : '点击展开完整内容'"
-            >
-              <span class="log-icon">{{ getLogIcon(entry.line) }}</span>
-              <span class="log-text">{{ entry.line }}</span>
-            </div>
-          </div>
-        </transition>
       </div>
     </section>
 
@@ -4177,7 +4901,15 @@ const tagFolderPreview = computed(() => {
             @select="loadGallery"
           />
           <span class="gallery-stats-inline">
-            共 {{ galleryStats.total }} 张<span v-if="galleryStats.filtered !== galleryStats.total"> · 已筛选 {{ galleryStats.filtered }} 张</span><span v-if="galleryStats.avg > 0"> · 平均 ★ {{ galleryStats.avg }} · 中位 ★ {{ galleryStats.median }}</span>
+            共 {{ galleryStats.total }} 张<span v-if="galleryStats.filtered !== galleryStats.total"> · 已筛选 {{ galleryStats.filtered }} 张</span>
+            <span class="border-legend" aria-label="图片边框颜色含义">
+              <span class="legend-item" title="含有已收藏的画师或角色">
+                <span class="legend-dot legend-dot-fav" aria-hidden="true"></span>收藏画师/角色
+              </span>
+              <span class="legend-item" title="含 ai-generated / ai-assisted 标签">
+                <span class="legend-dot legend-dot-ai" aria-hidden="true"></span>AI 图
+              </span>
+            </span>
           </span>
         </div>
         <div class="gallery-tools">
@@ -4201,6 +4933,12 @@ const tagFolderPreview = computed(() => {
             title="清空 .thumb_cache 和 .browse_thumb_cache：清掉旧的 MD5 残骸、ffmpeg 失败留下的 0 字节缩略图，或单纯想腾空间。已生成的 mp4/gif 首帧 JPEG 会全部重新生成"
           >{{ clearingThumbCache ? '清缓存中…' : '清缩略图缓存' }}</button>
           <button
+            class="secondary tool-btn"
+            @click="mergeViewerData"
+            :disabled="!gallery.selectedDate || task.isRunning || task.isStopping"
+            title="跨盘合并 viewer_data.json：把源 root（默认 hot_pic 或某外置盘）的 viewer_data 增量同步到目标 root。post_url 去重，重写 local_path 到目标盘路径，幂等可重复执行"
+          >🔗 合并 viewer_data</button>
+          <button
             class="secondary tool-btn select-mode-btn"
             :class="{ active: selection.enabled }"
             @click="setSelectionEnabled(!selection.enabled)"
@@ -4217,7 +4955,7 @@ const tagFolderPreview = computed(() => {
               class="secondary tool-btn"
               :class="{ 'menu-open': displayMenu.open }"
               @click.stop="toggleDisplayMenu"
-              title="显示设置：排序 / 筛选 / 卡片大小 / 缩略图 / 每页张数 / 高分 / 看图刷新"
+              title="显示设置：排序 / 筛选 / 卡片大小 / 缩略图 / 每页张数"
             >显示 ▾</button>
             <div v-if="displayMenu.open" class="display-menu" @click.stop>
               <div class="display-menu-row" title="排序方式">
@@ -4235,7 +4973,10 @@ const tagFolderPreview = computed(() => {
                   <option value="image">图片</option>
                   <option value="video">视频</option>
                   <option value="zip">动图ZIP</option>
-                  <option value="favorited">仅收藏画师/角色</option>
+                  <option value="favorited_artist">仅收藏画师</option>
+                  <option value="favorited_character">仅收藏角色</option>
+                  <option value="not_favorited_artist">仅非收藏画师</option>
+                  <option value="not_favorited_character">仅非收藏角色</option>
                   <option value="captioned">仅已生成 Caption</option>
                   <option value="not_captioned">仅未生成 Caption</option>
                 </select>
@@ -4276,24 +5017,6 @@ const tagFolderPreview = computed(() => {
                   @keyup.enter="onPageSizeInput"
                 />
               </label>
-              <button
-                class="display-menu-row display-menu-toggle"
-                :class="{ active: gallery.hotOnly }"
-                @click="gallery.hotOnly = !gallery.hotOnly"
-                :title="`只看 score ≥ ${gallery.hotThreshold}`"
-              >
-                <span class="display-menu-label">只看高分</span>
-                <span class="display-menu-state">{{ gallery.hotOnly ? '开' : '关' }}</span>
-              </button>
-              <button
-                class="display-menu-row display-menu-toggle"
-                :class="{ active: gallery.refreshOnView }"
-                @click="gallery.refreshOnView = !gallery.refreshOnView"
-                title="开启后，点开 / 切换大图会联网刷新该图 score / 收藏数；离线时建议保持关闭"
-              >
-                <span class="display-menu-label">看图刷新热度</span>
-                <span class="display-menu-state">{{ gallery.refreshOnView ? '开' : '关' }}</span>
-              </button>
             </div>
           </div>
           <div class="refresh-dropdown">
@@ -4301,7 +5024,7 @@ const tagFolderPreview = computed(() => {
               :class="['refresh-btn', { active: refresh.isRunning, 'menu-open': refreshMenu.open }]"
               @click.stop="toggleRefreshMenu"
               :disabled="!gallery.selectedDate && !refresh.isRunning"
-              :title="refresh.isRunning ? '点击停止刷新' : '选择刷新范围（本页 / 指定范围 / 全部）'"
+              :title="refresh.isRunning ? '点击停止刷新' : '选择刷新范围（本页 / 指定范围 / 全部），或切换『看图刷新热度』'"
             >
               <span v-if="!refresh.isRunning">刷新热度 ▾</span>
               <span v-else>{{ refresh.done }}/{{ refresh.total }}</span>
@@ -4319,18 +5042,18 @@ const tagFolderPreview = computed(() => {
                 <span class="refresh-menu-label">全部</span>
                 <span class="refresh-menu-meta">{{ activeTotalPages }} 页</span>
               </button>
+              <div class="refresh-menu-divider" role="separator"></div>
+              <button
+                class="refresh-menu-item is-toggle"
+                :class="{ active: gallery.refreshOnView }"
+                @click="gallery.refreshOnView = !gallery.refreshOnView"
+                title="开启后，点开 / 切换大图会联网刷新该图 score / 收藏数；离线时建议保持关闭"
+              >
+                <span class="refresh-menu-label">看图刷新热度</span>
+                <span class="refresh-menu-state">{{ gallery.refreshOnView ? '开' : '关' }}</span>
+              </button>
             </div>
           </div>
-          <span class="search-input-wrap">
-            <input v-model="searchInput" @input="onSearchInput" class="search-input search-input-with-clear" type="text" placeholder="搜索作者 / 角色" />
-            <button
-              v-if="searchInput"
-              class="search-clear-btn"
-              @click="setSearch('')"
-              title="清空搜索"
-              type="button"
-            >×</button>
-          </span>
           <div class="translate-dropdown">
             <button
               class="secondary translate-trigger tool-btn"
@@ -4363,6 +5086,36 @@ const tagFolderPreview = computed(() => {
               </button>
             </div>
           </div>
+          <span class="search-input-wrap">
+            <input
+              v-model="searchInput"
+              class="search-input search-input-with-clear"
+              type="text"
+              placeholder="搜索作者 / 角色"
+              @focus="showSearchHistory = true"
+              @blur="onSearchHistoryBlur"
+              @keyup.enter="commitGallerySearch"
+              @keydown="searchHistoryRef?.handleKeydown?.($event)"
+            />
+            <button
+              v-if="searchInput"
+              class="search-clear-btn"
+              @click="setSearch('')"
+              title="清空搜索"
+              type="button"
+            >×</button>
+            <SearchHistoryDropdown
+              ref="searchHistoryRef"
+              :items="searchHistory"
+              :open="showSearchHistory"
+              header-label="最近搜索"
+              @pick="onPickSearchHistory"
+              @remove="removeSearchHistoryEntry"
+              @clear="clearSearchHistory"
+              @close="showSearchHistory = false"
+            />
+          </span>
+          <button class="secondary" @click="commitGallerySearch">搜索</button>
           <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
         </div>
       </div>
@@ -4399,7 +5152,7 @@ const tagFolderPreview = computed(() => {
         {{ showOnlySelected ? '当前日期没有已选图片，切换日期试试' : '当前日期没有图片' }}
       </div>
       <div v-else-if="activeItems.length" class="gallery-grid" :class="{ 'is-switching': loadingGallery }" :style="`--card-min-w: ${gallery.cardSize}px`" :aria-busy="loadingGallery">
-        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item), 'has-caption': hasCaption(item) }">
+        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item), 'has-caption': hasCaption(item), 'has-ai-badge': !!aiTagOf(item) }" :title="cardBadgeTitle(item)">
           <div class="thumb-wrap" :class="{ 'is-broken': item.thumbBroken }">
             <img
               class="thumb clickable-thumb"
@@ -4432,6 +5185,9 @@ const tagFolderPreview = computed(() => {
               :title="isItemSelected(item) ? '取消选择' : '加入选择'"
             >{{ isItemSelected(item) ? '✓' : '' }}</button>
             <span v-if="hasCaption(item)" class="caption-badge" title="已生成 Caption，点击查看/编辑">📝</span>
+            <!-- 收藏画师/角色命中 → 见 .image-card.is-favorited 金色光圈（CSS 实现）。
+                 AI 标签 → 见 .image-card.has-ai-badge 紫色光圈。
+                 鼠标悬停整张卡片的 title 由 cardBadgeTitle() 汇总，缩略图区不再堆角标。 -->
             <span v-if="item.rating" class="rating-badge" :class="`rating-${item.rating}`" :title="`Danbooru 分级：${item.rating.toUpperCase()}`">{{ item.rating.toUpperCase() }}</span>
           </div>
           <button
@@ -4527,6 +5283,15 @@ const tagFolderPreview = computed(() => {
         <div class="char-ctx-raw" :title="charContextMenu.rawTag">{{ charContextMenu.rawTag }}</div>
         <button v-if="charContextMenu.kind === 'character'" class="char-ctx-item" @click="charMenuEditDictionary">编辑词条</button>
         <button class="char-ctx-item" @click="charMenuCopyRawTag">复制</button>
+        <button class="char-ctx-item" @click="charMenuSearchTag">搜索 Tag</button>
+
+        <!-- 多选区：仅当右键命中的 tag 已在 tagMultiSelect 集合里时显示。
+             集合大小 >=1 时出现 divider + 复制 N / 搜索 N。 -->
+        <template v-if="charContextMenu.isInMultiSelect && charContextMenu.multiSelectCount > 0">
+          <div class="char-ctx-divider"></div>
+          <button class="char-ctx-item" @click="charMenuCopyMultipleTags">复制 {{ charContextMenu.multiSelectCount }} 个 Tag</button>
+          <button class="char-ctx-item" @click="charMenuSearchMultipleTags">用 {{ charContextMenu.multiSelectCount }} 个 Tag 搜索</button>
+        </template>
       </div>
     </Teleport>
 
@@ -4561,10 +5326,13 @@ const tagFolderPreview = computed(() => {
             <template v-for="(token, artistIndex) in (viewerItem?.artistTokens?.length ? viewerItem.artistTokens : ['未知'])" :key="`v-artist-${token}-${artistIndex}`">
               <button
                 class="meta-link author-link token-chip viewer-token-chip"
-                :class="{ 'is-favorited-chip': favoritedArtistSet.has(token) }"
-                @click="applySearch(token); closeViewer();"
+                :class="{
+                  'is-favorited-chip': favoritedArtistSet.has(token),
+                  'is-multi-selected': isTagMultiSelected(rawArtistTag(viewerItem, artistIndex))
+                }"
+                @click="onViewerTagClick($event, viewerItem, artistIndex, 'artist')"
                 @contextmenu="onArtistContextMenu($event, viewerItem, artistIndex)"
-                :title="token === '未知' ? `搜索同画师作品：${token}` : `左键搜索同画师；右键复制画师原名：${token}`"
+                :title="token === '未知' ? `搜索同画师作品：${token}` : `左键搜索同画师；Ctrl+左键加入多选；右键菜单：${token}`"
               >{{ token }}</button>
               <button
                 v-if="token !== '未知'"
@@ -4579,10 +5347,13 @@ const tagFolderPreview = computed(() => {
             <template v-for="(token, charIndex) in viewerItem.characterTokens" :key="`v-char-${token}-${charIndex}`">
               <button
                 class="meta-link token-chip viewer-token-chip"
-                :class="{ 'is-favorited-chip': favoritedCharacterSet.has(token) }"
-                @click="applySearch(token); closeViewer();"
+                :class="{
+                  'is-favorited-chip': favoritedCharacterSet.has(token),
+                  'is-multi-selected': isTagMultiSelected(rawCharacterTag(viewerItem, charIndex))
+                }"
+                @click="onViewerTagClick($event, viewerItem, charIndex, 'character')"
                 @contextmenu="onCharacterContextMenu($event, viewerItem, charIndex)"
-                :title="`左键搜索同角色；右键弹出菜单（编辑词条 / 复制）：${token}`"
+                :title="`左键搜索同角色；Ctrl+左键加入多选；右键菜单：${token}`"
               >{{ token.includes(' [') ? token.split(' [')[0] : token }}</button>
               <button
                 class="meta-link author-fav-btn viewer-fav-star"
@@ -4591,6 +5362,12 @@ const tagFolderPreview = computed(() => {
               >★</button>
             </template>
           </div>
+        </div>
+        <!-- 多选态指示器：仅在 tagMultiSelect 非空时显示；附"清空"按钮和 Esc 提示 -->
+        <div v-if="tagMultiSelect.size > 0" class="viewer-multiselect-indicator">
+          <span>已选 <strong>{{ tagMultiSelect.size }}</strong> 个 tag</span>
+          <button class="ghost mini" @click="clearTagMultiSelect">清空</button>
+          <span class="hint">Esc 退出选择</span>
         </div>
         <div class="button-row compact viewer-actions">
           <button class="secondary" @click="stepViewer(-1)" :disabled="viewerIndex <= 0">上一张</button>
@@ -4715,7 +5492,8 @@ const tagFolderPreview = computed(() => {
       @notify="({ message, type }) => showToast(message, type)"
     />
 
-    <!-- Tag Browse Overlay: 按 tag 预览缩略图，勾选后下载 -->
+    <!-- Tag Browse Overlay: 按 tag 预览缩略图，勾选后下载。
+         ⚠ 模板里 browse 是 ref 自动解包后的对象本身，不要写 .value（会 TypeError 把 runBrowseSearch 整个截断） -->
     <BrowseOverlay
       :state="browse"
       :filtered="browseFiltered"
@@ -4724,11 +5502,14 @@ const tagFolderPreview = computed(() => {
       :select-all-label="browseSelectAllLabel"
       :cross-page-count="browseCrossPageCount"
       :multi-page="browseMultiPage"
+      :tag-search-history="tagSearchHistory"
+      :saved-tags="savedTags"
       @update:open="closeBrowse"
-      @load-collected="(d, p = 1) => loadCollectedIds(d, p)"
-      @run-search="(p = 1) => runBrowseSearch(p)"
+      @load-collected="(d, p = 1) => { browse.selectAllPhase = 0; loadCollectedIds(d, p); }"
+      @run-search="(p = 1) => { browse.selectAllPhase = 0; runBrowseSearch(p); }"
       @refresh="refreshBrowsePage"
       @go-page="browseGoPage"
+      @go-to-page="browseGoToPage"
       @toggle-select="toggleBrowseSelect"
       @select-all-visible="browseSelectAllVisible"
       @clear-selection="browseClearSelection"
@@ -4739,6 +5520,11 @@ const tagFolderPreview = computed(() => {
       @update:multi-from="v => (browseMultiPage.from = v)"
       @update:multi-to="v => (browseMultiPage.to = v)"
       @download-selected="downloadBrowseSelected"
+      @pick-tag-history="pickTagSearchHistory"
+      @remove-tag-history="removeTagSearchHistoryEntry"
+      @clear-tag-history="clearTagSearchHistory"
+      @add-saved-tag="addSavedTag"
+      @remove-saved-tag="removeSavedTag"
     />
 
     <!-- Tag 浏览的跨页已选清单（缩略图 + 单条移除） -->
@@ -4783,6 +5569,14 @@ const tagFolderPreview = computed(() => {
       @confirm="startRefreshScoresRange"
     />
 
+    <!-- 跨盘合并 viewer_data Modal（替代 Electron 不支持的 window.prompt/confirm） -->
+    <MergeViewerDataModal
+      :state="mergeViewerDataModal"
+      :is-busy="task.isRunning || task.isStopping"
+      @update:open="closeMergeViewerDataModal"
+      @success="onMergeViewerDataSuccess"
+    />
+
     <!-- 加入画师收藏 Modal -->
     <ArtistFavoriteModal
       :state="favoriteDialog"
@@ -4811,10 +5605,11 @@ const tagFolderPreview = computed(() => {
   grid-template-columns: 300px minmax(0, 1fr);
 }
 .crawler-layout.gallery-hidden {
-  /* 隐藏图库后只剩左栏一列。用 justify-content: center 把这一列在整行里居中，
-     两侧留白对称，看起来像刻意留白而不是「右边空荡荡」；同时把列宽收在
-     合理区间，避免独占整行时被拉得过宽。 */
-  grid-template-columns: minmax(320px, 440px);
+  /* 隐藏图库后只剩左栏一列：列宽固定为 300px（与有图库时一致），
+     不再扩展成 minmax(320,440px)，避免「点隐藏图库后整列突然变宽」、
+     头排按钮也跟着视觉变宽的违和感。justify-content: center 仍保留，
+     让单一列在整行里居中、两侧留白对称。 */
+  grid-template-columns: 300px;
   justify-content: center;
 }
 @media (max-width: 1400px) {
@@ -4822,7 +5617,7 @@ const tagFolderPreview = computed(() => {
     grid-template-columns: 270px minmax(0, 1fr);
   }
   .crawler-layout.gallery-hidden {
-    grid-template-columns: minmax(300px, 420px);
+    grid-template-columns: 270px;
     justify-content: center;
   }
 }
@@ -4852,19 +5647,29 @@ const tagFolderPreview = computed(() => {
   min-width: 0;
 }
 .crawler-head-actions {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  width: 100%;
-  justify-content: stretch;
-  gap: 5px;
-  margin-top: 8px;
+  display: flex;
+  /* 头排 6 个按钮 + 1 个下载协程输入框。在 270–300px 的窄左栏里根本塞不下，
+     用 flex-wrap 让它们自然换行；justify-content: flex-end 让短行（最后一行不满时）
+     整体靠右，避免出现"前面几个按钮孤零零顶在左边"的视觉断裂感。 */
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px 8px;
+  margin-top: 10px;
+  row-gap: 8px;
 }
 .crawler-head-actions button {
   min-width: 0;
-  font-size: 11px;
-  padding: 4px 5px;
-  border-radius: 8px;
+  font-size: 12px;
+  padding: 5px 11px;
+  border-radius: 999px;
   white-space: nowrap;
+  flex: 0 0 auto;
+}
+/* 下载协程输入框用 inline label 形式（.concurrency-field-inline），
+   在 flex 行里也保持自然宽度。 */
+.crawler-head-actions .concurrency-field-inline {
+  flex: 0 0 auto;
 }
 .crawler-head-actions .hosts-btn {
   color: #ff9800;
@@ -5101,6 +5906,41 @@ const tagFolderPreview = computed(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* 卡片边框颜色含义图例：与 image-card.is-favorited / .has-ai-badge 的 box-shadow 同色 */
+.border-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: help;
+}
+.legend-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.legend-dot-fav {
+  background: #f59e0b;
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.35), 0 0 6px rgba(245, 158, 11, 0.55);
+}
+.legend-dot-ai {
+  background: #a855f7;
+  box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.35), 0 0 6px rgba(168, 85, 247, 0.55);
 }
 
 /* 工具栏紧凑化：尽量一行装下所有控件 */
@@ -5193,6 +6033,73 @@ const tagFolderPreview = computed(() => {
   border-color: rgba(212, 143, 47, 0.7);
   font-weight: 700;
 }
+/* 多选态：淡蓝半透明底 + 白字 + 淡蓝描边，整体不抢眼但能跟白底/金底明显区分 */
+.viewer-token-chip.is-multi-selected {
+  background: rgba(var(--accent-rgb), 0.22);
+  color: #fff;
+  border: 1.5px solid rgba(var(--accent-rgb), 0.45);
+  font-weight: 700;
+  padding: 1.5px 7.5px;
+}
+.viewer-token-chip.is-multi-selected:hover {
+  background: rgba(var(--accent-rgb), 0.38);
+  color: #fff;
+  border-color: rgba(var(--accent-rgb), 0.7);
+}
+.viewer-token-chip.is-multi-selected.is-favorited-chip {
+  /* 收藏 + 多选：多选色为主（金底被多选淡蓝半透明叠加 → 浅金蓝混合色） */
+  background: rgba(var(--accent-rgb), 0.22);
+  color: #fff;
+  border-color: rgba(var(--accent-rgb), 0.45);
+}
+
+/* viewer 工具栏里的多选态指示器（"已选 N 个 tag"）—— 跟多选 chip 同款淡蓝 */
+.viewer-multiselect-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 10px;
+  padding: 3px 10px;
+  background: rgba(var(--accent-rgb), 0.22);
+  border: 1px solid rgba(var(--accent-rgb), 0.45);
+  border-radius: 12px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+.viewer-multiselect-indicator .hint {
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 11px;
+}
+/* 指示器里的"清空"按钮：在淡蓝底上用白字 + 半透明白边，跟指示器一个色系 */
+.viewer-multiselect-indicator button {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+  box-shadow: none;
+  transform: none;
+}
+.viewer-multiselect-indicator button:hover {
+  background: rgba(255, 255, 255, 0.3);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.55);
+  filter: none;
+  box-shadow: none;
+  transform: none;
+}
+
+/* 角色右键菜单里的分隔线（单 tag 区 / 多选区 之间） */
+.char-ctx-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line, rgba(0, 0, 0, 0.1));
+}
+
 .viewer-fav-star {
   background: rgba(255, 255, 255, 0.12);
   border: 1px solid rgba(255, 255, 255, 0.3);
@@ -5812,6 +6719,98 @@ const tagFolderPreview = computed(() => {
   outline-offset: -2px;
 }
 
+/* 收藏画师/角色命中：卡片边缘金色光圈（光晕 + 内色环 + 慢呼吸）。
+   不用 outline 的原因：与 .image-card.has-caption 的绿色 outline 互斥，
+   而 box-shadow 各层独立、可叠加，同时能再扩出"远场柔光"。
+   overflow: hidden 不会裁掉 box-shadow（shadow 在 element 外部）。 */
+.image-card.is-favorited {
+  box-shadow:
+    0 0 0 2px rgba(245, 158, 11, 0.95),
+    0 0 18px 2px rgba(245, 158, 11, 0.55),
+    0 0 36px 6px rgba(245, 158, 11, 0.18);
+  animation: fav-halo-pulse 3.2s ease-in-out infinite;
+}
+
+/* AI 标签（ai-assisted / ai-generated）：紫色光圈。
+   颜色刻意与 .image-card.has-caption 绿、收藏金、rating 红/橙/绿全部分开。 */
+.image-card.has-ai-badge {
+  box-shadow:
+    0 0 0 2px rgba(168, 85, 247, 0.95),
+    0 0 18px 2px rgba(168, 85, 247, 0.6),
+    0 0 36px 6px rgba(168, 85, 247, 0.2);
+  animation: ai-halo-pulse 3.2s ease-in-out infinite;
+}
+
+/* 同时命中：内金环 + 紧贴的紫外环 + 紫主光 + 金远光。
+   两种属性都一眼可辨；特异性更高（两个 class 同时命中），
+   覆盖上面两个单色规则的 box-shadow / animation。 */
+.image-card.is-favorited.has-ai-badge {
+  box-shadow:
+    0 0 0 2px rgba(245, 158, 11, 0.95),
+    0 0 0 4px rgba(168, 85, 247, 0.85),
+    0 0 20px 3px rgba(168, 85, 247, 0.55),
+    0 0 40px 6px rgba(245, 158, 11, 0.22);
+  animation: dual-halo-pulse 3.4s ease-in-out infinite;
+}
+
+/* 收藏/AI 卡片悬停：保留 .image-card:hover 的 brightness/filter 反馈，
+   不在这里重写 box-shadow —— 动画期间动画的 box-shadow 永远胜过 :hover 的静态声明，
+   写两套只会互相覆盖毫无意义。 */
+
+/* 呼吸动画：仅微调外发光强度，色环始终保持可见（不缩成 0）。
+   prefers-reduced-motion 关闭动画避免对前庭敏感用户造成困扰。 */
+@keyframes fav-halo-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 2px rgba(245, 158, 11, 0.92),
+      0 0 16px 2px rgba(245, 158, 11, 0.5),
+      0 0 32px 6px rgba(245, 158, 11, 0.16);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px rgba(245, 158, 11, 1),
+      0 0 22px 3px rgba(245, 158, 11, 0.72),
+      0 0 44px 8px rgba(245, 158, 11, 0.28);
+  }
+}
+@keyframes ai-halo-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 2px rgba(168, 85, 247, 0.92),
+      0 0 16px 2px rgba(168, 85, 247, 0.55),
+      0 0 32px 6px rgba(168, 85, 247, 0.18);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px rgba(168, 85, 247, 1),
+      0 0 22px 3px rgba(168, 85, 247, 0.78),
+      0 0 44px 8px rgba(168, 85, 247, 0.3);
+  }
+}
+@keyframes dual-halo-pulse {
+  0%, 100% {
+    box-shadow:
+      0 0 0 2px rgba(245, 158, 11, 0.92),
+      0 0 0 4px rgba(168, 85, 247, 0.82),
+      0 0 18px 3px rgba(168, 85, 247, 0.5),
+      0 0 36px 6px rgba(245, 158, 11, 0.2);
+  }
+  50% {
+    box-shadow:
+      0 0 0 2px rgba(245, 158, 11, 1),
+      0 0 0 4px rgba(168, 85, 247, 0.95),
+      0 0 24px 4px rgba(168, 85, 247, 0.7),
+      0 0 46px 9px rgba(245, 158, 11, 0.32);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .image-card.is-favorited,
+  .image-card.has-ai-badge,
+  .image-card.is-favorited.has-ai-badge {
+    animation: none;
+  }
+}
+
 /* Danbooru 分级角标：左下角，配色与 Tag 浏览的 rating 徽章一致 */
 .rating-badge {
   position: absolute;
@@ -5897,7 +6896,7 @@ const tagFolderPreview = computed(() => {
   font-weight: normal;
 }
 
-/* Modern Log UI */
+/* Modern Log UI — 进度条版本（替代旧文本日志） */
 .modern-log-wrapper {
   margin-top: 12px;
   background: rgba(26, 20, 15, 0.96);
@@ -5906,37 +6905,6 @@ const tagFolderPreview = computed(() => {
   box-shadow: 0 8px 32px rgba(30, 41, 82, 0.15);
   display: flex;
   flex-direction: column;
-  /* 固定日志面板最大高度。之前 control-panel 解除了 max-height 后，
-     日志会随条数不停拉高把整栏带着无限增长。锁到 360px 后多余日志在
-     .modern-log-body 内部滚动，整栏高度可预期。放大态会单独覆盖此限制。 */
-  max-height: 360px;
-  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-}
-.modern-log-wrapper.is-expanded {
-  flex: 1;
-  min-height: 0;
-}
-
-/* 放大态：脱离正常流，铺满整个 control-panel 卡片 */
-.modern-log-wrapper.is-maximized {
-  position: absolute;
-  inset: 0;
-  margin-top: 0;
-  z-index: 20;
-  border-radius: 18px;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
-  min-height: 0;
-  /* 放大态需要覆盖默认的 360px 上限 */
-  max-height: none;
-  flex: none;
-}
-.modern-log-wrapper.is-maximized .modern-log-header {
-  cursor: default;
-  border-radius: 18px 18px 0 0;
-}
-.modern-log-wrapper.is-maximized .modern-log-body {
-  flex: 1 1 auto;
-  min-height: 0;
 }
 
 .modern-log-header {
@@ -5944,18 +6912,9 @@ const tagFolderPreview = computed(() => {
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  cursor: pointer;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0) 100%);
   user-select: none;
   border-radius: 16px;
-  transition: background 0.2s;
-}
-.modern-log-wrapper.is-expanded .modern-log-header {
-  border-bottom-left-radius: 0;
-  border-bottom-right-radius: 0;
-}
-.modern-log-header:hover {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.02) 100%);
 }
 
 .log-header-left {
@@ -5970,16 +6929,11 @@ const tagFolderPreview = computed(() => {
   border-radius: 50%;
   background: #666;
   box-shadow: 0 0 0 2px rgba(102, 102, 102, 0.2);
+  transition: background 0.2s, box-shadow 0.2s;
 }
 .status-dot.is-active {
   background: #51cf66;
   box-shadow: 0 0 0 2px rgba(81, 207, 102, 0.2);
-}
-
-@keyframes pulse {
-  0% { box-shadow: 0 0 0 0 rgba(81, 207, 102, 0.4); }
-  70% { box-shadow: 0 0 0 6px rgba(81, 207, 102, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(81, 207, 102, 0); }
 }
 
 .log-title {
@@ -5989,116 +6943,118 @@ const tagFolderPreview = computed(() => {
   letter-spacing: 0.5px;
 }
 
-.log-header-right {
+/* 进度条面板：紧贴 header 下方，单条横向 bar + 1 行汇总文本。
+   灰色"未下载"段由 bar 容器自身背景承担，不渲染独立 div（节省一个空节点）。 */
+.progress-panel {
+  padding: 4px 16px 14px 16px;
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 6px;
+}
+.progress-phase {
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.7);
+  letter-spacing: 0.3px;
+}
+.progress-phase .running-failure-hint {
+  color: #fbbf24;
+  font-weight: 600;
+  padding: 1px 6px;
+  margin-left: 2px;
+  border-radius: 4px;
+  background: rgba(251, 191, 36, 0.12);
 }
 
-.log-icon-btn {
+/* 「需手动重试的页」小提示：简洁不抢眼，比之前的"重试这些页"按钮 + auto-pause 横幅轻很多。
+   失败页变化时 syncStatusOnce 驱动更新，× 关闭（dismissedHintSignatures 记忆）。 */
+.retry-pages-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 6px 10px 6px 10px;
+  border: 1px solid rgba(251, 191, 36, 0.45);
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.08);
+  color: #fcd34d;
+  font-size: 11.5px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  letter-spacing: 0.2px;
+  line-height: 1.3;
+}
+.retry-pages-hint .retry-pages-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.retry-pages-hint .retry-pages-close {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.10);
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
-  padding: 0;
-  border-radius: 8px;
+  transition: background 0.15s;
+}
+.retry-pages-hint .retry-pages-close:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+.retry-pages-hint .retry-pages-close:focus-visible {
+  outline: 1px solid currentColor;
+  outline-offset: 1px;
+}
+
+.progress-bar {
+  position: relative;
+  height: 8px;
+  width: 100%;
   background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: rgba(255, 255, 255, 0.85);
-  cursor: pointer;
-  transition: background 0.2s, border-color 0.2s, color 0.2s;
-}
-.log-icon-btn:hover {
-  background: rgba(255, 255, 255, 0.16);
-  border-color: rgba(255, 255, 255, 0.3);
-  color: #fff;
-}
-
-.modern-log-body {
-  padding: 0 16px 16px 16px;
-  overflow-y: auto;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-.modern-log-body::-webkit-scrollbar {
-  width: 6px;
-}
-.modern-log-body::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.2);
-  border-radius: 3px;
-}
-
-.modern-log-line {
-  display: flex;
-  gap: 10px;
-  padding: 8px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-  font-family: 'JetBrains Mono', Consolas, monospace;
-  font-size: 11.5px;
-  line-height: 1.4;
-  word-break: break-all;
-  animation: slideIn 0.2s ease-out forwards;
-  cursor: pointer;
-  transition: background 0.15s ease;
-}
-.modern-log-line:hover {
-  background: rgba(255, 255, 255, 0.04);
-}
-.modern-log-line .log-text {
-  flex: 1;
-  min-width: 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  white-space: pre-wrap;
-}
-.modern-log-line.is-expanded {
-  background: rgba(255, 255, 255, 0.06);
-}
-.modern-log-line.is-expanded .log-text {
-  -webkit-line-clamp: unset;
-  line-clamp: unset;
-  overflow: visible;
-  white-space: pre-wrap;
-  user-select: text;
-}
-.modern-log-line:last-child {
-  border-bottom: none;
-}
-
-.modern-log-hint {
-  font-size: 11px;
-  color: rgba(255, 255, 255, 0.55);
-  padding: 6px 0;
-  border-bottom: 1px dashed rgba(255, 255, 255, 0.1);
-  margin-bottom: 4px;
-  font-style: italic;
-}
-
-.log-toolbar-btn {
-  font-size: 11px;
-  background: rgba(255, 255, 255, 0.08);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  color: rgba(255, 255, 255, 0.85);
-  padding: 3px 10px;
   border-radius: 999px;
-  cursor: pointer;
-  transition: background 0.2s, border-color 0.2s;
-  font-family: inherit;
+  overflow: hidden;
+  display: flex;
 }
-.log-toolbar-btn:hover {
-  background: rgba(255, 255, 255, 0.16);
-  border-color: rgba(255, 255, 255, 0.3);
+.progress-seg {
+  height: 100%;
+  transition: width 0.25s cubic-bezier(0.25, 0.8, 0.25, 1);
 }
-.log-toolbar-btn.active {
-  background: rgba(255, 188, 86, 0.25);
-  border-color: rgba(255, 188, 86, 0.5);
-  color: #ffd699;
+.progress-seg-success {
+  background: #10b981;
+  border-radius: 999px 0 0 999px;
 }
+/* 唯一一段（100% 成功 / 100% 失败）时让它仍带圆角，避免左/右边角方掉 */
+.progress-seg-success:first-child:last-child { border-radius: 999px; }
+.progress-seg-fail {
+  background: #dc2626;
+  border-radius: 0 999px 999px 0;
+}
+.progress-seg-fail:last-child:not(:first-child) { border-radius: 0 999px 999px 0; }
+/* 抓取 ID 阶段的页进度条：单色（蓝/青），与下载阶段的绿色 success 段区分。 */
+.progress-seg-page {
+  background: #38bdf8;
+  border-radius: 999px;
+}
+
+.progress-summary {
+  font-size: 11.5px;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  color: rgba(255, 255, 255, 0.75);
+  letter-spacing: 0.3px;
+  line-height: 1.4;
+}
+.progress-fail-tail { color: #fca5a5; }
+.progress-success-tail { color: #86efac; }
 
 .error-banner {
   margin-top: 10px;
@@ -6168,40 +7124,6 @@ const tagFolderPreview = computed(() => {
   user-select: text;
 }
 
-.log-icon {
-  flex-shrink: 0;
-  width: 14px;
-  text-align: center;
-  font-weight: bold;
-}
-
-.log-info { color: #d4d4d4; }
-.log-info .log-icon { color: #4dabf7; }
-
-.log-success { color: #d4d4d4; }
-.log-success .log-text { color: #8ce99a; font-weight: bold; }
-.log-success .log-icon { color: #51cf66; }
-
-.log-error { color: #ffa8a8; font-weight: bold; }
-.log-error .log-icon { color: #ff6b6b; }
-
-.log-warn { color: #ffec99; }
-.log-warn .log-icon { color: #fcc419; }
-
-/* Transitions */
-.log-expand-enter-active, .log-expand-leave-active {
-  transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-  overflow: hidden;
-}
-.log-expand-enter-from, .log-expand-leave-to {
-  opacity: 0;
-  transform: translateY(-10px);
-}
-.log-expand-enter-to, .log-expand-leave-from {
-  opacity: 1;
-  transform: translateY(0);
-}
-
 @keyframes slideIn {
   from { opacity: 0; transform: translateX(-5px); }
   to { opacity: 1; transform: translateX(0); }
@@ -6214,7 +7136,8 @@ const tagFolderPreview = computed(() => {
   top: 0;
   left: 0;
   right: 0;
-  z-index: 10000;
+  /* 必须高于所有 modal：合并/翻译/收藏等 modal 用的是 10020，10030 留出缓冲 */
+  z-index: 10030;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -6306,7 +7229,7 @@ const tagFolderPreview = computed(() => {
   color: #fff;
 }
 
-/* ---------------- 「显示 ▾」下拉菜单（排序/筛选/卡片/缩略图/每页/高分/看图刷新） ---------------- */
+/* ---------------- 「显示 ▾」下拉菜单（排序/筛选/卡片/缩略图/每页） ---------------- */
 .display-dropdown {
   position: relative;
   display: inline-block;
@@ -6427,6 +7350,103 @@ const tagFolderPreview = computed(() => {
   border-color: transparent;
 }
 
+/* ---------------- 排行榜子操作栏 + 日期模式切换 ---------------- */
+.rank-action-bar,
+.date-mode-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+  padding: 6px 8px;
+  background: rgba(var(--accent-rgb), 0.05);
+  border: 1px solid rgba(var(--accent-rgb), 0.15);
+  border-radius: 10px;
+}
+.rank-action-bar .rab-label,
+.date-mode-row .rab-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-deep);
+  letter-spacing: 0.4px;
+}
+/* 日期模式行：第二个 seg-group（下载 / 仅收集ID / 补全/补齐 / 按ID下载）强制换行到第二行，
+   避免窄面板下被挤回第一行跟「单日/日期范围」混在一起。seg-group 自身有 justify-content:flex-end，
+   flex-basis:100% 会让按钮贴到第二行最右边 —— 这里 override 成 flex-start 让按钮贴左对齐。 */
+.date-mode-row .seg-group + .seg-group {
+  flex-basis: 100%;
+  justify-content: flex-start;
+}
+.concurrency-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+  margin: 0;
+  white-space: nowrap;
+}
+/* 头部控制行版：与 ghost 按钮同高（26px）。从 30×~88 → 26×~67，让出 ~21px 给新按钮。 */
+.concurrency-field-inline {
+  height: 26px;
+  padding: 0 8px;
+  gap: 4px;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--accent-rgb), 0.2);
+  background: rgba(var(--accent-rgb), 0.06);
+  color: var(--accent-deep);
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  transition: background 0.18s, border-color 0.18s;
+}
+.concurrency-field-inline:hover {
+  background: rgba(var(--accent-rgb), 0.12);
+  border-color: rgba(var(--accent-rgb), 0.35);
+}
+.concurrency-field-inline > span {
+  font-size: 11px;
+  letter-spacing: 0.2px;
+}
+.concurrency-field-inline .concurrency-input {
+  /* 头部版输入框：宽 30 × 高 20，与胶囊外框同色；去边框让数字像嵌在外壳里 */
+  width: 30px;
+  height: 20px;
+  font-size: 11px;
+  padding: 1px 2px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--accent-deep);
+}
+.concurrency-field-inline .concurrency-input:focus {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: var(--accent-deep);
+}
+.concurrency-input {
+  width: 42px;
+  height: 26px;
+  padding: 2px 4px;
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 600;
+  color: var(--accent-deep);
+  text-align: center;
+  border: 1px solid rgba(var(--accent-rgb), 0.3);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.85);
+  -moz-appearance: textfield;
+}
+.concurrency-input::-webkit-outer-spin-button,
+.concurrency-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.concurrency-input:focus {
+  outline: none;
+  border-color: var(--accent-deep);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18);
+}
+
 /* ---------------- 翻译下拉菜单（合并「翻译角色」与「导入翻译字典」） ---------------- */
 .translate-dropdown {
   position: relative;
@@ -6535,6 +7555,31 @@ const tagFolderPreview = computed(() => {
   color: var(--accent-deep);
 }
 
+/* 刷新菜单里的开关型行：左侧 label，右侧「开/关」pill；
+   用 .is-toggle 修饰而不是另起元素，避免和动作行 class 冲突。 */
+.refresh-menu-item.is-toggle {
+  cursor: pointer;
+}
+.refresh-menu-item.is-toggle .refresh-menu-state {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  background: var(--surface-muted);
+  transition: background 0.14s ease, color 0.14s ease;
+}
+.refresh-menu-item.is-toggle.active .refresh-menu-state {
+  color: #fff;
+  background: linear-gradient(135deg, #ff8a3d, #e05a17);
+}
+.refresh-menu-divider {
+  height: 1px;
+  margin: 4px 8px;
+  background: var(--line);
+  opacity: 0.7;
+}
+
 /* 刷新范围 Modal 样式已随 RefreshRangeModal.vue 一起搬走 */
 
 /* ---------------- 收藏卡片 / chip 异色高亮 ---------------- */
@@ -6543,7 +7588,7 @@ const tagFolderPreview = computed(() => {
   display: inline-flex;
   align-items: center;
 }
-.search-input-with-clear { padding-right: 28px; }
+.search-input-with-clear { padding-right: 36px; }
 .search-clear-btn {
   position: absolute;
   right: 6px;
@@ -6553,25 +7598,31 @@ const tagFolderPreview = computed(() => {
   bottom: 0;
   margin: auto 0;
   transform: none;
-  width: 18px;
-  height: 18px;
+  width: 22px;
+  height: 22px;
   padding: 0;
-  border: none;
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.18));
   border-radius: 50%;
-  background: rgba(30, 41, 82, 0.35);
-  color: #fff;
-  font-size: 13px;
+  background: var(--surface, rgba(255, 255, 255, 0.5));
+  color: var(--muted, #6b5a3c);
+  /* 关键：× 是 U+00D7 (multiplication sign)，em-box 偏上。
+     - 用 display:grid + place-items:center 让 glyph 在 22×22 box 内严格居中
+     - line-height 锁 1 防止被父级 input 上下文拉偏
+     - 22px box 配 14px × ：em-box 略偏上但视觉中心和 box 中心基本重合 */
+  font-size: 14px;
   line-height: 1;
+  font-family: inherit;
   cursor: pointer;
   box-shadow: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  /* 只过渡背景色，不过渡 transform，杜绝悬停/点击时的位移抖动 */
-  transition: background-color 0.14s ease;
+  display: grid;
+  place-items: center;
+  /* 只过渡背景色 / 边框 / 颜色，不过渡 transform，杜绝悬停/点击时的位移抖动 */
+  transition: background-color 0.14s ease, border-color 0.14s ease, color 0.14s ease, opacity 0.14s ease;
 }
 .search-clear-btn:hover:not(:disabled) {
-  background: rgba(157, 44, 44, 0.7);
+  background: rgba(157, 44, 44, 0.12);
+  border-color: rgba(157, 44, 44, 0.5);
+  color: #9d2c2c;
   filter: none;
   box-shadow: none;
   transform: none;
@@ -6580,6 +7631,8 @@ const tagFolderPreview = computed(() => {
   transform: none;
   filter: none;
 }
+
+/* 搜索历史下拉样式已迁到 ./SearchHistoryDropdown.vue（避免 scoped CSS 跨组件失效） */
 
 /* 单张图片收藏 ♥ 按钮，固定在缩略图右上角 */
 .image-card { position: relative; }
@@ -6874,7 +7927,6 @@ const tagFolderPreview = computed(() => {
   /* 只允许横向滚动兜底；不显式关掉纵向，overflow-y 会被浏览器算成 auto，
      横向滚动条一出现就吃掉行高 → 冒出一条无意义的纵向滚动条（最右侧上下箭头） */
   overflow-y: hidden;
-  scrollbar-width: thin;
 }
 .pg-block-mini {
   padding: 4px 7px;
@@ -7097,7 +8149,9 @@ const tagFolderPreview = computed(() => {
 /* ---------------- 顺序任务队列 ---------------- */
 .task-queue-panel {
   margin-top: 12px;
-  padding: 12px 14px;
+  /* 左右 padding 设为 0：让任务条撑到面板边缘，最大化利用左栏宽度；
+     任务条自己仍保留 9px 内部 padding 保证状态图标/标签不贴边。 */
+  padding: 12px 0;
   border: 1px solid var(--line);
   border-radius: 14px;
   background:
@@ -7108,86 +8162,14 @@ const tagFolderPreview = computed(() => {
   gap: 10px;
 }
 
-/* 失败页横幅 */
-.failed-pages-banner {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border: 1px solid #e0a23d;
-  border-left: 4px solid #e0772d;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #fff4e3, #ffe8cc);
-  color: #6a3a08;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-}
-.failed-pages-banner .fpb-text {
-  font-size: 12.5px;
-  font-weight: 600;
-  line-height: 1.5;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-.failed-pages-banner .fpb-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.failed-pages-banner .fpb-retry {
-  padding: 6px 14px;
-  border: none;
-  border-radius: 8px;
-  background: linear-gradient(135deg, #ff8a3d, #e05a17);
-  color: #fff;
-  font-weight: 700;
-  font-size: 12.5px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-.failed-pages-banner .fpb-retry:hover:not(:disabled) {
-  filter: brightness(1.08);
-}
-.failed-pages-banner .fpb-retry:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.failed-pages-banner .fpb-dismiss {
-  padding: 4px 8px;
-  border: 1px solid rgba(106, 58, 8, 0.35);
-  border-radius: 6px;
-  background: transparent;
-  color: #6a3a08;
-  cursor: pointer;
-  font-size: 12px;
-}
-.failed-pages-banner .fpb-dismiss:hover {
-  background: rgba(106, 58, 8, 0.1);
-}
 .tq-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  cursor: pointer;            /* 整行点击折叠/展开 */
-  user-select: none;
-}
-.tq-chevron {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 6px;
-  font-size: 11px;
-  color: var(--accent-deep);
-  background: rgba(var(--accent-rgb), 0.1);
-  transition: transform 0.2s ease, background 0.2s ease;
-}
-.tq-header:hover .tq-chevron { background: rgba(var(--accent-rgb), 0.18); }
-.tq-chevron.open {
-  transform: rotate(90deg);
+  /* 面板 padding 设为 0 后，标题直接顶到左边；补一个 9px 左 padding 跟 tq-item 内 padding 对齐。 */
+  padding-left: 9px;
+  padding-right: 9px;
 }
 .tq-count-badge {
   font-weight: 600;
@@ -7245,13 +8227,13 @@ const tagFolderPreview = computed(() => {
   gap: 5px;
   /* 最多显示约 3 行任务，再多用滚轮纵向收纳，避免把下方日志挤出去 */
   max-height: 108px;
+  /* 允许用户像「粘贴 ID 列表」textarea 那样从右下角拖动纵向 resize，
+     队列项多的时候能看到更多；flex 列项 + overflow-y: auto 是 Chromium 支持的前提。 */
+  resize: vertical;
   overflow-y: auto;
   overflow-x: hidden;
-  padding-right: 3px;
+  /* 滚动条样式走全局（style.css）—— 跟画廊上下滚动条同款 */
 }
-.tq-list::-webkit-scrollbar { width: 6px; }
-.tq-list::-webkit-scrollbar-thumb { background: rgba(var(--accent-rgb), 0.25); border-radius: 3px; }
-.tq-list::-webkit-scrollbar-track { background: transparent; }
 .tq-item {
   position: relative;
   display: flex;
@@ -7263,6 +8245,7 @@ const tagFolderPreview = computed(() => {
   border: 1px solid var(--line);
   font-size: 12.5px;
   flex-shrink: 0;            /* 在滚动容器里保持每行高度，不被压扁 */
+  flex-wrap: wrap;           /* 让 .tq-item-error 用 flex-basis:100% 强制换行 */
   cursor: grab;              /* 提示整行可拖动 */
   user-select: none;         /* 拖动时不要选中文字 */
   -webkit-user-drag: element;
@@ -7301,6 +8284,35 @@ const tagFolderPreview = computed(() => {
 .tq-item.warning .tq-item-status { color: #b46b08; }
 .tq-item.skipped .tq-item-status { color: #64748b; }
 .tq-item.error .tq-item-status { color: #dc2626; }
+/* 错误 / 等待重试说明：内联在 label 下面，Electron 里 :title tooltip 几乎不可见。 */
+.tq-item-error {
+  flex-basis: 100%;
+  margin: 4px 0 2px 22px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--muted, #6b7280);
+  background: rgba(0, 0, 0, 0.04);
+  word-break: break-all;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.tq-item.error .tq-item-error { color: #b91c1c; background: rgba(239, 68, 68, 0.08); }
+.tq-item.warning .tq-item-error { color: #92400e; background: rgba(217, 119, 6, 0.08); }
+/* 复制错误按钮 */
+.tq-copy {
+  background: rgba(0, 0, 0, 0.05);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 6px;
+  height: 20px;
+  cursor: pointer;
+  color: inherit;
+}
+.tq-copy:hover { background: rgba(0, 0, 0, 0.1); }
 /* 拖拽中：原位半透明，光标切换为 grabbing */
 .tq-item.tq-dragging {
   cursor: grabbing;
@@ -7332,9 +8344,7 @@ const tagFolderPreview = computed(() => {
   overflow-x: auto;         /* 文字过长时左右滚动查看 */
   overflow-y: hidden;
 }
-.tq-item-label::-webkit-scrollbar { height: 5px; }
-.tq-item-label::-webkit-scrollbar-thumb { background: rgba(var(--accent-rgb), 0.22); border-radius: 3px; }
-.tq-item-label::-webkit-scrollbar-track { background: transparent; }
+/* tq-item-label 滚动条走全局（style.css），跟画廊上下滚动条同款 */
 .tq-item-ops { display: inline-flex; gap: 4px; flex: 0 0 auto; }
 .tq-mini {
   font-size: 12px;
@@ -7365,7 +8375,17 @@ const tagFolderPreview = computed(() => {
   border-radius: 9px;
   background: rgba(var(--accent-rgb), 0.02);
 }
-.tq-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.tq-actions { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.tq-action-group { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.tq-action-label {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+  padding: 0 4px 0 2px;
+  border-left: 2px solid rgba(var(--accent-rgb), 0.35);
+  margin-right: 2px;
+  user-select: none;
+}
 .tq-actions button {
   font-size: 12px;
   padding: 5px 13px;
@@ -7587,14 +8607,20 @@ const tagFolderPreview = computed(() => {
 .mode-chip:hover:not(.active) { background: var(--soft-violet); }
 .mode-chip.active { background: var(--accent-gradient); box-shadow: 0 5px 12px rgba(var(--accent-rgb), 0.18); }
 .crawler-head-actions button { box-shadow: none; }
-.control-scroll { scrollbar-color: rgba(var(--violet-rgb), 0.24) transparent; }
 .task-queue-panel,
 .tq-item,
-.modern-log-wrapper,
-.failed-pages-banner { border-color: var(--line); }
+.modern-log-wrapper { border-color: var(--line); }
 .tq-item { background: var(--surface); }
 .tq-item.current { border-color: rgba(var(--accent-rgb), 0.55); background: rgba(var(--accent-rgb), 0.06); }
 .recent-page-chip { border-color: rgba(var(--violet-rgb), 0.12); background: var(--soft-violet); color: var(--accent-deep); }
+
+/* log.json 下载策略行：field-full + 内嵌 seg-group，跟上方子操作栏完全同款。
+   唯一微调：默认 seg-btn 是按右对齐（justify-content: flex-end），这里 field-full
+   是全宽文本，标签在左、按钮在左下更顺。「强制重下」激活态用同款 accent 渐变，
+   不另起 warning 色，避免引入新色相。 */
+.dl-strategy-row .seg-group {
+  justify-content: flex-start;
+}
 .gallery-tools select,
 .gallery-tools input { background: rgba(255, 255, 255, 0.92); }
 .viewer-corner-btn.is-active { box-shadow: 0 4px 16px rgba(var(--accent-rgb), 0.35); }
