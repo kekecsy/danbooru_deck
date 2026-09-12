@@ -112,6 +112,11 @@ const rankAction = ref('download');
 //   - download_by_ids=按ID下载（仅单日；针对日期 folder，与 rank 无关）
 // 与 rankAction 互不干扰（不同 mode 各自管自己的子操作状态）。
 const popularAction = ref('download');
+function openDownloadByIdsMode() {
+  form.value.mode = 'popular';
+  form.value.dateRange = false;
+  popularAction.value = 'download_by_ids';
+}
 // 「按ID下载」子操作迁移到 popularAction 下后，全局条件统一走这个 computed：
 // 包括日期同步、ID 粘贴区、下载策略行、resolveActualMode 等。
 // 放在 popularAction 后面、下面的 form↔gallery watch 前面：
@@ -353,6 +358,20 @@ let isModeSwitching = false;
 watch(() => gallery.value.selectedDate, (newDate) => {
   if (!newDate) return;
   const mode = form.value.mode;
+  // Tag browse has its own date picker, but it should follow the gallery date
+  // until the user explicitly overrides it in the browse footer.
+  if (
+    browse.value.open &&
+    browse.value.source === 'tags' &&
+    ISO_DATE.test(newDate) &&
+    (
+      !browse.value.targetDate ||
+      browse.value.targetDate === browse.value.galleryTargetDate
+    )
+  ) {
+    browse.value.targetDate = newDate;
+    browse.value.galleryTargetDate = newDate;
+  }
   // 「按ID下载」子操作：目标日期跟随右侧 GalleryCalendar，
   // 同时主动 fetch 新日期 folder 的待下载 ID 写回 idsText，
   // 解决"切到 B 日期 → 粘贴区仍是 A 的 ID"这个频繁补日期的痛点。
@@ -452,7 +471,7 @@ const task = ref({
   errorMessage: '',
   // 进度条数据：替代原 logs / totalLogCount / maximized / hideSuccess / expandedLogIdx。
   // /api/status 每秒拉一次，task_download_ids 入口在 main.py 设 total，worker 累加 success / fail。
-  progress: { total: 0, success: 0, fail: 0 },
+  progress: { total: 0, success: 0, skip: 0, fail: 0 },
   // 抓取 ID 阶段的页进度（按当前 scope 统计；total=0 时不渲染条）。
   // 后端 collect 循环里写 page_current / page_total，进入 download 时清零。
   // done = 已完整跑完的页数（不论成功失败），用于算出"成功 X 页"。
@@ -652,12 +671,37 @@ const downloadByIdsTargetDateLabel = computed(() => {
   return iso || todayString();
 });
 function onThumbClick(event, item) {
+  focusGalleryItem(item);
   if (event.ctrlKey || event.metaKey) {
     if (!selection.value.enabled) setSelectionEnabled(true);
     toggleItemSelection(item);
     return;
   }
   openViewer(item);
+}
+
+const galleryFocusKey = ref('');
+function focusGalleryItem(item) {
+  galleryFocusKey.value = itemKey(item);
+}
+function moveGalleryFocus(direction) {
+  const items = activeItems.value;
+  if (!items.length) return;
+  let index = items.findIndex(item => itemKey(item) === galleryFocusKey.value);
+  if (index < 0) index = 0;
+  const grid = document.querySelector('.gallery-grid');
+  const cards = grid ? Array.from(grid.querySelectorAll('.image-card')) : [];
+  const current = cards[index];
+  const columns = current && cards.length > 1
+    ? Math.max(1, cards.filter(card => Math.abs(card.offsetTop - current.offsetTop) <= 1).length)
+    : 1;
+  if (direction === 'left') index -= 1;
+  if (direction === 'right') index += 1;
+  if (direction === 'up') index -= columns;
+  if (direction === 'down') index += columns;
+  index = Math.max(0, Math.min(items.length - 1, index));
+  focusGalleryItem(items[index]);
+  cards[index]?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
 }
 
 // 只看已选 / 已选清单 / 翻页选择器
@@ -1063,7 +1107,12 @@ function gotoPage(n) {
 }
 // 每页张数：夹到 [1,120]，非法输入回落到当前值；改动会触发 habits 持久化 + localTotalPages 重算并夹紧 page
 function onPageSizeInput(event) {
-  const raw = Number(event.target.value);
+  const text = String(event.target.value ?? '').trim();
+  // Let the user clear the field while typing; committing an empty value here
+  // would immediately restore the previous page size and make multi-digit input
+  // feel like it is being rejected.
+  if (!text) return;
+  const raw = Number(text);
   const clamped = Number.isFinite(raw) ? Math.max(1, Math.min(120, Math.round(raw))) : gallery.value.pageSize;
   gallery.value.pageSize = clamped;
   event.target.value = clamped;
@@ -1102,7 +1151,7 @@ function pct(n, secondTotal) {
 // 进度条 hover 提示文本，给鼠标停留时看具体数字用
 const progressTooltip = computed(() => {
   const p = task.value.progress;
-  return `成功 ${p.success} / 失败 ${p.fail} / 总计 ${p.total}`;
+  return `成功 ${p.success} / 跳过 ${p.skip} / 失败 ${p.fail} / 总计 ${p.total}`;
 });
 
 function splitTags(value) {
@@ -1590,6 +1639,7 @@ async function syncStatusOnce() {
       task.value.progress = {
         total: status.progress.total || 0,
         success: status.progress.success || 0,
+        skip: status.progress.skip || 0,
         fail: status.progress.fail || 0,
       };
     }
@@ -2350,7 +2400,13 @@ async function copyQueueError(it) {
 }
 
 async function openLocal(item) {
-  await window.desktopAPI.gallery.openLocalFile(item.localPath);
+  if (!item?.localPath) return;
+  const ext = itemExtension(item);
+  const isMedia = VIDEO_EXTS.includes(ext) || ext === 'gif' || ext === 'zip';
+  const result = isMedia
+    ? await window.desktopAPI.gallery.revealLocalFile(item.localPath)
+    : await window.desktopAPI.gallery.openLocalFile(item.localPath);
+  if (!result?.ok) showToast(result?.message || '打开本地文件失败', 'error');
 }
 
 async function openOriginal(item) {
@@ -2643,13 +2699,7 @@ function toggleRefreshMenu() {
     stopRefreshScores();
     return;
   }
-  if (!gallery.value.selectedDate) {
-    showToast('请先选择日期', 'error');
-    return;
-  }
-  const willOpen = !refreshMenu.value.open;
-  if (willOpen) closeOtherToolbarDropdowns('refresh');
-  refreshMenu.value.open = willOpen;
+  refreshMenu.value.open = false;
 }
 function onRefreshChoice(scope) {
   refreshMenu.value.open = false;
@@ -2669,13 +2719,8 @@ function onDocClickForRefreshMenu(e) {
 // 这两个都是低频操作，原先两个独立按钮加起来太宽导致工具栏换行
 const translateMenu = ref({ open: false });
 function toggleTranslateMenu() {
-  if (!gallery.value.selectedDate) {
-    // 没选日期时直接走文件导入也是合理的，但翻译角色需要日期，
-    // 这里先打开菜单让用户选择，菜单里翻译角色项会被 disable
-  }
-  const willOpen = !translateMenu.value.open;
-  if (willOpen) closeOtherToolbarDropdowns('translate');
-  translateMenu.value.open = willOpen;
+  // 翻译菜单由鼠标悬浮显示，点击不再把菜单固定打开。
+  translateMenu.value.open = false;
 }
 function onTranslateChoice(action) {
   translateMenu.value.open = false;
@@ -2697,9 +2742,8 @@ function onDocClickForTranslateMenu(e) {
 // 这些都绑定 gallery.*，已有 habits watcher 持久化，菜单只是换个容器展示同样的 v-model。
 const displayMenu = ref({ open: false });
 function toggleDisplayMenu() {
-  const willOpen = !displayMenu.value.open;
-  if (willOpen) closeOtherToolbarDropdowns('display');
-  displayMenu.value.open = willOpen;
+  // 显示菜单由鼠标悬浮显示，点击不再把菜单固定打开。
+  displayMenu.value.open = false;
 }
 function onDocClickForDisplayMenu(e) {
   if (!displayMenu.value.open) return;
@@ -2793,6 +2837,9 @@ const browse = ref({
   hasMore: false,
   error: '',
   targetDate: '',       // 空 = 今天
+  // Last gallery date used by the browse date picker. If targetDate differs
+  // from this value, the user has explicitly selected a browse-only target.
+  galleryTargetDate: '',
   minScore: 0,          // 客户端筛选：最低分
   sortBy: 'default',    // 当前页排序：default(收集/搜索顺序) | score
   downloading: false,
@@ -2844,7 +2891,9 @@ const browseSelectedCount = computed(() => browse.value.selected.size);
 function openBrowse() {
   browse.value.source = 'tags';
   browse.value.open = true;
-  if (!browse.value.targetDate) browse.value.targetDate = todayString();
+  const galleryDate = gallery.value.selectedDate;
+  browse.value.targetDate = ISO_DATE.test(galleryDate || '') ? galleryDate : todayString();
+  browse.value.galleryTargetDate = browse.value.targetDate;
   // 不再记忆上次搜索：每次打开都清空，等用户主动输入
   browse.value.query = '';
   browse.value.posts = [];
@@ -3402,17 +3451,13 @@ const filteredUntranslated = computed(() => {
 });
 
 async function openTranslationModal() {
-  if (!gallery.value.selectedDate) {
-    showToast('请先选择日期', 'error');
-    return;
-  }
   translationModal.value.open = true;
   translationModal.value.mode = 'untranslated';
   translationModal.value.targetTag = '';
   translationModal.value.loading = true;
   translationModal.value.search = '';
   try {
-    const res = await fetch(`http://127.0.0.1:8000/api/untranslated_characters?date=${encodeURIComponent(gallery.value.selectedDate)}`);
+    const res = await fetch('http://127.0.0.1:8000/api/untranslated_characters');
     const data = await res.json();
     translationModal.value.list = data.tags || [];
   } catch (err) {
@@ -3578,7 +3623,10 @@ function openBrowseWithQuery(query) {
   if (!q) return;
   openBrowse();
   const d = gallery.value.selectedDate;
-  if (d && /^\d{4}-\d{2}-\d{2}$/.test(d)) browse.value.targetDate = d;
+  if (d && ISO_DATE.test(d)) {
+    browse.value.targetDate = d;
+    browse.value.galleryTargetDate = d;
+  }
   browse.value.query = q;
   runBrowseSearch(1);
 }
@@ -4277,6 +4325,15 @@ async function copyViewerImage() {
     return;
   }
   let imagePath = item.localPath;
+  const ext = itemExtension(item);
+  if (VIDEO_EXTS.includes(ext)) {
+    showToast('视频不能直接复制为图片，请使用“打开本地”定位文件', 'info');
+    return;
+  }
+  if (ext === 'zip') {
+    showToast('ZIP 不能直接复制，请先转换为 GIF 或使用“打开本地”定位文件', 'info');
+    return;
+  }
   if ((item.filename || '').toLowerCase().endsWith('.zip')) {
     const gifPath = imagePath.replace(/\.zip$/i, '.gif');
     if (await window.desktopAPI.file.exists(gifPath)) imagePath = gifPath;
@@ -4300,6 +4357,58 @@ async function copyViewerImage() {
     }
   } else {
     showToast(`复制失败：${result?.error || '不支持的图片格式'}`, 'error');
+  }
+}
+
+async function copyViewerImageWithWatermark() {
+  const item = viewerItem.value;
+  const author = String(item?.artist || item?.author || '').trim();
+  if (!item?.localPath) { showToast('当前图片没有可复制的本地文件', 'warning'); return; }
+  if (!author) { showToast('当前图片没有作者名称，无法生成水印', 'warning'); return; }
+  try {
+    const sourceUrl = await window.desktopAPI.file.toLocalUrl(item.localPath);
+    const image = new Image();
+    image.src = sourceUrl;
+    await new Promise((resolve, reject) => { image.onload = resolve; image.onerror = reject; });
+    const scale = Math.min(1, 2000 / Math.max(image.naturalWidth, image.naturalHeight));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+    canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    // 作者水印沿用打码编辑器的字体设置，只绘制半透明文字，不添加背景码块。
+    let editorHabits = {};
+    try { editorHabits = JSON.parse(localStorage.getItem('editorHabits') || '{}'); } catch { /* 使用默认字体 */ }
+    const fontFamily = typeof editorHabits.stripeFontFamily === 'string' && editorHabits.stripeFontFamily
+      ? editorHabits.stripeFontFamily : 'Microsoft YaHei';
+    const habitSize = Number.isFinite(editorHabits.stripeFontSize) && editorHabits.stripeFontSize > 0
+      ? editorHabits.stripeFontSize : 26;
+    const padding = Math.max(10, Math.round(Math.min(canvas.width, canvas.height) * 0.018));
+    const fontSize = Math.max(14, Math.min(72, Math.round(habitSize * scale)));
+    ctx.font = `700 ${fontSize}px "${fontFamily}", "Segoe UI", sans-serif`;
+    const maxTextWidth = canvas.width * 0.68;
+    let text = author;
+    while (text.length > 2 && ctx.measureText(text).width > maxTextWidth) text = `${text.slice(0, -2)}…`;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+    ctx.textBaseline = 'top';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.5)';
+    ctx.shadowBlur = Math.max(1, Math.round(fontSize * 0.12));
+    ctx.shadowOffsetX = 1;
+    ctx.shadowOffsetY = 1;
+    ctx.fillText(text, padding, padding, maxTextWidth);
+    ctx.shadowColor = 'transparent';
+    const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+    if (!blob) throw new Error('无法生成打码图片');
+    if (navigator.clipboard && window.ClipboardItem) {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+    } else {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const result = await window.desktopAPI.file.copyPng(bytes);
+      if (!result?.ok) throw new Error(result?.error || '复制失败');
+    }
+    showToast(`已添加作者水印并复制 · ${author}`, 'success');
+  } catch (error) {
+    showToast(`水印复制失败：${error.message || error}`, 'error');
   }
 }
 
@@ -4372,9 +4481,24 @@ async function onKeyDown(event) {
     return;
   }
 
-  if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
+    event.preventDefault();
+    moveGalleryFocus(event.key.slice(5).toLowerCase());
+    return;
+  }
+  if (event.key === 'Enter' && galleryFocusKey.value) {
+    const item = activeItems.value.find(entry => itemKey(entry) === galleryFocusKey.value);
+    if (item) {
+      event.preventDefault();
+      openViewer(item);
+    }
+  }
+
+  if (event.key === 'PageUp' || (event.shiftKey && event.key === 'ArrowLeft')) {
+    event.preventDefault();
     if (activePage.value > 1) activePage.value -= 1;
-  } else if (event.key === 'ArrowRight' || event.key === 'PageDown') {
+  } else if (event.key === 'PageDown' || (event.shiftKey && event.key === 'ArrowRight')) {
+    event.preventDefault();
     if (activePage.value < activeTotalPages.value) activePage.value += 1;
   } else if (event.key === 'Home') {
     activePage.value = 1;
@@ -4541,6 +4665,11 @@ const tagFolderPreview = computed(() => {
           >{{ showGalleryPanel ? '隐藏图库' : '显示图库' }}</button>
           <!-- 第 2 行：浏览 / 收集 / 协程 -->
           <button
+            class="ghost quick-id-download-btn"
+            @click="openDownloadByIdsMode"
+            title="切换到日期热门的按 ID 下载：粘贴 ID 列表，或使用当前日期 folder 中待下载的 ID"
+          >按ID下载</button>
+          <button
             class="ghost"
             @click="openBrowse"
             title="按 tag 像 Danbooru 原网页一样预览缩略图，勾选后下载到指定日期"
@@ -4575,6 +4704,7 @@ const tagFolderPreview = computed(() => {
            排行榜的目标文件夹是「今日」（没有日期语义），
            「按ID下载」语义上是针对日期 folder 的，已迁到「日期热门」栏下。 -->
       <div v-if="form.mode === 'rank'" class="rank-action-bar">
+        <span class="action-row-label">执行方式</span>
         <div class="seg-group">
           <button type="button" class="seg-btn" :class="{ active: rankAction === 'download' }"
             @click="rankAction = 'download'" title="默认：先按页收齐所有 ID，再按 ID 批量下载">下载</button>
@@ -4644,22 +4774,26 @@ const tagFolderPreview = computed(() => {
              - download_by_ids：按 ID 下载语义上针对具体日期 folder，范围下无意义
            下载协程数统一在头部，与 rank/tags 共享。 -->
       <div v-if="form.mode === 'popular'" class="date-mode-row">
-        <div class="seg-group" title="单日 vs 范围：单日=一个日期 folder，范围=跨日按天迭代">
-          <button type="button" class="seg-btn" :class="{ active: !form.dateRange }" @click="form.dateRange = false">单日</button>
-          <button type="button" class="seg-btn" :class="{ active: form.dateRange }" @click="form.dateRange = true">日期范围</button>
+        <div class="action-row-group" title="单日 vs 范围：单日=一个日期 folder，范围=跨日按天迭代">
+          <span class="action-row-label">时间范围</span>
+          <div class="seg-group">
+            <button type="button" class="seg-btn" :class="{ active: !form.dateRange }" @click="form.dateRange = false">单日</button>
+            <button type="button" class="seg-btn" :class="{ active: form.dateRange }" @click="form.dateRange = true">日期范围</button>
+          </div>
         </div>
-        <div class="seg-group">
-          <button type="button" class="seg-btn" :class="{ active: popularAction === 'download' }"
-            @click="popularAction = 'download'" title="默认：先按页收齐所有 ID，再按 ID 批量下载">下载</button>
-          <button type="button" class="seg-btn" :class="{ active: popularAction === 'collect_only' }"
-            @click="popularAction = 'collect_only'" title="只跑 ID 收集阶段：网不好时把 ID 先存到 folder 里，等网好再按 ID 下载">仅收集ID</button>
-          <button v-if="!form.dateRange" type="button" class="seg-btn" :class="{ active: popularAction === 'recover' }"
-            @click="onPickPopularRecover" title="按文件存在性补全热门页前 N 页：本地文件在 → 跳过；本地文件不在 → 下载（log 缓存 URL 优先）。可入队、暂停/继续，过程写 ids_data.json。仅在单日时可用">补全/补齐</button>
-          <button v-if="!form.dateRange" type="button" class="seg-btn" :class="{ active: popularAction === 'download_by_ids' }"
-            @click="popularAction = 'download_by_ids'" title="针对日期热门 folder 按 ID 下载：粘贴 ID 列表，或消费 folder 之前收集的待下载 ID。目标日期跟随右侧 GalleryCalendar 联动。仅在单日时可用">按ID下载</button>
+        <div class="action-row-group">
+          <span class="action-row-label">执行动作</span>
+          <div class="seg-group">
+            <button type="button" class="seg-btn" :class="{ active: popularAction === 'download' }"
+              @click="popularAction = 'download'" title="默认：先按页收齐所有 ID，再按 ID 批量下载">下载</button>
+            <button type="button" class="seg-btn" :class="{ active: popularAction === 'collect_only' }"
+              @click="popularAction = 'collect_only'" title="只跑 ID 收集阶段：网不好时把 ID 先存到 folder 里，等网好再按 ID 下载">仅收集ID</button>
+            <button v-if="!form.dateRange" type="button" class="seg-btn" :class="{ active: popularAction === 'recover' }"
+              @click="onPickPopularRecover" title="按文件存在性补全热门页前 N 页：本地文件在 → 跳过；本地文件不在 → 下载（log 缓存 URL 优先）。可入队、暂停/继续，过程写 ids_data.json。仅在单日时可用">补全/补齐</button>
+          </div>
         </div>
       </div>
-      <label class="field-full" v-if="form.mode === 'popular' && !form.dateRange">
+      <label class="field-full target-date-field" v-if="form.mode === 'popular' && !form.dateRange">
         <span>目标日期 <span class="muted compact-text">（默认昨天，可改）</span></span>
         <TaskDatePicker
           v-model="form.targetDate"
@@ -4692,7 +4826,7 @@ const tagFolderPreview = computed(() => {
       <!-- 标签下载无独立协程行：协程数在头部共享 -->
 
       <!-- 日期热门·按ID下载：粘贴/消费 folder 的 ID（已从排行榜栏迁到这里） -->
-      <label class="field-full" v-if="isDownloadByIdsMode">
+      <label class="field-full id-download-panel" v-if="isDownloadByIdsMode">
         <span>粘贴 ID 列表</span>
         <textarea
           v-model="form.idsText"
@@ -4709,7 +4843,7 @@ const tagFolderPreview = computed(() => {
       <!-- log.json 去重策略：和上面的 ID 列表同级成块，套用项目现成的 seg-group 模式（顶部
            popularAction 都在用），和子操作栏视觉完全一致。独立的 field-full 而非
            嵌套 label：避免点击文本框区域误触切换。 -->
-      <div class="field-full dl-strategy-row" v-if="isDownloadByIdsMode">
+      <div class="field-full dl-strategy-row id-download-panel" v-if="isDownloadByIdsMode">
         <span>下载策略</span>
         <div class="seg-group">
           <button type="button" class="seg-btn" :class="{ active: form.skipLogged }"
@@ -4893,6 +5027,11 @@ const tagFolderPreview = computed(() => {
               :style="{ width: pct(task.progress.success) + '%' }"
             ></div>
             <div
+              v-if="task.progress.skip > 0"
+              class="progress-seg progress-seg-skip"
+              :style="{ width: pct(task.progress.skip) + '%' }"
+            ></div>
+            <div
               v-if="task.progress.fail > 0"
               class="progress-seg progress-seg-fail"
               :style="{ width: pct(task.progress.fail) + '%' }"
@@ -4901,7 +5040,8 @@ const tagFolderPreview = computed(() => {
           <div class="progress-summary">
             <template v-if="task.progress.total > 0">
               <!-- 下载阶段：显示「成功+失败 / 总数」 -->
-              <span>{{ task.progress.success + task.progress.fail }}/{{ task.progress.total }} 完成</span>
+              <span>{{ task.progress.success + task.progress.skip + task.progress.fail }}/{{ task.progress.total }} 完成</span>
+              <span v-if="task.progress.skip" class="progress-skip-tail">，{{ task.progress.skip }} 跳过</span>
               <span v-if="task.progress.fail" class="progress-fail-tail">，{{ task.progress.fail }} 失败</span>
             </template>
             <template v-else-if="task.pageProgress.total > 0">
@@ -4918,6 +5058,7 @@ const tagFolderPreview = computed(() => {
             </template>
             <template v-else>
               <span>{{ task.progress.success }} 已完成</span>
+              <span v-if="task.progress.skip" class="progress-skip-tail">，{{ task.progress.skip }} 跳过</span>
               <span v-if="task.progress.fail" class="progress-fail-tail">，{{ task.progress.fail }} 失败</span>
             </template>
           </div>
@@ -4997,7 +5138,7 @@ const tagFolderPreview = computed(() => {
               @click.stop="toggleDisplayMenu"
               title="显示设置：排序 / 筛选 / 卡片大小 / 缩略图 / 每页张数"
             >显示 ▾</button>
-            <div v-if="displayMenu.open" class="display-menu" @click.stop>
+            <div class="display-menu" @click.stop>
               <div class="display-menu-row" title="排序方式">
                 <span class="display-menu-label">排序</span>
                 <div class="seg-group">
@@ -5053,6 +5194,7 @@ const tagFolderPreview = computed(() => {
                   type="number" min="1" max="120" step="1"
                   class="display-menu-control page-size-input"
                   :value="gallery.pageSize"
+                  @input="onPageSizeInput"
                   @change="onPageSizeInput"
                   @keyup.enter="onPageSizeInput"
                 />
@@ -5069,7 +5211,7 @@ const tagFolderPreview = computed(() => {
               <span v-if="!refresh.isRunning">刷新热度 ▾</span>
               <span v-else>{{ refresh.done }}/{{ refresh.total }}</span>
             </button>
-            <div v-if="refreshMenu.open && !refresh.isRunning" class="refresh-menu" @click.stop>
+            <div v-if="!refresh.isRunning" class="refresh-menu" @click.stop>
               <button class="refresh-menu-item" @click="onRefreshChoice('page')">
                 <span class="refresh-menu-label">本页</span>
                 <span class="refresh-menu-meta">{{ pagedLocalImages.length }} 张</span>
@@ -5101,7 +5243,7 @@ const tagFolderPreview = computed(() => {
               @click.stop="toggleTranslateMenu"
               title="翻译角色 / 导入翻译字典"
             >翻译 ▾</button>
-            <div v-if="translateMenu.open" class="translate-menu" @click.stop>
+            <div class="translate-menu" @click.stop>
               <button
                 class="translate-menu-item"
                 :disabled="!gallery.selectedDate"
@@ -5126,36 +5268,38 @@ const tagFolderPreview = computed(() => {
               </button>
             </div>
           </div>
-          <span class="search-input-wrap">
-            <input
-              v-model="searchInput"
-              class="search-input search-input-with-clear"
-              type="text"
-              placeholder="搜索作者 / 角色"
-              @focus="showSearchHistory = true"
-              @blur="onSearchHistoryBlur"
-              @keyup.enter="commitGallerySearch"
-              @keydown="searchHistoryRef?.handleKeydown?.($event)"
-            />
-            <button
-              v-if="searchInput"
-              class="search-clear-btn"
-              @click="setSearch('')"
-              title="清空搜索"
-              type="button"
-            >×</button>
-            <SearchHistoryDropdown
-              ref="searchHistoryRef"
-              :items="searchHistory"
-              :open="showSearchHistory"
-              header-label="最近搜索"
-              @pick="onPickSearchHistory"
-              @remove="removeSearchHistoryEntry"
-              @clear="clearSearchHistory"
-              @close="showSearchHistory = false"
-            />
-          </span>
-          <button class="secondary" @click="commitGallerySearch">搜索</button>
+          <div class="gallery-search-group">
+            <span class="search-input-wrap">
+              <input
+                v-model="searchInput"
+                class="search-input search-input-with-clear"
+                type="text"
+                placeholder="搜索作者 / 角色"
+                @focus="showSearchHistory = true"
+                @blur="onSearchHistoryBlur"
+                @keyup.enter="commitGallerySearch"
+                @keydown="searchHistoryRef?.handleKeydown?.($event)"
+              />
+              <button
+                v-if="searchInput"
+                class="search-clear-btn"
+                @click="setSearch('')"
+                title="清空搜索"
+                type="button"
+              >×</button>
+              <SearchHistoryDropdown
+                ref="searchHistoryRef"
+                :items="searchHistory"
+                :open="showSearchHistory"
+                header-label="最近搜索"
+                @pick="onPickSearchHistory"
+                @remove="removeSearchHistoryEntry"
+                @clear="clearSearchHistory"
+                @close="showSearchHistory = false"
+              />
+            </span>
+            <button class="secondary" @click="commitGallerySearch">搜索</button>
+          </div>
           <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
         </div>
       </div>
@@ -5192,7 +5336,8 @@ const tagFolderPreview = computed(() => {
         {{ showOnlySelected ? '当前日期没有已选图片，切换日期试试' : '当前日期没有图片' }}
       </div>
       <div v-else-if="activeItems.length" class="gallery-grid" :class="{ 'is-switching': loadingGallery }" :style="`--card-min-w: ${gallery.cardSize}px`" :aria-busy="loadingGallery">
-        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item), 'has-caption': hasCaption(item), 'has-ai-badge': !!aiTagOf(item) }" :title="cardBadgeTitle(item)">
+        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-keyboard-focused': galleryFocusKey === itemKey(item), 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item), 'has-caption': hasCaption(item), 'has-ai-badge': !!aiTagOf(item) }" :title="cardBadgeTitle(item)">
+          <span v-if="galleryFocusKey === itemKey(item)" class="keyboard-focus-badge" aria-label="当前键盘选中">当前</span>
           <div class="thumb-wrap" :class="{ 'is-broken': item.thumbBroken }">
             <img
               class="thumb clickable-thumb"
@@ -5205,7 +5350,7 @@ const tagFolderPreview = computed(() => {
               @error="onThumbError(item)"
               @click="onThumbClick($event, item)"
             />
-            <div v-if="!item.loaded" class="thumb-skeleton" aria-hidden="true"></div>
+            <div class="thumb-skeleton" :class="{ 'is-hidden': item.loaded }" aria-hidden="true"></div>
             <span
               v-if="isAnimatedCard(item)"
               class="video-format-watermark"
@@ -5242,7 +5387,7 @@ const tagFolderPreview = computed(() => {
           </div>
           <div class="button-row compact card-actions">
             <button class="secondary" @click="openOriginal(item)" :disabled="!item.postUrl" title="打开 Danbooru 原帖">原帖</button>
-            <button class="secondary" @click="openLocal(item)" :disabled="!item.localPath" title="打开本地文件">本地</button>
+          <button class="secondary" @click="openLocal(item)" :disabled="!item.localPath" :title="isVideoItem(item) || ['gif', 'zip'].includes(itemExtension(item)) ? '打开文件夹并选中媒体文件' : '打开本地文件'">本地</button>
             <button @click="editItem(item)" title="编辑打码">编辑</button>
             <button v-if="item.filename?.toLowerCase().endsWith('.zip') && !item.hasGifCompanion" class="secondary" @click="convertGif(item)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;" title="ZIP 动画转 GIF">转GIF</button>
           </div>
@@ -5410,8 +5555,7 @@ const tagFolderPreview = computed(() => {
           <span class="hint">Esc 退出选择</span>
         </div>
         <div class="button-row compact viewer-actions">
-          <button class="secondary" @click="stepViewer(-1)" :disabled="viewerIndex <= 0">上一张</button>
-          <button class="secondary" @click="stepViewer(1)" :disabled="viewerIndex >= viewerItems.length - 1">下一张</button>
+          <button class="secondary" @click="openOriginal(viewerItem)" :disabled="!viewerItem?.postUrl" title="打开 Danbooru 原帖">原帖</button>
           <button
             class="viewer-fav-btn"
             :class="{ active: viewerItem && isImageFavorited(viewerItem) }"
@@ -5420,7 +5564,8 @@ const tagFolderPreview = computed(() => {
             :title="viewerItem && isImageFavorited(viewerItem) ? '取消图片收藏' : '加入图片收藏'"
           >{{ viewerItem && isImageFavorited(viewerItem) ? '♥ 已收藏' : '♡ 收藏' }}</button>
           <button v-if="viewerItem?.filename?.toLowerCase().endsWith('.zip') && !viewerItem?.hasGifCompanion" class="secondary" @click="convertGif(viewerItem)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
-          <button class="secondary" @click="copyViewerImage" :disabled="!viewerItem?.localPath" title="复制图片到剪贴板，最长边不超过 2000px（Ctrl+C）">复制图片</button>
+          <button class="secondary" @click="copyViewerImage" :disabled="!viewerItem?.localPath || isVideoItem(viewerItem) || ['zip'].includes(itemExtension(viewerItem))" title="复制图片到剪贴板；GIF 复制首帧或动图，视频和 ZIP 不支持图片复制">复制图片</button>
+          <button class="primary viewer-watermark-copy" @click="copyViewerImageWithWatermark" :disabled="!viewerItem?.localPath || !(viewerItem?.artist || viewerItem?.author)" title="使用打码设置中的字体，在左上角添加半透明作者文字水印后复制">作者水印并复制图片</button>
           <button
             @click="viewerItem && emit('caption-image', viewerItem)"
             :style="hasCaption(viewerItem)
@@ -5490,9 +5635,15 @@ const tagFolderPreview = computed(() => {
       </button>
 
       <div class="viewer-stage" :class="{ 'is-fit': viewer.fitMode === 'fit' }" @wheel="onViewerWheel" @click.self="closeViewer">
-        <div class="viewer-image-wrap" :class="{ 'is-fit': viewer.fitMode === 'fit' }" :style="{ zoom: viewer.zoom }">
+        <div
+          v-if="viewer.imageUrl"
+          :key="viewer.key"
+          class="viewer-image-wrap"
+          :class="{ 'is-fit': viewer.fitMode === 'fit' }"
+          :style="{ zoom: viewer.zoom }"
+        >
           <video
-            v-if="viewer.imageUrl && viewerIsVideo"
+            v-if="viewerIsVideo"
             class="viewer-image"
             :class="{ 'is-loaded': viewerImageLoaded }"
             :src="viewer.imageUrl"
@@ -5502,7 +5653,7 @@ const tagFolderPreview = computed(() => {
             @loadeddata="viewerImageLoaded = true"
           />
           <img
-            v-else-if="viewer.imageUrl"
+            v-else
             class="viewer-image"
             :class="{ 'is-loaded': viewerImageLoaded }"
             :src="viewer.imageUrl"
@@ -5819,6 +5970,31 @@ const tagFolderPreview = computed(() => {
 }
 .image-card:active {
   filter: brightness(0.94);
+}
+.image-card.is-keyboard-focused {
+  outline: 2px solid #1677ff;
+  outline-offset: 4px;
+  z-index: 8;
+}
+.keyboard-focus-badge {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 20;
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  background: #1677ff;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+  box-shadow: 0 3px 10px rgba(22, 119, 255, 0.4);
+  pointer-events: none;
 }
 
 /* 卡片最小宽度由 gallery.cardSize 通过 inline --card-min-w 注入，
@@ -7079,6 +7255,9 @@ const tagFolderPreview = computed(() => {
   background: #dc2626;
   border-radius: 0 999px 999px 0;
 }
+.progress-seg-skip {
+  background: #f59e0b;
+}
 .progress-seg-fail:last-child:not(:first-child) { border-radius: 0 999px 999px 0; }
 /* 抓取 ID 阶段的页进度条：单色（蓝/青），与下载阶段的绿色 success 段区分。 */
 .progress-seg-page {
@@ -7094,6 +7273,7 @@ const tagFolderPreview = computed(() => {
   line-height: 1.4;
 }
 .progress-fail-tail { color: #fca5a5; }
+.progress-skip-tail { color: #fcd34d; }
 .progress-success-tail { color: #86efac; }
 
 .error-banner {
@@ -7755,10 +7935,12 @@ const tagFolderPreview = computed(() => {
    多张同时到达时更像画面撕裂。先透明，图片真正解码完成(@load)后加 .is-loaded 淡入。 */
 .thumb-wrap .thumb {
   opacity: 0;
-  transition: opacity 0.32s ease;
+  transform: scale(1.045);
+  transition: opacity 0.34s ease, transform 0.46s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .thumb-wrap .thumb.is-loaded {
   opacity: 1;
+  transform: scale(1);
 }
 /* 骨架屏：图片解出来之前铺一层轻微流光的占位；
    容器已有 aspect-ratio 1:1，骨架屏铺满即可。 */
@@ -7774,6 +7956,11 @@ const tagFolderPreview = computed(() => {
   animation: thumb-shimmer 1.25s ease-in-out infinite;
   pointer-events: none;
   z-index: 1;
+  opacity: 1;
+  transition: opacity 0.26s ease;
+}
+.thumb-skeleton.is-hidden {
+  opacity: 0;
 }
 /* MP4 / GIF thumb 失败（ffmpeg 不可用、404、5xx）时保持骨架屏常驻，避免露出 broken icon */
 .thumb-wrap.is-broken .thumb-skeleton {
@@ -8274,6 +8461,15 @@ const tagFolderPreview = computed(() => {
   overflow-x: hidden;
   /* 滚动条样式走全局（style.css）—— 跟画廊上下滚动条同款 */
 }
+.task-queue-panel {
+  max-height: min(34vh, 360px);
+  padding: 14px 10px;
+  gap: 12px;
+}
+.tq-list {
+  max-height: min(28vh, 300px);
+  padding-right: 4px;
+}
 .tq-item {
   position: relative;
   display: flex;
@@ -8380,9 +8576,15 @@ const tagFolderPreview = computed(() => {
   min-width: 0;             /* 允许收缩到比内容更窄，才能触发横向滚动 */
   color: var(--ink);
   font-weight: 500;
-  white-space: nowrap;      /* 每个任务只占一行，不再换行撑高 */
-  overflow-x: auto;         /* 文字过长时左右滚动查看 */
-  overflow-y: hidden;
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.tq-item-error {
+  max-height: 180px;
+  overflow: auto;
+  user-select: text;
 }
 /* tq-item-label 滚动条走全局（style.css），跟画廊上下滚动条同款 */
 .tq-item-ops { display: inline-flex; gap: 4px; flex: 0 0 auto; }
@@ -8666,4 +8868,550 @@ const tagFolderPreview = computed(() => {
 .viewer-corner-btn.is-active { box-shadow: 0 4px 16px rgba(var(--accent-rgb), 0.35); }
 
 /* .browse-* 样式已随 BrowseOverlay.vue 一起搬走 */
+/* Workspace layout refinement:
+   keep configuration dense on the left and give the gallery a calm, usable canvas. */
+.crawler-layout {
+  grid-template-columns: minmax(292px, 320px) minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
+}
+.crawler-layout > .control-panel,
+.crawler-layout > .gallery-panel {
+  min-height: calc(100vh - 32px);
+}
+.control-panel {
+  padding: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(250, 251, 252, 0.96));
+}
+.control-panel .panel-head {
+  padding: 2px 2px 12px;
+  margin-bottom: 12px;
+}
+.control-panel .panel-head h2 {
+  font-size: 22px;
+  letter-spacing: 0;
+}
+.control-panel .panel-head p {
+  max-width: 27ch;
+  margin-top: 6px;
+  line-height: 1.55;
+}
+.mode-selector {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  padding: 4px;
+  margin: 0 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-muted);
+}
+.mode-chip {
+  min-height: 36px;
+  padding: 7px 5px;
+  border: 0;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 700;
+  box-shadow: none;
+}
+.mode-chip.active {
+  box-shadow: 0 3px 10px rgba(var(--accent-rgb), 0.2);
+}
+.rank-action-bar,
+.date-mode-row {
+  margin-bottom: 10px;
+  padding: 7px;
+  gap: 7px;
+}
+.control-panel .field-full,
+.control-panel .field-grid {
+  margin-bottom: 10px;
+}
+.control-panel .field-full > span,
+.control-panel .field-grid label > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+.control-panel input,
+.control-panel select,
+.control-panel textarea {
+  min-height: 34px;
+  background: #fff;
+}
+.control-panel .button-row {
+  gap: 6px;
+}
+.control-panel .button-row > button {
+  min-height: 34px;
+}
+.task-queue-panel {
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.72);
+}
+.modern-log-wrapper {
+  border-radius: 10px;
+  box-shadow: none;
+}
+.gallery-panel {
+  padding: 14px;
+  background: #fff;
+}
+.gallery-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 10px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+}
+.gallery-title-row {
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+.gallery-title-row .gallery-stats-inline {
+  margin-left: auto;
+  flex: 0 1 auto;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.gallery-tools {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-muted);
+  flex-wrap: wrap;
+}
+.gallery-tools > button,
+.gallery-tools > .display-dropdown,
+.gallery-tools > .refresh-dropdown,
+.gallery-tools > .translate-dropdown {
+  flex: 0 0 auto;
+}
+.gallery-tools .tool-btn,
+.gallery-tools .refresh-btn,
+.gallery-tools > button.secondary {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+.gallery-search-group {
+  order: -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 320px;
+  width: 320px;
+  min-width: 250px;
+  max-width: 320px;
+}
+.gallery-search-group .search-input-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: none;
+}
+.gallery-search-group > button {
+  flex: 0 0 auto;
+  min-height: 32px;
+}
+.gallery-tools .search-input-wrap {
+  order: -1;
+  flex: 1 1 240px;
+  min-width: 190px;
+}
+.gallery-tools .search-input-wrap .search-input {
+  width: 100%;
+  min-height: 32px;
+  border-color: var(--line-strong);
+  background: #fff;
+}
+.display-dropdown:hover .tool-btn,
+.refresh-dropdown:hover .refresh-btn,
+.translate-dropdown:hover .translate-trigger {
+  border-color: rgba(var(--accent-rgb), 0.45);
+  background: var(--soft);
+  color: var(--accent-deep);
+}
+.gallery-empty {
+  min-height: min(58vh, 560px);
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+  margin: 0;
+  border: 1px dashed var(--line-strong);
+  border-radius: 14px;
+  background: radial-gradient(circle at 50% 38%, rgba(var(--accent-rgb), 0.06), transparent 25%), linear-gradient(180deg, #fff, #fafbfc);
+  color: var(--muted);
+  font-size: 14px;
+}
+.gallery-empty::before {
+  content: '✦';
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(var(--accent-rgb), 0.2);
+  border-radius: 12px;
+  background: var(--soft);
+  color: var(--accent);
+  font-size: 20px;
+}
+.gallery-grid {
+  gap: 14px;
+  padding: 2px;
+}
+.image-card {
+  border: 1px solid rgba(30, 41, 82, 0.08);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+.image-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(var(--accent-rgb), 0.3);
+  box-shadow: 0 10px 24px rgba(25, 31, 38, 0.12);
+}
+.image-card .card-actions {
+  padding: 7px 8px 8px;
+  margin: 0;
+  border-top: 1px solid rgba(30, 41, 82, 0.06);
+  background: rgba(250, 251, 252, 0.92);
+}
+.image-card .card-actions button {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+.progress-panel {
+  margin-top: 10px;
+  border-radius: 10px;
+}
+.status-pills {
+  gap: 6px;
+}
+.action-row-label {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  color: var(--accent-deep);
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.rank-action-bar,
+.date-mode-row {
+  align-items: stretch;
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.07), rgba(var(--accent-rgb), 0.035));
+}
+.rank-action-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+}
+.rank-action-bar .action-row-label {
+  padding-right: 4px;
+}
+.date-mode-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+.action-row-group {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+.action-row-group:last-child {
+  justify-content: flex-start;
+}
+.action-row-group .seg-group {
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+.target-date-field {
+  padding: 10px;
+  border: 1px solid rgba(var(--accent-rgb), 0.16);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+}
+.target-date-field > span {
+  color: var(--accent-deep);
+  font-weight: 800;
+}
+.id-download-panel {
+  padding: 10px;
+  border: 1px solid rgba(var(--accent-rgb), 0.24);
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.08), rgba(255, 255, 255, 0.75));
+}
+.id-download-panel textarea {
+  min-height: 76px;
+  border-color: rgba(var(--accent-rgb), 0.28) !important;
+  background: #fff !important;
+}
+.id-download-panel + .id-download-panel {
+  margin-top: -4px;
+  border-top: 0;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  padding-top: 4px;
+}
+.dl-strategy-row.id-download-panel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+@media (max-width: 1180px) and (min-width: 721px) {
+  .crawler-layout {
+    grid-template-columns: minmax(270px, 292px) minmax(0, 1fr);
+  }
+  .gallery-search-group {
+    flex-basis: 100%;
+    width: 100%;
+    max-width: none;
+    order: -1;
+  }
+  .gallery-title-row .border-legend {
+    display: none;
+  }
+}
+@media (max-width: 720px) {
+  .crawler-layout {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .crawler-layout > .control-panel,
+  .crawler-layout > .gallery-panel {
+    min-height: 0;
+  }
+  .crawler-layout > .control-panel {
+    position: relative;
+    max-height: none;
+  }
+  .gallery-title-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .gallery-title-row .gallery-stats-inline {
+    width: 100%;
+    margin-left: 0;
+  }
+  .gallery-search-group {
+    flex-basis: 100%;
+    width: 100%;
+    max-width: none;
+  }
+  .gallery-empty {
+    min-height: 300px;
+  }
+}
+@media (min-width: 1501px) {
+  .gallery-tools {
+    flex-wrap: nowrap;
+  }
+  .gallery-search-group {
+    min-width: 260px;
+  }
+}
+@media (max-width: 520px) {
+  .date-mode-row {
+    grid-template-columns: 1fr;
+  }
+  .action-row-group,
+  .action-row-group:last-child {
+    justify-content: flex-start;
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .rank-action-bar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .dl-strategy-row.id-download-panel {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+/* Softer interaction feedback for the crawler workspace. */
+.control-panel button,
+.gallery-panel button,
+.gallery-panel input,
+.gallery-panel select,
+.gallery-panel textarea {
+  transition:
+    transform 0.16s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.16s ease,
+    border-color 0.16s ease,
+    background-color 0.16s ease,
+    color 0.16s ease,
+    filter 0.16s ease;
+}
+.control-panel button:hover:not(:disabled),
+.gallery-panel button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+.control-panel button:active:not(:disabled),
+.gallery-panel button:active:not(:disabled) {
+  transform: translateY(0) scale(0.97);
+}
+.control-panel .seg-btn:hover:not(:disabled),
+.gallery-panel .seg-btn:hover:not(:disabled) {
+  box-shadow: 0 3px 8px rgba(var(--accent-rgb), 0.12);
+}
+.viewer-nav-arrow:hover:not(:disabled) {
+  transform: translateY(-50%) scale(1.04);
+}
+/* One calm workspace surface; inner tools keep their own lightweight grouping. */
+.crawler-layout {
+  grid-template-columns: minmax(292px, 320px) minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px 12px 12px;
+  border: 1px solid rgba(30, 41, 82, 0.1);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.46);
+  box-shadow: 0 12px 30px rgba(30, 41, 82, 0.06);
+}
+.crawler-layout > .control-panel,
+.crawler-layout > .gallery-panel {
+  min-height: calc(100vh - 54px);
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.crawler-layout > .control-panel {
+  padding: 10px 14px 12px 2px;
+  background: transparent;
+  border-right: 1px solid rgba(30, 41, 82, 0.1);
+}
+.crawler-layout > .gallery-panel {
+  padding: 10px 2px 12px 14px;
+  background: transparent;
+}
+.control-panel .panel-head,
+.gallery-panel .gallery-head {
+  border-color: rgba(30, 41, 82, 0.09);
+}
+.control-panel input,
+.control-panel select,
+.control-panel textarea,
+.gallery-tools,
+.task-queue-panel,
+.target-date-field,
+.id-download-panel {
+  background-color: rgba(255, 255, 255, 0.58);
+}
+.gallery-empty {
+  background:
+    radial-gradient(circle at 50% 38%, rgba(var(--accent-rgb), 0.07), transparent 25%),
+    rgba(255, 255, 255, 0.34);
+}
+
+@media (max-width: 900px) {
+  .crawler-layout {
+    grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .crawler-layout {
+    display: block;
+    padding: 8px;
+  }
+  .crawler-layout > .control-panel,
+  .crawler-layout > .gallery-panel {
+    min-height: 0;
+    padding: 10px 2px;
+    border-right: 0;
+  }
+  .crawler-layout > .control-panel {
+    border-bottom: 1px solid rgba(30, 41, 82, 0.1);
+    margin-bottom: 4px;
+  }
+}
+
+/* Keep the gallery header close to the grid. The controls remain grouped by
+   alignment, while the outer frame and separator no longer consume a row. */
+.crawler-layout > .gallery-panel {
+  padding: 6px 0 8px 8px;
+}
+.crawler-layout {
+  height: 100%;
+  min-height: 0;
+}
+.crawler-layout > .control-panel,
+.crawler-layout > .gallery-panel {
+  height: 100%;
+  min-height: 0;
+  max-height: none;
+}
+.gallery-panel .gallery-head {
+  gap: clamp(6px, 1.2vh, 14px);
+  margin-bottom: 0;
+  padding: 0 0 4px;
+  border-bottom: 0;
+}
+.gallery-panel .gallery-title-row {
+  gap: 6px;
+}
+.gallery-panel .gallery-tools {
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+.gallery-panel .gallery-tools .tool-btn,
+.gallery-panel .gallery-tools .refresh-btn,
+.gallery-panel .gallery-tools > button.secondary {
+  min-height: 29px;
+  padding: 4px 8px;
+}
+.gallery-panel .gallery-grid {
+  gap: 8px;
+  padding: 0;
+  /* Do not stretch the grid to the panel's remaining height. The pager
+     should sit directly after the last image row. */
+  flex: 0 0 auto;
+  min-height: auto;
+  overflow: visible;
+}
+
+.gallery-panel .cr-pg-bar {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+/* When pagination is present, distribute spare height between the calendar,
+   toolbar, image grid and pager. This keeps the pager at the bottom without
+   leaving a dead area underneath it; with many rows the gaps naturally shrink. */
+.gallery-panel:has(.cr-pg-bar) {
+  justify-content: space-between;
+}
+
+@media (max-width: 720px) {
+  .crawler-layout {
+    height: auto;
+    min-height: 0;
+  }
+  .crawler-layout > .control-panel,
+  .crawler-layout > .gallery-panel {
+    height: auto;
+    min-height: 0;
+  }
+  .crawler-layout > .gallery-panel {
+    padding: 8px 0;
+  }
+}
 </style>

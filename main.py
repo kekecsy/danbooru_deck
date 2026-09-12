@@ -325,6 +325,7 @@ class DownloadJob:
     pages_list: list = field(default_factory=list)        # 定向重试页码（如 [10, 11, 12]）；空 = 走 start_page..end_page 全段
     total_planned: int = 0                                # 本次任务总目标数（task_download_ids 入口一次性设置）
     success_count: int = 0                                # 已成功落盘的图片数
+    skip_count: int = 0                                   # 已处理但无需下载的图片数
     fail_count: int = 0                                   # 永久失败 + 瞬时网络失败（不可重试的也按失败计）
     page_current: int = 0                                 # 抓取 ID 阶段：当前处理的页码（相对当前 scope）
     page_total: int = 0                                   # 抓取 ID 阶段：当前 scope 的总页数（0 = 隐藏页进度条）
@@ -1301,7 +1302,11 @@ def _process_post(post, job, do_download=True):
     log.json 走全局 log_store；下载目录由 job.save_dir 决定。"""
     source = post.get("_source") or getattr(job, "tag_source", "danbooru") or "danbooru"
     ids = str(post.get('id'))
-    if not ids or ids in log_store:
+    if not ids:
+        job.append_log("跳过无效 post：缺少 ID。")
+        return None
+    if ids in log_store:
+        job.append_log(f"跳过 ID {ids}：log.json 已有记录。")
         return None
 
     tag_string = post.get('tag_string', '')
@@ -1320,6 +1325,7 @@ def _process_post(post, job, do_download=True):
     if do_download:
         image_url = post.get('file_url') or post.get('large_file_url')
         if not image_url:
+            job.append_log(f"跳过 ID {ids}：没有可用图片地址。")
             return None
 
         # 文件已在 job.save_dir 时的早跳过：避免被 download_image 的"文件已存在"分支
@@ -1440,6 +1446,7 @@ def _process_posts_concurrent(job, posts, page_need_update, new_hot_artists,
                 continue
             if result is None:
                 page_skipped += 1
+                job.skip_count += 1
                 continue
             ids, artist, saved_filename = result
             if saved_filename:
@@ -1675,6 +1682,7 @@ def task_download_ids(job, inline_ids=None):
     # 进度条数据：把本轮目标数 / 已成功 / 已失败 这三个计数重置（跨日 / 阶段切换会再次进来）
     job.total_planned = len(ids_data)
     job.success_count = 0
+    job.skip_count = 0
     job.fail_count = 0
     # 直进 download 模式时没有 collect 阶段，确保页进度隐藏
     job.page_total = 0
@@ -1699,15 +1707,20 @@ def task_download_ids(job, inline_ids=None):
           - False（rank·按ID下载 取消勾选时）：无视 log 命中，继续走下载路径。
             log 已有 cdn_url 时直接用缓存（0 API 调用），无缓存才走 fetch_data_with_retry。
         """
+        def mark_skipped(reason):
+            job.skip_count += 1
+            job.append_log(f"[DownloadIDs] 跳过 ID {pid_str}：{reason}")
+            return "skip"
+
         job.play_event.wait()
         if not job.is_running:
-            return "skip"
+            return "stopped"
 
         cached_cdn_url = log_store.get(pid_str) if pid_str in log_store else None
         if job.skip_logged and cached_cdn_url is not None:
             # 命中 log 且要求去重：直接 skip（移除 pending 即可）
             job.resolve_pending_id(pid_str)
-            return "skip"
+            return mark_skipped("log.json 已有记录")
 
         # 确保该 id 在待下载队列里（正常情况下已在，防御性补一次）
         job.queue_pending_id(pid_str)
@@ -1741,17 +1754,16 @@ def task_download_ids(job, inline_ids=None):
                 if any(tag in tag_string for tag in job.filter_tags):
                     # 被过滤：不会下载，从队列移除
                     job.resolve_pending_id(pid_str)
-                    job.append_log(f"跳过 ID {pid_str}，包含过滤标签。")
-                    return "skip"
+                    return mark_skipped("包含过滤标签")
 
             image_url = post_data.get('file_url') or post_data.get('large_file_url')
             if not image_url:
                 job.resolve_pending_id(pid_str)
-                return "skip"
+                return mark_skipped("没有可用图片地址")
 
         job.play_event.wait()
         if not job.is_running:
-            return "skip"
+            return "stopped"
 
         try:
             saved_filename = danbooru_api.download_image(image_url, job.save_dir, job.append_log, raise_on_transient=True)
@@ -1801,7 +1813,8 @@ def task_download_ids(job, inline_ids=None):
             futures.append(executor.submit(_worker, pid_str))
         for future in concurrent.futures.as_completed(futures):
             try:
-                if future.result() == "ok":
+                result = future.result()
+                if result == "ok":
                     success_count += 1
                     flushed_since_start += 1
                     # 满 20 张就 flush 一次 viewer_data 到磁盘，方便手动刷新图库
@@ -1812,11 +1825,15 @@ def task_download_ids(job, inline_ids=None):
                             job.append_log(f"[DownloadIDs] flush viewer_data 失败: {e}")
                         flushed_since_start = 0
             except Exception as e:
+                job.fail_count += 1
                 job.append_log(f"下载线程异常: {e}")
 
     _persist_global_data()
     job.flush_viewer_data()
-    job.append_log(f"[DownloadIDs] 完成，成功下载 {success_count} 张图片。")
+    job.append_log(
+        f"[DownloadIDs] 完成：成功 {job.success_count}，"
+        f"跳过 {job.skip_count}，失败 {job.fail_count}，共处理 {job.success_count + job.skip_count + job.fail_count}/{job.total_planned}"
+    )
 
 
 # --- mode: popular_recover (新) / recover_popular (legacy alias) ---
@@ -1860,6 +1877,7 @@ def task_popular_recover(job, start_page, end_page):
     # 就有 2 张下完了」就是这个原因）。正常情况下 dataclass 默认就是 0，但显式置 0 更稳。
     job.total_planned = 0
     job.success_count = 0
+    job.skip_count = 0
     job.fail_count = 0
 
     job.append_log(f"[Recover] 扫描 {target_date} 热门页 {start_page}-{end_page}（按文件存在性补全）")
@@ -1977,6 +1995,7 @@ def task_popular_recover(job, start_page, end_page):
     job.append_log(f"[Recover] 待下载 {len(targets)} 张（log 缓存 {from_log} / API {from_api}），已写入 ids_data.json")
     job.total_planned = len(targets)
     job.success_count = 0
+    job.skip_count = 0
     job.fail_count = 0
 
     # 阶段 5：并发下载（保留 cdn_url 优化；并发度复用 job.download_concurrency，
@@ -2971,7 +2990,7 @@ def get_status(job_id: str = ""):
             "job_id": "",
             "outcome": "idle",
             "error_message": "",
-            "progress": {"total": 0, "success": 0, "fail": 0},
+            "progress": {"total": 0, "success": 0, "skip": 0, "fail": 0},
             "page_progress": {"current": 0, "total": 0},
             "jobs": [],
         }
@@ -2990,6 +3009,7 @@ def get_status(job_id: str = ""):
         progress_snapshot = {
             "total": int(getattr(job, "total_planned", 0) or 0),
             "success": int(getattr(job, "success_count", 0) or 0),
+            "skip": int(getattr(job, "skip_count", 0) or 0),
             "fail": int(getattr(job, "fail_count", 0) or 0),
         }
         # 抓取 ID 阶段的页进度：page_current / page_total 由 collect 循环写入，
@@ -3827,19 +3847,18 @@ def api_import_translation(req: TranslationImportRequest):
 
 @app.get("/api/untranslated_characters")
 def api_untranslated_characters(date: str = ""):
-    """聚合指定日期 viewer_data 里所有「翻译字典查不到」的角色 token。
+    """聚合本地图库中所有日期 viewer_data 里「翻译字典查不到」的角色 token。
     返回 {tags: [{tag, post_count, fallback_name}]}，按出现次数倒序。"""
-    date_str, _ = resolve_selected_date(date or _resolve_today())
-    data = build_local_image_library(date_str)
-
     counter = {}
-    for item in data:
-        chars_str = (item.get("tags") or {}).get("tag_string_character", "") or ""
-        for token in chars_str.split():
-            token = token.strip()
-            if not token:
-                continue
-            counter[token] = counter.get(token, 0) + 1
+    dates = [date] if date else get_available_date_folders()
+    for date_str in dates:
+        resolved_date, _ = resolve_selected_date(date_str)
+        for item in build_local_image_library(resolved_date):
+            chars_str = (item.get("tags") or {}).get("tag_string_character", "") or ""
+            for token in chars_str.split():
+                token = token.strip()
+                if token:
+                    counter[token] = counter.get(token, 0) + 1
 
     pending = []
     for token, count in counter.items():

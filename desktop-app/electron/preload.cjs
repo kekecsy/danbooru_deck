@@ -8,7 +8,8 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   },
   gallery: {
     getByDate: (date) => ipcRenderer.invoke('gallery:get-by-date', date),
-    openLocalFile: (localPath) => ipcRenderer.invoke('gallery:open-local-file', localPath)
+    openLocalFile: (localPath) => ipcRenderer.invoke('gallery:open-local-file', localPath),
+    revealLocalFile: (localPath) => ipcRenderer.invoke('gallery:reveal-local-file', localPath)
   },
   crawler: {
     ensureService: () => ipcRenderer.invoke('crawler:ensure-service'),

@@ -42,8 +42,8 @@ const editor = reactive({
   start: null,
   current: null,
   draft: null,
-  fillMode: 'mosaic',
-  opacity: 1,
+  fillMode: ['mosaic', 'stripe', 'reveal', 'solid', 'image'].includes(editorHabits.fillMode) ? editorHabits.fillMode : 'mosaic',
+  opacity: Number.isFinite(editorHabits.opacity) ? Math.max(0, Math.min(1, editorHabits.opacity)) : 1,
   mosaicBlockSize: Number.isFinite(editorHabits.mosaicBlockSize) ? editorHabits.mosaicBlockSize : 18,
   stripeText: '该信息已被管理员撤回',
   stripeFontFamily: typeof editorHabits.stripeFontFamily === 'string' && editorHabits.stripeFontFamily
@@ -56,10 +56,10 @@ const editor = reactive({
   stripeOrientation: editorHabits.stripeOrientation === 'vertical' ? 'vertical' : 'horizontal',
   imageDataUrl: null,
   imageOverlayName: '',
-  revealColor: '#000000',
-  revealOpacity: 0.8,
-  revealBlur: 0,
-  solidColor: '#000000',
+  revealColor: typeof editorHabits.revealColor === 'string' ? editorHabits.revealColor : '#000000',
+  revealOpacity: Number.isFinite(editorHabits.revealOpacity) ? Math.max(0, Math.min(1, editorHabits.revealOpacity)) : 0.8,
+  revealBlur: Number.isFinite(editorHabits.revealBlur) && editorHabits.revealBlur >= 0 ? editorHabits.revealBlur : 0,
+  solidColor: typeof editorHabits.solidColor === 'string' ? editorHabits.solidColor : '#000000',
   // 用户习惯：复制尺寸上限。0 表示原图无上限。watch 里会落盘。
   outputMaxEdge: Number.isFinite(editorHabits.outputMaxEdge) ? editorHabits.outputMaxEdge : 1600,
   sourceMeta: {
@@ -77,12 +77,18 @@ watch(() => editor.outputMaxEdge, (v) => {
   catch { /* localStorage 异常时静默 */ }
 });
 
-watch(() => [editor.stripeFontSize, editor.stripeFontFamily, editor.stripeOrientation, editor.stripeAutoFit, editor.mosaicBlockSize], ([size, family, orientation, autoFit, mosaicBlockSize]) => {
+watch(() => [editor.fillMode, editor.opacity, editor.stripeFontSize, editor.stripeFontFamily, editor.stripeOrientation, editor.stripeAutoFit, editor.mosaicBlockSize, editor.solidColor, editor.revealColor, editor.revealOpacity, editor.revealBlur], ([fillMode, opacity, size, family, orientation, autoFit, mosaicBlockSize, solidColor, revealColor, revealOpacity, revealBlur]) => {
+  if (['mosaic', 'stripe', 'reveal', 'solid', 'image'].includes(fillMode)) editorHabits.fillMode = fillMode;
+  if (Number.isFinite(opacity)) editorHabits.opacity = Math.max(0, Math.min(1, opacity));
   if (Number.isFinite(size) && size > 0) editorHabits.stripeFontSize = Math.round(size);
   if (typeof family === 'string' && family) editorHabits.stripeFontFamily = family;
   editorHabits.stripeOrientation = orientation === 'vertical' ? 'vertical' : 'horizontal';
   editorHabits.stripeAutoFit = autoFit !== false;
   if (Number.isFinite(mosaicBlockSize) && mosaicBlockSize > 0) editorHabits.mosaicBlockSize = Math.round(mosaicBlockSize);
+  if (typeof solidColor === 'string' && solidColor) editorHabits.solidColor = solidColor;
+  if (typeof revealColor === 'string' && revealColor) editorHabits.revealColor = revealColor;
+  if (Number.isFinite(revealOpacity)) editorHabits.revealOpacity = Math.max(0, Math.min(1, revealOpacity));
+  if (Number.isFinite(revealBlur) && revealBlur >= 0) editorHabits.revealBlur = revealBlur;
   try { localStorage.setItem(STORAGE_KEY_EDITOR_HABITS, JSON.stringify(editorHabits)); }
   catch { /* localStorage 异常时静默 */ }
 });

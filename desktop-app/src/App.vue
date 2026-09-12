@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
+import { ref, onMounted, onBeforeUnmount } from 'vue';
 import CrawlerPage from './components/CrawlerPage.vue';
 import EditorPage from './components/EditorPage.vue';
 import FavoritesPage from './components/FavoritesPage.vue';
@@ -10,11 +10,7 @@ import InputContextMenu from './components/InputContextMenu.vue';
 const activePage = ref('crawler');
 const editorSource = ref(null);
 const captionSource = ref(null);
-const storedNavState = localStorage.getItem('desktopNavOpen');
-const navOpen = ref(storedNavState === null ? true : storedNavState === 'true');
-
-watch(navOpen, value => localStorage.setItem('desktopNavOpen', String(value)));
-
+const navOpen = ref(false);
 // 全局"右键复制成功"轻提示：主进程拦截 context-menu 后会推 IPC 过来。
 // showToast 是各组件私有的，这里自己挂一个最简版本，不影响既有交互。
 const copyToast = ref({ show: false, text: '' });
@@ -111,7 +107,6 @@ const navItems = [
 
 function selectPage(page) {
   activePage.value = page;
-  if (window.innerWidth <= 720) navOpen.value = false;
 }
 
 function openEditorWithImage(item) {
@@ -126,19 +121,15 @@ function openCaptionWithImage(item) {
 </script>
 
 <template>
-  <div class="shell shell-compact" :class="{ 'nav-open': navOpen }">
+  <div class="shell shell-compact">
     <div class="app-atmosphere" aria-hidden="true">
       <span></span><span></span><span></span>
     </div>
 
-    <aside class="sidebar app-sidebar nav-drawer" :class="{ open: navOpen }">
+    <aside class="sidebar app-sidebar nav-drawer">
       <div class="sidebar-brand">
         <div class="brand-mark" aria-hidden="true">
           <span>DD</span>
-        </div>
-        <div v-if="navOpen" class="brand-copy">
-          <strong>Danbooru Deck</strong>
-          <small>anime workspace</small>
         </div>
       </div>
 

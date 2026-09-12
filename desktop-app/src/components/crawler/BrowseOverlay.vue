@@ -412,14 +412,17 @@ function submitJump() {
 <style scoped>
 .browse-overlay {
   align-items: stretch;
+  background: rgba(38, 46, 68, 0.16);
+  backdrop-filter: blur(8px) saturate(115%);
 }
 .browse-card {
   width: min(1200px, 96vw);
   height: min(860px, 92vh);
-  background: rgba(255, 255, 255, 0.98);
-  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.72);
   border-radius: 18px;
-  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 20px 50px rgba(30, 41, 82, 0.16);
+  backdrop-filter: blur(18px) saturate(125%);
   display: flex;
   flex-direction: column;
   overflow: hidden;

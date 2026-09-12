@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch, onMounted } from 'vue';
+import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue';
 
 const props = defineProps({
   availableDates: { type: Array, default: () => [] },
@@ -13,6 +13,7 @@ const props = defineProps({
 const emit = defineEmits(['select']);
 
 const open = ref(false);
+const calendarRoot = ref(null);
 const activeTab = ref('date');
 const tagSearch = ref('');
 const dateView = ref('days'); // days | months | years
@@ -66,7 +67,19 @@ function removeRecent(folder) {
   recentTags.value = recentTags.value.filter(t => t !== folder);
   try { localStorage.setItem(RECENT_KEY, JSON.stringify(recentTags.value)); } catch {}
 }
-onMounted(loadRecent);
+function onDocumentPointerDown(event) {
+  if (!open.value) return;
+  if (calendarRoot.value?.contains(event.target)) return;
+  open.value = false;
+}
+
+onMounted(() => {
+  loadRecent();
+  document.addEventListener('pointerdown', onDocumentPointerDown, true);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', onDocumentPointerDown, true);
+});
 
 const tagMap = computed(() => {
   const m = Object.create(null);
@@ -461,7 +474,7 @@ function pickTag(folder) {
 </script>
 
 <template>
-  <div class="calendar">
+  <div ref="calendarRoot" class="calendar">
     <div class="calendar-toolbar">
       <button
         class="small-btn"
@@ -1176,4 +1189,40 @@ function pickTag(folder) {
 .tag-remove:hover { background: var(--soft); color: var(--accent-deep); }
 .tag-row.selected,
 .tag-row-flat.selected { background: var(--accent-gradient); }
+
+.calendar-trigger,
+.today-btn,
+.small-btn,
+.day-cell,
+.date-heading-btn,
+.selector-tab {
+  transition:
+    transform 0.16s cubic-bezier(0.22, 1, 0.36, 1),
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease,
+    box-shadow 0.16s ease;
+}
+.calendar-trigger:hover,
+.today-btn:hover,
+.small-btn:hover,
+.date-heading-btn:hover,
+.day-cell:not(.disabled):hover {
+  transform: translateY(-1px);
+}
+.calendar-trigger:active,
+.today-btn:active,
+.small-btn:active,
+.date-heading-btn:active,
+.day-cell:not(.disabled):active {
+  transform: scale(0.97);
+}
+.calendar-panel {
+  transform-origin: top left;
+  animation: calendar-panel-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes calendar-panel-in {
+  from { opacity: 0; transform: translateY(-5px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 </style>

@@ -794,6 +794,14 @@ ipcMain.handle('gallery:open-local-file', async (_event, localPath) => {
   return { ok: result === '', message: result || '已尝试打开文件' };
 });
 
+ipcMain.handle('gallery:reveal-local-file', async (_event, localPath) => {
+  const resolvedPath = toAbsolutePath(localPath);
+  if (!resolvedPath || !isWithinLibraryRoots(resolvedPath)) return { ok: false, message: '非法路径' };
+  if (!fs.existsSync(resolvedPath)) return { ok: false, message: '文件不存在' };
+  shell.showItemInFolder(resolvedPath);
+  return { ok: true };
+});
+
 ipcMain.handle('external:open', async (_event, url) => {
   if (!url) return false;
   await shell.openExternal(url);

@@ -6548,7 +6548,7 @@
   "akagi_(azur_lane)": {
     "has_chinese": true,
     "chinese_name": "赤城（碧蓝航线）",
-    "source_hint": "azur lane",
+    "source_hint": "azur_lane",
     "translated_description_zh": "《碧蓝航线》对日本航空母舰「赤城号》的拟人化角色。由八才提督设计，日语配音为中原麻衣，英语配音为Amber Lee Connors。与加贺一样，赤城被描绘为拥有九条尾巴的狐娘，棕色头发、深红色眼睛，身材丰满。她的默认服装包括一件带有金色花卉图案的黑色羽衣，一套非传统的巫女装——白色和服露出胸部加上百褶红色裙，家纹、黑色大腿吊带袜以及舵轮鞋。h4. 换装 * 默认（带面具） * 默认（无面具） * 「深红虞美人」（誓约） * 「天堂孤挺花」 * 「梅与雪」 * 「红绳美人」 * 「晓凤之唤」 * 「甜蜜之崖」h4. 其他版本 * 「Muse版本」 * 「META版本」（不可操作） * 「小赤城」h4. 天城级战列巡洋舰 * 天城 * 赤城（改装为航空母舰）h4. 相关角色 * 加贺 * 小天城h4. 参见 * 赤城（舰队Collection） * 赤城（战舰少女R）h4. 外部链接 * 「碧蓝航线Wiki：赤城」 * 「维基百科：IJN赤城号」"
   },
   "espeon": {
@@ -9618,10 +9618,10 @@
     "translated_description_zh": "来自《蔚蓝档案》的角色，社区安全局成员，全名为 Nemugaki Fubuki，装备经过大幅改装的标准发射 Ruger Mini-14 步枪，由 Hirayama Emi 配音，原画师为 MIMITOKE。外观包括默认姿势、泳装版和偶像版"
   },
   "himesaki_rinami": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "gakuen idolmaster",
-    "translated_description_zh": "来自《Gakuen Idolmaster》的角色。三年级学生，气质成熟。她拥有蓝色眼睛、长长的棕色头发，并扎着单侧发髻。日常穿着为Hatsuboshi Gakuen校服，外加棕色毛衣和蓝色西装外套，未穿标准马甲"
+    "has_chinese": true,
+    "chinese_name": "姬崎莉波",
+    "source_hint": "gakuen_idolmaster",
+    "translated_description_zh": "来自《学园偶像大师》的角色。一名散发着成熟气息的三年级学生。她有着蓝色的眼睛和棕色的长发，梳着单侧盘发。她的典型着装是初星学园的校服，用棕色毛衣和蓝色西装外套代替了标准背心。"
   },
   "iruma_miu": {
     "has_chinese": true,
@@ -10507,9 +10507,9 @@
   },
   "aria_(zenless_zone_zero)": {
     "has_chinese": true,
-    "chinese_name": "爱苪",
-    "source_hint": "zenless zone zero",
-    "translated_description_zh": "可玩角色，出自[[Zenless Zone Zero]]，是[[Angels of Delusion]]的成员及主唱"
+    "chinese_name": "爱芮",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "来自《绝区零》的可玩角色，是「妄想天使」组合的成员兼主唱。她是一位可以切换人类与构造体形态的S级以太属性异常代理人。"
   },
   "araragi_koyomi": {
     "has_chinese": true,
@@ -12588,10 +12588,10 @@
     "translated_description_zh": "这是一个[[swimsuit]][[official alternate costume|costume]]，用于[[Izuna (blue archive)|]]。服装艺术家：[[hanekoto]] h4. 外观 * !post #6339836：个人资料 h4. 外部链接 * \"Blue Archive Wiki: Izuna (Swimsuit)\":[https://bluearchive.wiki/wiki/Izuna_(Swimsuit"
   },
   "psylocke": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "x-men",
-    "translated_description_zh": "Psylocke 是漫威漫画中的角色，具备心灵感应和念力能力。最初由英国女子伊丽莎白·贝茨·布拉多克扮演，后与日本忍者变种人夸侬互换身体，长期使用该代号。后来在漫威与日本神话融合的宇宙中出现第三版 Psylocke，名为 Sai，是一名猎妖武士，后在《Marvel Rivals》等游戏中出现。其后续形态在电影《X-Men：最后之战》和《X-Men：天启》以及《Marvel vs. Capcom》系列等媒体中出现"
+    "has_chinese": true,
+    "chinese_name": "灵蝶",
+    "source_hint": "marvel",
+    "translated_description_zh": "灵蝶（Psylocke）是漫威漫画旗下多位超级英雄使用的称号。初代灵蝶本名伊丽莎白·“贝琪”·布拉多克（Elizabeth \"Betsy\" Braddock），是英国队长的双胞胎妹妹，拥有心灵感应和念力等变种人能力，可将精神力化为武器。后与日本忍者“观音”交换身体，以日式外貌活跃于X战警中。二代灵蝶为观音（Kwannon），在身体换回后继承该称号。该角色曾出现在多部《X战警》电影与《漫威英雄 Online》等游戏中，并作为可玩角色“灵蝶（Sai）”登场于游戏《漫威争锋》，该版本设定为来自日本妖怪世界的流浪武士。"
   },
   "oikawa_shizuku": {
     "has_chinese": false,
@@ -13026,10 +13026,10 @@
     "translated_description_zh": "在《舰队Collection》中，敌方救生圈是护航水姬的四种伙伴之一，构成她的腰带(?)。它们经常与Gambier Bay一起出现，是未深海化的护航水姬。它们意外的受欢迎使它们成为深海舰队和系列整体的吉祥物。它们本质上是深海救生圈，具有环形身体、短而细的肢体、突出的角和富有表现力的嘴巴。它们有多种颜色。护航水姬出现白色和红色品种，瑞穗夏季艺术中的呈现为她通常的黄绿色，而Lawson艺术中也出现条纹品种"
   },
   "alisa_mikhailovna_kujou": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "tokidoki bosotto roshia-go de dereru tonari no alya-san",
-    "translated_description_zh": "该角色是《偶尔用俄语撒娇的邻座阿莉亚同学》的女主角，昵称“阿莉亚”。她是日俄混血的第一年高中生，与久座麻知香同桌。她有蓝眼睛、巨乳、长白毛并有呆毛，右侧头发系红色丝带。校服包括红色领结、灰色外套、白色翼领衬衫和黑色百褶裙。声优是上坂堇"
+    "has_chinese": true,
+    "chinese_name": "艾莉莎·米哈伊罗夫纳·九条",
+    "source_hint": "",
+    "translated_description_zh": "轻小说《不时轻声地以俄语遮羞的邻座艾莉同学》及其衍生作品的女主角，昵称“艾莉”（アーリャ）。她是日俄混血的高中一年级学生，银发蓝眸，容貌出众且成绩优异，被称为“孤高的公主”。她与邻座同学久世政近展开了一段充满误解与甜蜜的校园恋爱喜剧，时常在情绪波动时用俄语低声说出真心话，却不知对方完全听得懂。"
   },
   "rosaria_(genshin_impact)": {
     "has_chinese": true,
@@ -17658,10 +17658,10 @@
     "translated_description_zh": "ヨッシー是马里奥系列中自《超级马里奥世界》起出现的恐龙般的生物，亦有独立游戏系列。它们有多种颜色，默认为绿色，具备类似青蛙的舌头，能吞食敌人并将其变成可投掷的ヨッシー蛋，还能通过快速踢腿获得更高空中跳跃（Flutter Jump）。制作人Takashi Tezuka认为ヨッシー并非真正的恐龙，而是更接近乌龟/库巴 Troopas。自1997年《ヨッシー的故事》起，由作曲家Totaka Kazumi配音"
   },
   "makoto_(blue_archive)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "blue archive",
-    "translated_description_zh": "《蔚蓝档案》角色，地狱学院泥沼社社长，全名羽沼真琴，使用Walther WA 2000狙击步枪，配音亚川悠，原始画师 akinashi yuu，游戏美术 DoReMi"
+    "has_chinese": true,
+    "chinese_name": "羽沼真琴",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "来自《蔚蓝档案》（Blue Archive）的角色，格黑娜学院万魔殿的议长，自称“羽沼真琴大人”。她有着银色长发和锐利的眼神，身材高挑。在游戏中，她使用Walther WA 2000狙击步枪作为专属武器“唯我独尊”。她是一位充满野心、精于权谋的阴谋家，将风纪委员长空崎日奈视为死对头，经常策划各种计策，但大多以失败和自讨苦吃告终。她非常疼爱万魔殿的成员丹花伊吹。"
   },
   "queen_draco_(fate)": {
     "has_chinese": false,
@@ -18648,10 +18648,10 @@
     "translated_description_zh": "这是《火焰之纹章》系列中的一名法师。在日文版中被称为塞内里奥。值得注意的是，他在2023年的‘选择传说’票选中（男性组）排名前二，成为首位进入勇士行列的非主角老派《火焰之纹章》（觉醒前）角色。外观方面，他曾出演过[[Fire Emblem: Path of Radiance]]的法师、[[Fire Emblem: Radiant Dawn]]的风贤者、[[Fire Emblem Heroes]]中的光耀、情人节、低语声、卡迪恩等形象，以及[[Fire Emblem: Path of Radiance]]的贤者、[[Fire Emblem: Radiant Dawn|]]的大贤者、[[Fire Emblem Engage]]的纹章等"
   },
   "eve_(stellar_blade)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "stellar blade",
-    "translated_description_zh": "主角来自《Stellar Blade》。她的名字被风格化为\"EVE\"。她是空间殖民地第七空降突击队的突击队员。EVE 被派往地球执行对抗地球人的战斗任务，但她的整个部队被歼灭。她被[[Adam (Stellar Blade)|]]救下，随后开始在新家园中适应和生存的旅程。EVE 是一个身材高挑的女性，拥有修长的腿部，中等至较大的胸部（取决于她穿的服装），棕色眼睛和黑色头发。她的默认发型是非常长的马尾，配有齐刘海和中等长度的刘海，尽管玩家可以在选项菜单中更改。她的身体和脸上散布着各种小痣。她的默认服装是[[Planet Diving Suit (7th) (Stellar Blade)|]]。她还会根据玩家选择的服装穿戴不同类型的高跟鞋。她的剑[[Blood Edge (Stellar Blade)|]]在不使用时可以折叠并用作马尾的发夹"
+    "has_chinese": true,
+    "chinese_name": "伊芙",
+    "source_hint": "stellar_blade",
+    "translated_description_zh": "游戏《剑星》（Stellar Blade）的主角，太空殖民地第七空降师的突击队员。她被派往地球执行对抗人类的战斗任务，但小队全军覆没，后被亚当所救，开始了在新家园的生存之旅。伊芙身材高挑，腿修长，有着棕色眼睛和黑色长发，默认发型为极长的马尾辫。她的默认服装是第七行星潜水服，武器血刃在不使用时可以折叠成发夹。"
   },
   "akaboshi_koume": {
     "has_chinese": true,
@@ -19830,10 +19830,10 @@
     "translated_description_zh": "Harukaze（春風，意为‘春风’）是《舰队Collection》中的第三艘神风级驱逐舰。她拥有红色眼睛和卷成双钻的棕色头发，戴着红色蝴蝶结。她身穿明治时期的女学生制服（粉色和服、带有樱花瓣的红色 hakama 以及交叉系带的高跟靴），手持红色油纸伞， hakama 上有锚饰。她说话甜美 polite，由能登麻美子配音"
   },
   "turbo_granny_(dandadan)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "高速婆婆",
     "source_hint": "dandadan",
-    "translated_description_zh": "Turbo-Granny 是漫画《Dandadan》中的角色，著名妖怪，曾居住在昭和城市的隧道中，直至与 Ayase Momo 和 Takakura Ken 对峙。她的力量被封印在 Takakura Ken 内，意识被困在填充猫娃娃里，Turbo-Granny 与 Ayase Momo 达成交易：帮助 Takakura Ken 找回他的 kintama，以换取恢复她的力量"
+    "translated_description_zh": "漫画《当哒当》（又译《胆大党》）中的登场角色。她是在正能市废弃隧道中盘踞的妖怪，原型为都市传说中的“高速婆婆”，能以时速100公里追赶他人。在与绫濑桃和高仓健（厄卡伦）交手后，其力量被封印在高仓健体内，意识则被囚禁于招财猫中，后与主角一行达成协议，协助寻找高仓健的“金球”以换回力量。"
   },
   "shirabe_ako": {
     "has_chinese": false,
@@ -21744,10 +21744,10 @@
     "translated_description_zh": "精卫鸟是《崩坏》系列中反复出现的角色，常与傅华和觉醒·理智之律者一同出现在《崩坏3》及《崩坏：星穹铁道》中的素裳，形态多样"
   },
   "rindo_chihaya": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "virtual youtuber",
-    "translated_description_zh": "她是虚拟YouTuber（VTuber），属于hololive DEV_IS的第二期团体FLOW GLOW的成员，由toridamono设计。她具有巨乳、红眼、中长黑发，发中带有青色、紫色和白色的条纹，内发为青色。默认发型为撩起的不对称刘海、编织刘海和侧发。服装包括默认服装、Flowglow制服、新年服装以及holonatsu paradise等。外部链接有YouTube频道和Twitter"
+    "has_chinese": true,
+    "chinese_name": "轮堂千速",
+    "source_hint": "hololive",
+    "translated_description_zh": "虚拟YouTuber，隶属于hololive DEV_IS旗下音乐团体FLOW GLOW。由画师toridamono设计。拥有红色眼睛，胸部丰满。发型为黑色中长发，带有水蓝色、紫色和白色挑染，内侧发色为水蓝色。默认发型为不对称的斜刘海辫发和侧发。"
   },
   "rosa_(arknights)": {
     "has_chinese": true,
@@ -23496,10 +23496,10 @@
     "translated_description_zh": "一个[[Touken Ranbu]]角色。一把[[tantou]]。他经常被描绘为伴随着[[gokotai's_tigers|several tiger cubs]]，因为根据传说，他的同名武器曾用来击退许多老虎。然而，Gokotai自己非常害羞且易流泪。他的[[Gokotai (Kiwame)|Kiwame]]形态将这些虎崽替换为一只大型老虎"
   },
   "kikirara_vivi": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "hololive dev_is",
-    "translated_description_zh": "她是hololive DEV_IS旗下二期团体FLOW GLOW的虚拟YouTuber（VTuber），由nonco设计，拥有粉红长发并带紫色挑染的双尾辫，黑色发带，蓝色眼睛，默认服装包括黑色胸罩外搭白色短款衬衫、紫色护臂、黑色过膝袜、黑色短裤和黑色鞋子"
+    "has_chinese": true,
+    "chinese_name": "绮绮罗罗薇薇",
+    "source_hint": "hololive",
+    "translated_description_zh": "虚拟YouTuber，隶属于hololive DEV_IS旗下音乐团体FLOW GLOW。由画师nonco设计。拥有蓝色眼睛和星形瞳孔，尖耳朵。默认发型为粉色与紫色渐变的极长双马尾，用黑色蝴蝶结发饰扎起，有呆毛、进气口发型和中心分叉刘海。"
   },
   "james_moriarty_(archer)_(fate)": {
     "has_chinese": false,
@@ -25242,10 +25242,10 @@
     "translated_description_zh": "AA-12 是少女前线中代表 AA-12 的安卓角色。在前传衍生游戏《少女前线：神经云》中，AA-12 以林德（神经云）的形式出现；在续作《少女前线 2: 放逐》中亦有同名角色。此外，该角色还有多种皮肤，如《永不升起的太阳》、《无糖棒棒糖》、《糖纸故事》等"
   },
   "shiratori_aira_(dandadan)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "白鸟爱罗",
     "source_hint": "dandadan",
-    "translated_description_zh": "白鳥愛羅是漫画《Dandadan》中的配角。她曾是与[[Ayase Momo]]和[[Takakura Ken (Dandadan)|]]同校的受欢迎学生。在发现[[Takakura Ken (Dandadan)|]]的金玉后，她自以为是被选中保护世界免受邪恶侵害的‘选中者’，并视[[Ayase Momo]]为敌人。然而，在面对超自然事件时，她实际上常充当[[Ayase Momo]]的主要盟友"
+    "translated_description_zh": "《胆大党》（又译《当哒当》、《超自然武装当哒当》）中的配角，与绫濑桃、高仓健就读于同一所学校。在捡到高仓健的一颗金球后，爱罗自认为是“被选中的拯救世界之人”，并将绫濑桃视为敌人。但在面对超自然事件时，她实际上多次成为桃的主要盟友之一。"
   },
   "aioi_yuuko": {
     "has_chinese": false,
@@ -27162,10 +27162,10 @@
     "translated_description_zh": "这是 hololive 的 Shishiro Botan 第三套官方替换服装。上装有两种变体：白色长袖衬衫配红色 bola 领带，外加黑色背心或胸部束缚带；或黑色运动文胸配狗牌。两种版本的下装均为黑色短裤，搭配腿部袜带/大腿带、黑色连裤袜和黑色系带短靴。该服装包含两种官方发型：极长直灰发带发飘和侧发锁，或短灰色挑染发配不对称刘海遮住右眼。外观参考：!post #4748734（参考表）、!post #5218463（个人资料，带羊毛兜帽）"
   },
   "squirrel_girl_(marvel)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "松鼠妹",
     "source_hint": "marvel",
-    "translated_description_zh": "漫威角色，真名多林·格林。出生时就拥有松鼠特征并能与松鼠交流。起初是个默默无闻的角色，但在互联网时代，因她击败如[[Doctor Doom]]等恐怖反派的事迹而广为人知，成为粉丝喜爱的角色。她常被描绘为一个‘元角色’，知道自己身处漫画书中并理解叙事惯例"
+    "translated_description_zh": "漫威漫画旗下超级英雄，本名多琳·艾琳·格林（Doreen Allene Green）。一名天生具有松鼠特征、能与松鼠交流的变种人女孩。她曾击败过毁灭博士等著名反派，并在网络时代成为粉丝最爱，常被描绘为知晓自己身处漫画世界的“元角色”。"
   },
   "lady_avalon_(fate)": {
     "has_chinese": false,
@@ -27900,10 +27900,10 @@
     "translated_description_zh": "Z46 是《碧蓝航线》中的人设角色，代表德国驱逐舰 Z46，由 Kinjo Kuromomo 设计，Chihara Minori 配音。她有长灰发、黄眼睛，右腿有纹身，默认装扮为蓝色贝雷帽、帝国鹰发饰、无袖蓝色双排扣连衣裙（内有白色褶皱层）、黑色夹克、黑红相间的斗篷及红色舵鞋。武装包括挂在斗篷上的舰桥、两座 128 毫米双联炮、两座 37 毫米双联防空炮，并以剑作近战武器"
   },
   "chel_(el_dorado)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "the road to el dorado",
-    "translated_description_zh": "这是《通往埃尔多拉多之路》中的角色。她是一位深色皮肤的女性，有棕色眼睛和长长的黑发，齐刘海和齐斜刘海。她穿着粉色管状上衣、带有骨盆帘的腰布、耳环和手镯"
+    "has_chinese": true,
+    "chinese_name": "切尔",
+    "source_hint": "el_dorado",
+    "translated_description_zh": "来自动画电影《勇闯黄金城》（The Road to El Dorado）的角色。她是一名深色皮肤的土著女性，有着棕色眼睛和黑色长发，刘海齐平，两侧有长鬓角。她身穿粉色抹胸上衣和带有遮羞布的腰布，佩戴耳环和手镯。"
   },
   "muppo": {
     "has_chinese": false,
@@ -27968,8 +27968,8 @@
   "chiaki_(blue_archive)": {
     "has_chinese": true,
     "chinese_name": "元宫千秋",
-    "source_hint": "blue archive",
-    "translated_description_zh": "来自[[Blue Archive]]的角色。是Gehenna Academy的[[Pandemonium Society (blue archive)|]]成员。她的全名是[ b ]Motomiya Chiaki[ /b ]。配音：[[Kanno Mai]] 原画：[[dydldidl]] 。外观：* !post #9320906：默认。外部链接：* \"Blue Archive Wiki: Chiaki\":https://bluearchive.wiki/wiki/Chiak"
+    "source_hint": "blue_archive",
+    "translated_description_zh": "格黑娜学园万魔殿的议员兼书记，性格活泼开朗，出于兴趣发行《周刊万魔殿》，致力于向更多学生宣传万魔殿的活动情报与伊吹的可爱之处。她使用的武器是StG.44突击步枪，由声优菅野真衣配音。"
   },
   "usami_(danganronpa)": {
     "has_chinese": true,
@@ -28566,10 +28566,10 @@
     "translated_description_zh": "《Maria-sama ga Miteru》中的角"
   },
   "caeda_(fire_emblem)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "fire emblem",
-    "translated_description_zh": "塞伊达（Sheeda）是《火焰之纹章》系列游戏中的可玩角色，首次出现于《火焰之纹章：暗黑龙与光之剑》等作品，外表天真活泼，但在需要时能够严肃认真，她保护玛尔斯，却不愿成为他的负担。起始职业为天马骑士"
+    "has_chinese": true,
+    "chinese_name": "希达",
+    "source_hint": "fire_emblem",
+    "translated_description_zh": "来自《火焰之纹章》系列的可玩角色，初次登场于《暗黑龙与光之剑》，也在《纹章之谜》等多部作品中登场。她是塔里斯王国的公主，英雄王马尔斯的未婚妻，初始职业为天马骑士。"
   },
   "edna_(tales)": {
     "has_chinese": false,
@@ -29684,7 +29684,7 @@
   "kearsarge_(azur_lane)": {
     "has_chinese": true,
     "chinese_name": "奇尔沙治",
-    "source_hint": "azur lane",
+    "source_hint": "azur_lane",
     "translated_description_zh": "这是《碧蓝航线》中战列舰-航母混合型USS Kearsarge的拟人化角色，作为与《世界舰船》的合作内容。角色设计由YD (orange maru)负责，青山吉能配音。她拥有极长的白色长发，配有黑色发饰，紫色眼睛，以及丰满的胸部。默认服装是一件代表飞行甲板形状的无肩带白色连体泳装（仅覆盖身体前半部，靠裆部板固定），外加白色短上衣、左右不匹配的袜装（左侧白色过膝袜，右侧黑色大腿靴）和黑色手套。由于连体泳装的特殊穿法，她的背部和臀部完全裸露，并具有机械脊柱。她的装备包括头顶上方的大型机械光环和小型自然光环，以及白色船体部件和四座406毫米三联装炮塔。她的设计后来略作修改，使飞行甲板出现在两侧，并伴有一队F8F Bearcat战机"
   },
   "hikami_sumire": {
@@ -42234,10 +42234,10 @@
     "translated_description_zh": "来自《Zero no Tsukaima》的角色。塔比莎是一名强大的风魔法学生，就读于与路易丝·弗朗索瓦兹·勒布朗·德拉瓦利埃尔同一所学校。她的使魔是Sylpheed，一条龙"
   },
   "maruzensky_(hot_summer_night)_(umamusume)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "丸善斯基（夏日光辉）",
     "source_hint": "umamusume",
-    "translated_description_zh": "这是《Umamusume》中马券天空（Maruzensky）的夏季主题官方替换服装，于‘Umamusume Summer Story’活动期间推出"
+    "translated_description_zh": "来自《赛马娘 Pretty Derby》的角色，这是丸善斯基在“赛马娘夏日物语”活动中实装的泳装主题官方换装。"
   },
   "mia_fey": {
     "has_chinese": true,
@@ -48858,10 +48858,10 @@
     "translated_description_zh": "[[Mega Man (classic)|]] 角色。由 [[Dr. Wily (mega man)|]] 制造的机器人，用于对抗 [[Mega Man (character)|]]"
   },
   "anya_(mouthwashing)": {
-    "has_chinese": false,
-    "chinese_name": "",
+    "has_chinese": true,
+    "chinese_name": "安雅",
     "source_hint": "mouthwashing",
-    "translated_description_zh": "在[[Mouthwashing]]中的配角。Anya 是图尔帕号飞船船员的护士。她有[[black hair|black]] [[medium hair]] 与 [[flipped sidelocks]]，穿着[[blue jumpsuit]] 外搭[[striped sweater|striped]] [[turtleneck sweater]]"
+    "translated_description_zh": "《缄默祸运》（Mouthwashing）中的角色。她是星际货运船“图尔帕号”上的随船护士，负责船员的伤病救治与心理疏导。"
   },
   "bellsprout": {
     "has_chinese": false,
@@ -64848,10 +64848,10 @@
     "translated_description_zh": "可玩角色，出自[[Fire Emblem: Three Houses]]。也被称为卡桑德拉·鲁本斯·查隆。以‘雷电凯瑟琳’（以前称为‘雷击卡桑德拉’）闻名，是塞伊罗斯骑士团最强成员之一。她拥有查隆的主要徽章，并使用圣遗物[[Thunderbrand]]。外观：* !post #4157745 * !post #6686914：[[catherine (summer) (fire emblem)|Summer]"
   },
   "alsace_(heat_beating_summer_sacrament)_(azur_lane)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "azur lane",
-    "translated_description_zh": "这是《碧蓝航线》角色阿尔萨斯的夏季官方替换皮肤（skin），包括脱领、蓝色领带（贴合胸间）、白色交叉式比基尼、多带式比基尼底裤，以及半束发辫并配黑色发带和蓝色发饰的发型"
+    "has_chinese": true,
+    "chinese_name": "阿尔萨斯（消暑夏日圣礼）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中角色阿尔萨斯的官方夏日泳装皮肤。该皮肤包含白色交叉系带比基尼和蓝色领带，发型为半扎发辫，搭配黑色发带和蓝色头花。日文皮肤名为“陽差しの秘蹟、過熱す”。"
   },
   "kim_possible": {
     "has_chinese": false,
@@ -75408,10 +75408,10 @@
     "translated_description_zh": "Azur Lane 中的角色，代表苏联未完成的克朗施塔德级大型/战列巡洋舰（69 号项目）的首航舰。她身着双色双排扣连衣裙、连裤袜、大腿束带、黑手套及大型白色毛领披风，背背巨剑，装备符合北方议会/俄罗斯派系冰封动物风格的巨型装备，主炮为三联装前向排列。角色由 Dishwasher1910 设计，近藤花音 配音"
   },
   "golden_hind_(azur_lane)": {
-    "has_chinese": false,
-    "chinese_name": "",
-    "source_hint": "azur lane",
-    "translated_description_zh": "Azur Lane 中的金鹿号（Golden Hind，原名鹈鹕）人格化角色，由英国私掠者弗朗西斯·德雷克指挥。她是 Azur Lane 中的第二艘帆船，也是游戏中目前最古老的舰船。皮肤：* !post #6814017：基础图 * !post #6814024：[[golden_hind_(forlorn_femme_fatale)_(azur_lane)|Forlorn Femme Fatale]] 相关角色：* [[Drake (Azur Lane)|]] * [[Royal Fortune (Azur Lane)|]] 外部链接：* \"Wikipedia: Golden Hind\":[https://en.wikipedia.org/wiki/Golden_Hind] * \"Wikipedia: Francis Drake\":[https://en.wikipedia.org/wiki/Francis_Drak"
+    "has_chinese": true,
+    "chinese_name": "金鹿号",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中金鹿号（Golden Hind，旧称鹈鹕号）的拟人化角色，原型为英国私掠者弗朗西斯·德雷克指挥的盖伦帆船。她是碧蓝航线中第二艘风帆船，也是目前游戏中登场的最古老舰船。"
   },
   "lucia:_pyroath_(pgr)": {
     "has_chinese": true,
@@ -77500,5 +77500,137 @@
     "chinese_name": "奇吉姆纳",
     "source_hint": "fate",
     "translated_description_zh": "《Fate/Grand Order》活动中登场的NPC，是冲绳传说中“木之精”（キジムナー）的现代诠释版，昵称为“小纳”。她的真实身份为命运三女神之一的薇儿丹蒂，穿着现代风格的服装，有着该角色标志性的巨乳身材。"
+  },
+  "kotone_(blue_archive)": {
+    "has_chinese": true,
+    "chinese_name": "渊上琴音",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "来自《蔚蓝档案》（Blue Archive）的角色，是奥德赛海洋学校潜水部的学生。她留着白色/灰色的波波头短发，有着灰色的眼睛和鲸鱼尾巴。她佩戴耳机、圆框眼镜、黑色颈环和大腿束带，穿着白色连帽披肩、室内鞋和一件露出侧乳的白色连体泳衣。她使用APS水下突击步枪作为武器。"
+  },
+  "aria_(human)_(zenless_zone_zero)": {
+    "has_chinese": true,
+    "chinese_name": "爱芮（人类形态）",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "来自《绝区零》的角色爱芮的人类形态。她利用这个全息形象来隐藏自己的机器人本体。"
+  },
+  "satsuki_(swimsuit)_(blue_archive)": {
+    "has_chinese": true,
+    "chinese_name": "京极皋月（泳装）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "来自《蔚蓝档案》（Blue Archive）的角色京极皋月的泳装官方换装。她身穿红色比基尼，脚踩凉鞋，头戴发花，是格赫娜学院万魔殿的议员兼情报部长。"
+  },
+  "makoto_(swimsuit)_(blue_archive)": {
+    "has_chinese": true,
+    "chinese_name": "羽沼真琴（泳装）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "来自《蔚蓝档案》（Blue Archive）的角色羽沼真琴的泳装官方换装，是可玩版本。她身穿白色比基尼，脚踩高跟凉鞋，手腕戴有手镯，是格黑娜学院万魔殿的议长。"
+  },
+  "chiaki_(swimsuit)_(blue_archive)": {
+    "has_chinese": true,
+    "chinese_name": "元宫千秋（泳装）",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "碧蓝档案中角色元宫千秋的泳装官方换装形态。她将头发盘成丸子头，用黄色发圈束起，身穿白色钢圈比基尼和侧面系带泳裤，外罩一件透明针织开衫，脚踩白色运动凉鞋。与周年泳装造型为不同版本，该形态为活动报酬角色。"
+  },
+  "qingxiao_(wuthering_waves)": {
+    "has_chinese": true,
+    "chinese_name": "清宵",
+    "source_hint": "wuthering_waves",
+    "translated_description_zh": "来自《鸣潮》（Wuthering Waves）的可玩角色，是一位居于瑝珑梦州之地的剑术大师，人称“剑仙”。她琴剑双修，以心御剑，担任“镇玄司骑”。残响印记位于左手掌心。"
+  },
+  "kokoro_(blue_archive)": {
+    "has_chinese": true,
+    "chinese_name": "渡海心",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "来自《蔚蓝档案》（Blue Archive）的角色，是奥德赛海洋学校潜水部的部长。她有着粉色头发和粉色眼睛，身穿蓝色拉链潜水服，手持ADS两栖突击步枪。"
+  },
+  "chisa_(peach_parfait)_(wuthering_waves)": {
+    "has_chinese": true,
+    "chinese_name": "千咲（白桃芭菲）",
+    "source_hint": "wuthering_waves",
+    "translated_description_zh": "这是《鸣潮》中角色千咲的官方换装「白桃芭菲」。"
+  },
+  "lynae_(peppermint)_(wuthering_waves)": {
+    "has_chinese": true,
+    "chinese_name": "琳奈（薄荷糖）",
+    "source_hint": "wuthering_waves",
+    "translated_description_zh": "这是《鸣潮》中角色琳奈的官方夏日泳装皮肤「薄荷糖」。"
+  },
+  "sayuri_(blue_archive)": {
+    "has_chinese": true,
+    "chinese_name": "小百合",
+    "source_hint": "blue_archive",
+    "translated_description_zh": "奥德赛海洋学校的学生，首次出现在游戏第7个PV中。她有着白色长发，蓝绿异色瞳，白色睫毛，身材平坦。服装包括白色高叉连体泳衣，带有蓝色缎带的分离式衣领，白色臂环，以及带有大腿枪套的腿带。头上饰有X形发饰和虎鲸发饰。她使用的武器是H&K P11。"
+  },
+  "claret_flint": {
+    "has_chinese": true,
+    "chinese_name": "克拉蕾·弗林特",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "《绝区零》中的即将实装的可玩角色，担任弗林特工坊的行政总监。她有着红色眼睛，中等身材，金色带红色挑染的长发扎成双马尾，并带有球形发饰。服装包括黑色抹胸上衣、带有白色袖口的黑色分离式袖套、黑色迷你裙、白色蝙蝠图案过膝袜和黑色及膝靴。她使用的武器是一把双面战斧，斧柄接触她的血液时会激活。日文配音为植田佳奈，英文配音为Cassandra Lee Morris，中文配音为刘知晓。"
+  },
+  "roxy_ifrita_pryce": {
+    "has_chinese": true,
+    "chinese_name": "洛克茜·伊芙莉塔·普莱斯",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "《绝区零》中的即将实装的可玩角色，是弗林特工坊的首席锻造师，也是克拉蕾的众多助手之一。她有着苍白肤色，肩部有伤疤，尖耳朵，紫色眼睛搭配红色瞳孔，以及中长度的绿色头发。服装包括黑色发带，黑色短上衣内搭白色无袖有领衬衫，黑色分离式袖套，带大腿镂空的黑色高腰短裤，以及尖头靴。战斗中使用一口可变形为能量炮或棍棒的棺材。日文配音为赤崎千夏，英文配音为Bryn Apprill，中文配音为刘一蕾。"
+  },
+  "typhoeus_(arknights)": {
+    "has_chinese": true,
+    "chinese_name": "提弗洛斯",
+    "source_hint": "arknights",
+    "translated_description_zh": "《明日方舟：终末地》中的可玩干员，来自罗德岛的荒野猎手，职业为突击手，擅长使用施术单元从远处攻击敌人。她是一位对世界充满好奇的萨卡兹少女，渴望探索无人之境，发掘被遗忘的故事。在战斗中，她能进入悬停状态，使用猎箭强化射击，对敌人造成大量自然属性爆发伤害。"
+  },
+  "liino_(arknights)": {
+    "has_chinese": true,
+    "chinese_name": "梨诺",
+    "source_hint": "arknights",
+    "translated_description_zh": "《明日方舟：终末地》中的可玩干员，六星电磁辅助职业，使用长柄武器。来自环塔商会的新锐偶像，人称“菈梵朵玛的晨星”，种族为萨卡兹（恶魔族）。其技能可提供持续攻击力增益与治疗，并能通过组合技为队伍回复技力，是电磁与自然队的核心辅助。"
+  },
+  "verdandi_(fate)": {
+    "has_chinese": true,
+    "chinese_name": "薇尔丹蒂",
+    "source_hint": "fate",
+    "translated_description_zh": "Type-Moon世界观下的薇尔丹蒂，北欧神话中诺伦三女神（命运三女神）的二姐，司掌“现在”。她最初在《Fate/Grand Order》的“迦勒底南海大决战”活动中作为NPC登场，化名为“キジムナー”（Kijimuna，冲绳妖精），昵称为“ナッちゃん”（小娜/纳酱）。其角色设计由画师10mo负责，立绘形象为现代风格（JK装）。她的大姐是乌尔德（Urd）。"
+  },
+  "jinx_(league)": {
+    "has_chinese": true,
+    "chinese_name": "金克丝",
+    "source_hint": "league",
+    "translated_description_zh": "金克丝，称号“暴走萝莉”，是《英雄联盟》中的一名人类英雄，通常担任下路ADC（物理输出）位置。她以鲜明的疯狂性格、平胸、对暴力和混乱的热爱以及庞大的军火库而闻名。她在皮尔特沃夫制造犯罪，并乐于戏弄试图抓捕她的执法官凯特琳和蔚。她在动画《英雄联盟：双城之战》中扮演重要角色，剧中揭露其真名为“爆爆”（Powder）。"
+  },
+  "arcane_(arknights)": {
+    "has_chinese": true,
+    "chinese_name": "诀",
+    "source_hint": "arknights",
+    "translated_description_zh": "诀，本名李织烟，是《明日方舟：终末地》中的一名可玩干员。她是隶属于宏山科学院应龙特勤队的行动队长，长期驻守应龙关，性格严肃认真、不苟言笑，因北部禁区的灾难而立志遏制武陵甚大裂隙。"
+  },
+  "biscione_(fate)": {
+    "has_chinese": true,
+    "chinese_name": "比修内",
+    "source_hint": "fate",
+    "translated_description_zh": "《Fate/Grand Order》中登场的Lancer职阶从者，首次实装于活动「培育吧 我的小小龙」。其名字源自意大利米兰的纹章蛇，是维斯孔蒂家族的象征。角色设计由Imigimuru负责，声优为市之濑加那。她性格缺乏自信，渴望安稳的生活，拥有龙角、龙尾和眼镜等萌属性，并有着“害怕裸体男人”的有趣弱点。在游戏中，她以赋予毒状态为核心机制，是对毒特攻的绿卡单体输出从者。第三灵基形态名为“比修内〔乌洛波洛斯转变〕”（Ouroboros Shift）。"
+  },
+  "dracaene_sunbringer": {
+    "has_chinese": true,
+    "chinese_name": "德蕾琪娜·挽昼",
+    "source_hint": "zenless_zone_zero",
+    "translated_description_zh": "游戏《绝区零》（Zenless Zone Zero）中的登场角色，称号为“挽昼”（Sunbringer）之一，是初代虚狩（Void Hunter），也是邦布的发明者与罗斯凯利法的建立者之一。她担任中央计算部门主管，外表看起来像个孩子，但思维与行为却异常成熟，是“挽昼”真身分裂而成的三个智能构造体之一。"
+  },
+  "amagi_(cv)_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "天城（空母）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中角色天城的航空母舰形态，属于游戏中实装的海上传奇稀有度航空母舰，国服名为“鳐”。该形态基于历史上天城级战列巡洋舰改建航空母舰的计划，角色保留了原版天城的身体与记忆，但拥有全新的航母装束与舰装，服装包括黑色连体衣、白色双排扣衬衫和白色百褶裙，舰装由机械船体部件和飞行甲板组成，并伴随有凤凰式神。"
+  },
+  "amagi_(cv)_(throne_of_fallen_petals)_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "天城（空母·玉座落鸞）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中角色天城（空母形态）的官方换装皮肤。日文名为「玉座落鸞」，国服对应名称有「落于王座之花」或「红鸾回影」等译法。该换装为优雅华丽的礼服风格，角色端坐于王座之上，展现重樱阵营军师的威严与柔美，附有L2D动画及追加语音。"
+  },
+  "hakuryuu_(slice_dice_and_serve)_(azur_lane)": {
+    "has_chinese": true,
+    "chinese_name": "白龙（快刀乱肴）",
+    "source_hint": "azur_lane",
+    "translated_description_zh": "《碧蓝航线》中重樱阵营航空母舰白龙（鹫）的女仆主题官方换装皮肤。日文名为「快刀乱肴」，国服沿用该名称，皮肤台词为「可笑至极！这就给你见识一下我华丽的刀功！」。该皮肤突出了白龙角色设定中重视刀的性格特征，以女仆装束演绎其豪爽利落的一面。"
   }
 }

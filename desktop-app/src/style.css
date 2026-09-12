@@ -824,8 +824,8 @@ input[type="range"]:focus {
    配合 Vue @load 切 .is-loaded，280ms 即可，不重排、不滤波、纯 opacity 走 GPU。
    缩略图淡入已经各自组件里加（CrawlerPage .thumb、FavoritesPage .thumb）。 */
 .viewer-image {
-  opacity: 0;
-  transition: opacity 0.28s ease;
+  opacity: 1;
+  transition: none;
 }
 .viewer-image.is-loaded {
   opacity: 1;
@@ -2012,6 +2012,140 @@ h2 { letter-spacing: -0.35px; }
   }
 }
 
+/* Product UI pass: quieter chrome, clearer hierarchy, and stable task layout. */
+:root {
+  --bg: #f5f6f8;
+  --panel: rgba(255, 255, 255, 0.98);
+  --surface: #ffffff;
+  --surface-muted: #f0f2f5;
+  --line: #dfe3e8;
+  --line-strong: #c9d0d8;
+  --ink: #20252b;
+  --muted: #68727e;
+  --accent: #b6532d;
+  --accent-deep: #8f3d21;
+  --accent-rgb: 182, 83, 45;
+  --violet-rgb: 98, 108, 128;
+  --soft: #fbefea;
+  --soft-violet: #eef1f4;
+  --accent-gradient: linear-gradient(135deg, #bf6039 0%, #a44726 100%);
+  --shadow-sm: 0 1px 2px rgba(25, 31, 38, 0.06);
+  --shadow-md: 0 8px 24px rgba(25, 31, 38, 0.07);
+}
+
+.app-atmosphere {
+  background: var(--bg);
+}
+.app-atmosphere span { display: none; }
+
+.shell.shell-compact {
+  padding: 16px 16px 16px 82px;
+}
+.shell.shell-compact.nav-open { padding-left: 228px; }
+
+.app-sidebar.nav-drawer {
+  left: 16px;
+  top: 16px;
+  bottom: 16px;
+  width: 52px;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 4px 18px rgba(25, 31, 38, 0.08);
+}
+.app-sidebar.nav-drawer.open { width: 196px; }
+.brand-mark { border-radius: 10px; box-shadow: none; }
+.app-sidebar .nav-chip { border-radius: 8px; }
+.app-sidebar .nav-chip.active {
+  background: var(--soft);
+  color: var(--accent-deep);
+  border-color: rgba(var(--accent-rgb), 0.18);
+}
+.nav-active-dot { background: var(--accent); }
+
+.content-frame { padding: 0; }
+.panel, .sidebar {
+  border-radius: 10px;
+  box-shadow: var(--shadow-md);
+}
+.card { padding: 16px; }
+.panel-head, .gallery-head, .canvas-head {
+  margin-bottom: 14px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+h1, h2, h3, h4 { letter-spacing: 0; }
+
+button {
+  border-radius: 7px;
+  box-shadow: none;
+}
+button:hover:not(:disabled) { filter: none; box-shadow: var(--shadow-sm); }
+button.secondary { background: #fff; }
+button.ghost { background: transparent; color: var(--muted); }
+button.ghost:hover:not(:disabled) { background: var(--surface-muted); color: var(--ink); }
+input, select, textarea { border-radius: 7px; }
+
+.crawler-layout {
+  grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+.crawler-layout > .control-panel,
+.crawler-layout > .crawler-control-panel {
+  position: sticky;
+  top: 0;
+  max-height: calc(100vh - 32px);
+  overflow-y: auto;
+}
+.gallery-panel { min-width: 0; }
+.mode-selector { gap: 8px; }
+.mode-chip { border-radius: 7px; }
+.mode-chip.active, .pg-num.active { background: var(--accent-gradient); }
+.gallery-tools { gap: 6px; }
+.gallery-grid { gap: 12px; }
+.image-card { border-radius: 9px; box-shadow: 0 2px 8px rgba(25, 31, 38, 0.05); }
+.image-card:hover { box-shadow: 0 8px 18px rgba(25, 31, 38, 0.1); }
+.log-panel { border-radius: 9px; }
+
+/* Toolbar dropdowns open on hover. A click must not leave a menu pinned open. */
+.display-dropdown,
+.refresh-dropdown,
+.translate-dropdown { position: relative; }
+.display-menu,
+.refresh-menu,
+.translate-menu {
+  z-index: 80;
+  top: calc(100% - 1px);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: 0 12px 28px rgba(25, 31, 38, 0.14);
+}
+.display-menu,
+.refresh-menu,
+.translate-menu {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(-4px);
+  transition: opacity 0.12s ease, transform 0.12s ease, visibility 0s linear 0.12s;
+}
+.display-dropdown:hover .display-menu,
+.refresh-dropdown:hover .refresh-menu,
+.translate-dropdown:hover .translate-menu {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+  transition-delay: 0s;
+}
+
+@media (max-width: 1400px) and (min-width: 721px) {
+  .shell.shell-compact { padding-left: 74px; }
+  .shell.shell-compact.nav-open { padding-left: 210px; }
+  .app-sidebar.nav-drawer.open { width: 178px; }
+  .crawler-layout { grid-template-columns: minmax(280px, 320px) minmax(0, 1fr); }
+}
+
 /* ============== 全局右键复制轻提示 ============== */
 .copy-toast-pill {
   position: fixed;
@@ -2040,4 +2174,47 @@ h2 { letter-spacing: -0.35px; }
 .copy-toast-enter-active,
 .copy-toast-leave-active {
   transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+/* The feature rail stays compact so the workspace keeps a stable content edge. */
+.shell.shell-compact,
+.shell.shell-compact.nav-open {
+  padding-left: 78px;
+  transition: none;
+}
+.app-sidebar.nav-drawer,
+.app-sidebar.nav-drawer.open {
+  width: 54px;
+  padding: 10px 7px;
+  background: rgba(255, 255, 255, 0.68);
+  border-color: rgba(30, 41, 82, 0.1);
+  box-shadow: 0 8px 24px rgba(30, 41, 82, 0.08);
+  backdrop-filter: blur(14px) saturate(125%);
+  transition: none;
+}
+.app-sidebar .nav-drawer-toggle {
+  display: none;
+}
+.app-sidebar .nav-chip,
+.app-sidebar.open .nav-chip {
+  justify-content: center;
+  padding: 0;
+}
+.app-sidebar .nav-chip-copy,
+.app-sidebar .sidebar-foot {
+  display: none;
+}
+
+@media (max-width: 1400px) and (min-width: 721px) {
+  .shell.shell-compact,
+  .shell.shell-compact.nav-open {
+    padding-left: 74px;
+  }
+}
+
+@media (max-width: 720px) {
+  .shell.shell-compact,
+  .shell.shell-compact.nav-open {
+    padding-left: 66px;
+  }
 }
