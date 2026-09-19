@@ -770,6 +770,8 @@ def viewer_search(token_groups, kinds, folder_start=None, folder_end=None,
 
     token_groups: [[tag, ...], ...] —— 组间 AND、组内 OR（支持中文角色名展开成多个候选 tag）。
     kinds: 要匹配的标签类别集合，取值 'character' / 'artist'。
+           'character' 同时匹配 tag_character 与 tag_copyright（作品/系列 tag，如 azur_lane）：
+           单日画廊子串搜索靠角色 tag 的 _(系列名) 后缀命中系列名，跨日期搜索要保持同等体验。
     folder_start/folder_end: 可选的 YYYY-MM-DD 闭区间（字典序即日期序）。
     library_ids: 仅在这些库内搜索（主进程只传当前在线的 root）。
     返回 (total, rows)：rows 为原始 sqlite Row（含 library_id/folder 上下文，供主进程归一化）。
@@ -794,15 +796,21 @@ def viewer_search(token_groups, kinds, folder_start=None, folder_end=None,
         where.append("folder <= ?")
         params.append(folder_end)
 
-    # 每组生成一个 (角色整词匹配 OR 作者整词匹配) 子句；tag 以空格分词存储，
+    # 每组生成一个 (角色整词匹配 OR 作品系列整词匹配 OR 作者整词匹配) 子句；tag 以空格分词存储，
     # 前后补空格后 LIKE '% tag %' 做整词边界，ESCAPE 让 tag 里的 _ 不被当通配。
     for group in groups:
         branches = []
         for token in group:
             word = f"% {_escape_like_token(token)} %"
             if "character" in kinds:
+                # tag_character 之外把 tag_copyright（作品/系列，如 azur_lane、genshin_impact）
+                # 也纳入：画廊单日搜索的 azur_lane 命中实际来自角色 tag 的 _(系列名) 后缀，
+                # 跨日期整词匹配只有搜 copyright 列才能对齐，还能多覆盖只打了系列 tag 的群像图。
                 branches.append(
                     "(' '||IFNULL(tag_character,'')||' ' LIKE ? ESCAPE '\\')")
+                params.append(word)
+                branches.append(
+                    "(' '||IFNULL(tag_copyright,'')||' ' LIKE ? ESCAPE '\\')")
                 params.append(word)
             if "artist" in kinds:
                 # 注意结尾两层 ) ：内层闭合 OR 右半的 (' '||…)，外层闭合 (LOWER(…) OR …)

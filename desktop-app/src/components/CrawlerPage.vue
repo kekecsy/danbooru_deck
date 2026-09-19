@@ -4558,6 +4558,14 @@ async function loadMoreSearch() {
 
 const searchHasMore = computed(() => searchModal.value.nextOffset < searchModal.value.total);
 
+// 离线告警里三个 root 可能 label 完全相同（用户习惯都叫"机械盘"），重名时附上 id 区分
+const offlineLibraryNames = computed(() => {
+  const libs = searchModal.value.offlineLibraries;
+  const labelCount = {};
+  for (const r of libs) labelCount[r.label] = (labelCount[r.label] || 0) + 1;
+  return libs.map(r => (labelCount[r.label] > 1 && r.id && r.id !== r.label) ? `${r.label}（${r.id}）` : r.label);
+});
+
 // 跨日期搜索输入框的历史下拉：直接复用画廊顶部搜索框的 searchHistory（同一份
 // localStorage crawlerSearchHistory），两边互相继承——画廊里搜过的作者/角色
 // 在这里 focus 即见；这里搜的也回到顶部框历史。
@@ -5963,8 +5971,8 @@ const downloadTargetHint = computed(() => {
               />
             </span>
             <div class="seg-group search-kind-group">
-              <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'auto' }" @click="searchModal.kind = 'auto'" title="同时匹配角色 tag 与作者">自动</button>
-              <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'character' }" @click="searchModal.kind = 'character'" title="只匹配角色 tag（tag_character）">角色</button>
+              <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'auto' }" @click="searchModal.kind = 'auto'" title="同时匹配角色 tag、作品系列 tag（如 azur_lane）与作者">自动</button>
+              <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'character' }" @click="searchModal.kind = 'character'" title="匹配角色 tag 与作品系列 tag（tag_character / tag_copyright）">角色</button>
               <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'artist' }" @click="searchModal.kind = 'artist'" title="只匹配作者（artist 列 / tag_artist，需英文原名）">作者</button>
             </div>
             <div class="search-date-row">
@@ -5991,7 +5999,7 @@ const downloadTargetHint = computed(() => {
             中文名已展开为 {{ searchModal.expandedTags.length }} 个 tag：{{ searchModal.expandedTags.slice(0, 6).join(', ') }}{{ searchModal.expandedTags.length > 6 ? ' …' : '' }}
           </div>
           <div v-if="searchModal.offlineLibraries.length" class="search-hint-text search-hint-warn">
-            ⚠ 有 {{ searchModal.offlineLibraries.length }} 个图库离线未参与搜索：{{ searchModal.offlineLibraries.map(r => r.label).join('、') }}
+            ⚠ 有 {{ searchModal.offlineLibraries.length }} 个图库离线未参与搜索：{{ offlineLibraryNames.join('、') }}
           </div>
           <div v-if="searchModal.msg" class="search-hint-text" :class="{ 'search-hint-warn': searchModal.searched }">{{ searchModal.msg }}</div>
 

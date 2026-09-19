@@ -3400,8 +3400,10 @@ def get_gallery_data_by_date(date_str: str):
 @app.get("/api/search_entries")
 def api_search_entries(q: str = "", kind: str = "auto", start: str = "",
                        end: str = "", limit: int = 120, offset: int = 0):
-    """跨日期本地搜索：在 deck.db 内按角色/作者整词匹配，日期闭区间可选。
+    """跨日期本地搜索：在 deck.db 内按角色/作品系列/作者整词匹配，日期闭区间可选。
 
+    character 维度同时匹配 tag_character 与 tag_copyright（作品/系列 tag，如 azur_lane；
+    单日画廊搜 azur_lane 靠角色 tag 的 _(系列名) 后缀子串命中，这里用 copyright 整词对齐）。
     只查当前在线的图库根目录；纯离线搜索，不发任何网络请求。
     返回结构与 gallery_data 的 local_images 卡片一致（每项额外带 date，可跨日期）。
     """

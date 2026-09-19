@@ -699,6 +699,57 @@ def test_page_cursor_and_failed_scope():
           [r["page"] for r in deck_db.failed_page_load_scope(f1)] == [41])
 
 
+def test_viewer_search():
+    """⑧ 跨日期搜索：角色列 + 作品系列列(copyright) 整词匹配、作者精确匹配、区间/分库过滤。"""
+    section("⑧ viewer_search 跨日期整词搜索")
+    d1, d2, d3 = "2026-09-17", "2026-09-18", "2026-09-19"
+    # 碧蓝航线图：角色 tag 带 _(azur_lane) 后缀，copyright 整词为 azur_lane
+    azur_char = _entry("az1.jpg", "https://x/101", "w101", artist="artist_x",
+                       tags=_tags(character="vicksburg_(azur_lane)", copyright_="azur_lane"))
+    # 群像图：没打角色 tag，只有系列 tag —— 单日画廊的后缀子串搜不到它，跨日期 copyright 命中能覆盖
+    azur_group = _entry("az2.jpg", "https://x/102", "w102", artist="artist_y",
+                        tags=_tags(general="multiple_girls", character="", copyright_="azur_lane"))
+    # 无关图：初音 / vocaloid
+    miku = _entry("miku.jpg", "https://x/103", "w103", artist="artist_a",
+                  tags=_tags(character="hatsune_miku", copyright_="vocaloid"))
+    deck_db.viewer_replace("default", d1, [azur_char, azur_group, miku])
+    deck_db.viewer_replace("default", d2, [azur_char])
+    # 外置库同一天也有一张：library_ids 过滤必须生效
+    deck_db.viewer_replace("lib2", d1, [azur_group])
+    deck_db.viewer_replace("default", d3, [miku])
+
+    # 主进程恒传在线 root 的 id 列表，测试同样显式限定，避免各用例互相串库
+    def names(token_groups, kinds, libs=("default",), **kw):
+        total, rows = deck_db.viewer_search(token_groups, kinds, library_ids=list(libs), **kw)
+        return total, {r["filename"] for r in rows}
+
+    # 系列名搜角色维度：后缀角色图 + 仅系列 tag 群像图都命中（三天 default 库共 3 条：d1×2 + d2×1）
+    total, rows = names([["azur_lane"]], {"character"})
+    check("azur_lane 走 tag_copyright 整词命中（不靠角色后缀子串）",
+          total == 3 and rows == {"az1.jpg", "az2.jpg"}, f"total={total} rows={rows}")
+    # 纯作者维度不碰 copyright：azur_lane 是系列不是作者
+    total, _ = names([["azur_lane"]], {"artist"})
+    check("作者维度搜 azur_lane 为 0", total == 0, str(total))
+    # 整词边界不退化：'azur' 不能子串命中 azur_lane
+    total, _ = names([["azur"]], {"character"})
+    check("整词边界：azur 不命中 azur_lane", total == 0, str(total))
+    # 作者精确匹配（artist 列等值 + tag_artist 整词）
+    total, rows = names([["artist_x"]], {"artist"})
+    check("作者 tag_artist 整词命中", total == 2 and rows == {"az1.jpg"}, f"total={total} rows={rows}")
+    # 组间 AND：系列 azur_lane + 作者 artist_x，只有 d1/d2 的 az1
+    total, rows = names([["azur_lane"], ["artist_x"]], {"character", "artist"})
+    check("组间 AND（系列 ∩ 作者）", total == 2 and rows == {"az1.jpg"}, f"total={total} rows={rows}")
+    # 组内 OR（中文角色名多候选展开的形状）
+    total, _ = names([["vicksburg_(azur_lane)", "ghost_tag"]], {"character"})
+    check("组内 OR 命中存在的候选 tag", total == 2, str(total))
+    # 日期闭区间：只看 d2~d3 → d2 的 az1、d3 的 miku（miku 不命中），只剩 1
+    total, rows = names([["azur_lane"]], {"character"}, folder_start=d2, folder_end=d3)
+    check("folder 闭区间过滤", total == 1 and rows == {"az1.jpg"}, f"total={total} rows={rows}")
+    # 分库过滤：只给 lib2 时 default 库行不参与
+    total, rows = names([["azur_lane"]], {"character"}, libs=("lib2",))
+    check("library_ids 限定外置库", total == 1 and rows == {"az2.jpg"}, f"total={total} rows={rows}")
+
+
 def race_stress(rounds: int):
     """跨进程首启竞争压力测试：每轮全新临时目录 + 2 进程同时首连。
 
@@ -764,6 +815,7 @@ def main_run():
         test_bootstrap_race()
         test_rollback_drill()
         test_page_cursor_and_failed_scope()
+        test_viewer_search()
     finally:
         deck_db.checkpoint("TRUNCATE")
     print("\n" + "=" * 70)
