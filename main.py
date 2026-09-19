@@ -9,6 +9,7 @@ from pathlib import Path
 from time import sleep
 import datetime
 import json
+import shutil
 import threading
 import concurrent.futures
 from fastapi import FastAPI, BackgroundTasks
@@ -33,6 +34,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from fastapi.staticfiles import StaticFiles
 from my_utils import (
+    _viewer_item_key,
+    atomic_write_json,
     dedup_viewer_data,
     load_json,
     merge_daily_viewer_data,
@@ -40,8 +43,10 @@ from my_utils import (
     is_tag_folder,
     tag_folder_display,
 )
+import http_client
 import danbooru_api
 import gelbooru_api
+import deck_db
 from danbooru_data import DanbooruData
 from runtime_paths import DATA_DIR, HOT_PIC_DIR, RESOURCE_DIR, ensure_user_directories
 
@@ -65,109 +70,17 @@ IMAGE_FAVORITES_JSON = BASE_DIR / "image_favorites.json"
 LIBRARY_ROOTS_JSON = BASE_DIR / "library_roots.json"
 
 
-def _safe_library_id(raw: str, fallback: str) -> str:
-    value = re.sub(r"[^a-zA-Z0-9_-]+", "_", (raw or "").strip()).strip("_")
-    return value or fallback
-
-
-def _load_library_roots_config():
-    """Return ordered gallery roots. Missing config keeps the historical ./hot_pic behavior.
-
-    library_roots.json accepts either:
-      ["D:/pics/hot_pic", {"id": "archive", "label": "Archive", "path": "E:/hot_pic"}]
-    or {"roots": [...]}.
-    """
-    default_path = HOT_PIC_DIR.resolve()
-    roots = [{
-        "id": "default",
-        "label": "hot_pic",
-        "path": default_path,
-        "is_default": True,
-    }]
-    if not LIBRARY_ROOTS_JSON.exists():
-        return roots
-    try:
-        raw = load_json(str(LIBRARY_ROOTS_JSON), [])
-    except Exception:
-        raw = []
-    entries = raw.get("roots", []) if isinstance(raw, dict) else raw
-    if not isinstance(entries, list):
-        return roots
-
-    seen_paths = {str(default_path).lower()}
-    seen_ids = {"default"}
-    for idx, entry in enumerate(entries):
-        if isinstance(entry, str):
-            raw_path = entry
-            raw_id = ""
-            label = ""
-            lazy_scan = False
-        elif isinstance(entry, dict):
-            raw_path = entry.get("path") or entry.get("root") or ""
-            raw_id = entry.get("id") or ""
-            label = entry.get("label") or entry.get("name") or ""
-            # 机械盘 / 外置盘 / 网盘根目录上默认开懒扫：只枚举日期目录名，不数图。
-            # 用户在 JSON 里显式写 "lazy_scan": false 可以覆盖（例如该 root 是本地 SSD）。
-            lazy_scan = bool(entry.get("lazy_scan", False))
-        else:
-            continue
-        if not raw_path:
-            continue
-        path = Path(raw_path)
-        if not path.is_absolute():
-            path = (BASE_DIR / path).resolve()
-        else:
-            path = path.resolve()
-        path_key = str(path).lower()
-        if path_key in seen_paths:
-            continue
-        lib_id = _safe_library_id(raw_id, f"lib{idx + 1}")
-        base_id = lib_id
-        suffix = 2
-        while lib_id in seen_ids:
-            lib_id = f"{base_id}_{suffix}"
-            suffix += 1
-        seen_paths.add(path_key)
-        seen_ids.add(lib_id)
-        roots.append({
-            "id": lib_id,
-            "label": label or path.name or lib_id,
-            "path": path,
-            "is_default": False,
-            "lazy_scan": lazy_scan,
-        })
-    return roots
-
-
-def get_library_roots():
-    return _load_library_roots_config()
-
-
-def get_library_roots_payload():
-    return [
-        {
-            "id": root["id"],
-            "label": root["label"],
-            "path": str(root["path"]),
-            "is_default": root.get("is_default", False),
-            "lazy_scan": bool(root.get("lazy_scan", False)),
-        }
-        for root in get_library_roots()
-    ]
-
-
-def is_path_in_library_roots(target_path: Path) -> bool:
-    try:
-        resolved = target_path.resolve()
-    except Exception:
-        return False
-    for root in get_library_roots():
-        try:
-            resolved.relative_to(root["path"].resolve())
-            return True
-        except ValueError:
-            continue
-    return False
+# 图库根配置已抽到 library_config.py（deck_db / danbooru_data 也要共用，
+# 不能反向 import 整个 main.py）。带 mtime 缓存，行为与旧实现一致。
+from library_config import (
+    _safe_library_id,
+    get_library_roots,
+    get_library_roots_payload,
+    is_path_in_library_roots,
+    library_id_for_path,
+)
+# 旧调用点有按私有名字调的，保留别名
+_load_library_roots_config = get_library_roots
 
 
 def _resolve_save_dir_for_date(target_date: str):
@@ -203,86 +116,53 @@ def _resolve_today() -> str:
 
 
 class LogStore:
-    """log.json 的内存视图：所有下载任务共用一份，写入串行化。"""
+    """log.json 时代的跨任务共享视图，现薄封装 deck_db.post_log：方法名全部保留，
+    所有调用点（record/get/contains/snapshot/filename_to_id_map）零改动。
+    写入即时落 WAL，不再有 47MB 全量解析和每页一次的全量重写。"""
     def __init__(self, path):
         self._path = path
-        self._lock = threading.RLock()
-        self._data = load_json(path, {}) or {}
 
     def __contains__(self, post_id):
-        with self._lock:
-            return str(post_id) in self._data
+        return deck_db.log_has(post_id)
 
     def get(self, post_id, default=None):
-        with self._lock:
-            return self._data.get(str(post_id), default)
+        return deck_db.log_get(str(post_id), default)
 
     def record(self, post_id, url):
-        with self._lock:
-            self._data[str(post_id)] = url
+        deck_db.log_record(str(post_id), url)
 
     def bulk_merge(self, mapping):
         if not mapping:
             return
-        with self._lock:
-            self._data.update({str(k): v for k, v in mapping.items()})
+        deck_db.log_bulk_upsert({str(k): v for k, v in mapping.items()})
 
     def save_atomic(self):
-        with self._lock:
-            snap = dict(self._data)
-        tmp = self._path + ".tmp"
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(snap, f, ensure_ascii=False, indent=4)
-        os.replace(tmp, self._path)
+        # 已逐条落 SQLite；保留方法名兼容 _persist_global_data 的 8 个调用点。
+        return
 
     def snapshot(self):
-        with self._lock:
-            return dict(self._data)
+        return deck_db.log_snapshot_urls()
 
     def filename_to_id_map(self):
-        result = {}
-        for pid, url in self.snapshot().items():
-            if not url:
-                continue
-            fn = url.split('/')[-1].split('?')[0]
-            if fn:
-                result[fn] = pid
-        return result
+        return deck_db.log_filename_to_id_map()
 
 
 class StatsStore:
-    """artist_stats.json 的内存视图，同样跨任务共享。"""
+    """artist_stats.json 时代的跨任务视图，委托 deck_db.artist_stats。"""
     def __init__(self, path):
         self._path = path
-        self._lock = threading.RLock()
-        self._data = load_json(path, {}) or {}
 
     def increment(self, artist):
-        with self._lock:
-            self._data[artist] = self._data.get(artist, 0) + 1
+        deck_db.stats_inc(artist, 1)
 
     def bulk_merge(self, mapping):
-        if not mapping:
-            return
-        with self._lock:
-            for k, v in mapping.items():
-                try:
-                    inc = int(v or 0)
-                except (TypeError, ValueError):
-                    continue
-                self._data[k] = self._data.get(k, 0) + inc
+        deck_db.stats_bulk_add(mapping)
 
     def save_atomic(self):
-        with self._lock:
-            snap = dict(self._data)
-        tmp = self._path + ".tmp"
-        with open(tmp, 'w', encoding='utf-8') as f:
-            json.dump(snap, f, ensure_ascii=False, indent=4)
-        os.replace(tmp, self._path)
+        return
 
     def snapshot(self):
-        with self._lock:
-            return dict(self._data)
+        return deck_db.stats_snapshot()
 
 
 log_store = LogStore(_LOG_PATH)
@@ -322,6 +202,8 @@ class DownloadJob:
     consecutive_page_failures: int = 0                     # 页面抓取静默重试全部失败的「连续」页数（任一成功即清零），
                                                             # 达到 CONSECUTIVE_PAGE_FAILURE_THRESHOLD 时 auto-pause 一次
     pending_ids: set = field(default_factory=set)         # 当前 folder 的 ids_data.json 内存镜像：下载前写入、成功后移除
+    pending_dirty: bool = False                            # pending_ids 有移除未落盘：flush_pending_ids 据此跳过无谓的全量重写
+    viewer_keys: set = field(default_factory=set)          # viewer_data 的去重 key 集合，把追加判重从 O(n) 线性扫降为 O(1)
     pages_list: list = field(default_factory=list)        # 定向重试页码（如 [10, 11, 12]）；空 = 走 start_page..end_page 全段
     total_planned: int = 0                                # 本次任务总目标数（task_download_ids 入口一次性设置）
     success_count: int = 0                                # 已成功落盘的图片数
@@ -340,53 +222,119 @@ class DownloadJob:
     def __post_init__(self):
         if not self.play_event.is_set():
             self.play_event.set()
-        # 载入当前 folder 已收集的 ids 作为「待下载队列」镜像。收集id / 失败残留的 id 都在这里。
+        # 载入当前 folder 已收集的 ids 作为「待下载队列」镜像（权威在 deck.db 的 dl_queue，
+        # load_ids_data 返回 pending+failed 全部行）。收集id / 失败残留的 id 都在这里。
         try:
             self.pending_ids = set(str(x) for x in (self.db.load_ids_data() or []))
         except Exception:
             self.pending_ids = set()
+        # 图级失败记录现在持久化在 dl_queue(status=failed)：重启后 hydrate 回失败横幅
+        try:
+            self.failed_ids = {
+                str(pid): self.target_folder for pid in (self.db.queue_load_failed_ids() or [])
+            }
+        except Exception:
+            self.failed_ids = {}
         # 「停止」落盘结果（finalize_on_stop 写入），/api/status 透给前端做 toast 文案。
         # 默认 0/空串：运行中和未触发 finalize 的状态都按"无新保存"展示。
         self.last_saved_ids_count = 0
         self.last_ids_data_path = ""
+        # viewer_data 去重索引：与 my_utils.dedup_viewer_data 同一套 key 规则，
+        # append_viewer_entry 在 4 下载线程下不再每条线性扫整个 list（旧实现 O(n²)）。
+        self.viewer_keys = {
+            _viewer_item_key(it) for it in self.viewer_data if isinstance(it, dict)
+        }
 
     def record_failed_page(self, page):
-        """记录一个页面列表抓取失败的页（按 folder+page 去重），供前端一键重试。"""
-        entry = {"folder": self.target_folder, "page": int(page)}
+        """记录一个页面列表抓取失败的页（按 folder+page 去重），供前端一键重试。
+        同时持久化到 deck.db failed_pages（旧实现纯内存，重启即丢）。"""
+        page = int(page)
+        entry = {"folder": self.target_folder, "page": page}
         with self.viewer_lock:
             for e in self.failed_pages:
                 if e.get("folder") == entry["folder"] and e.get("page") == entry["page"]:
                     return
             self.failed_pages.append(entry)
+        try:
+            deck_db.failed_page_add(
+                self.target_folder, page, self.tag_query or "", self.tag_source or "danbooru"
+            )
+        except Exception as e:
+            self.append_log(f"失败页落库失败 (p{page}): {e}")
+
+    def clear_failed_page(self, page):
+        """该页后续抓取成功：从内存失败列表和 deck.db 同时移除（重试成功后不再挂横幅）。"""
+        page = int(page)
+        with self.viewer_lock:
+            self.failed_pages = [
+                e for e in self.failed_pages
+                if not (e.get("folder") == self.target_folder and e.get("page") == page)
+            ]
+        try:
+            deck_db.failed_page_remove(
+                self.target_folder, page, self.tag_query or "", self.tag_source or "danbooru"
+            )
+        except Exception as e:
+            self.append_log(f"清除失败页落库失败 (p{page}): {e}")
+
+    def hydrate_failed_pages(self):
+        """target_folder / tag_query / tag_source 都就位后（_make_job 之后），
+        从 deck.db 恢复本 scope 的失败页到内存横幅。start 端点和 switch_target 调用。"""
+        try:
+            self.failed_pages = deck_db.failed_page_load_scope(
+                self.target_folder, self.tag_query or "", self.tag_source or "danbooru"
+            )
+        except Exception:
+            self.failed_pages = []
 
     def queue_pending_id(self, ids):
         """下载某张图片前先把它的 id 记入 folder 的 ids_data.json（性质同「收集id」）。
-        无论以何种方式下载，都先落盘 id，保证中断/失败后该 id 仍在文件里可被重试。"""
+        无论以何种方式下载，都先落盘 id，保证中断/失败后该 id 仍在文件里可被重试。
+        这一步保持「立即全量写」：它是崩溃安全的关键，不能降频。"""
         ids = str(ids)
         with self.viewer_lock:
             if ids in self.pending_ids:
                 return
             self.pending_ids.add(ids)
-            self.db.save_ids_data(sorted(self.pending_ids))
+            # 单行 upsert 立即提交 + ids 镜像立即导出（不再全量覆写队列，只覆写小镜像文件）。
+            # failed 行重新入队时状态翻回 pending。
+            self.db.queue_add_id(ids)
+            # 刚写完，镜像与盘一致；resolve 若只移除刚写入的 id 也不必再写一次
+            self.pending_dirty = False
 
     def resolve_pending_id(self, ids):
-        """一张图片处理完毕（下载成功 / 已存在 / 永久不可用）后，把它从待下载队列移除并落盘。
+        """一张图片处理完毕（下载成功 / 已存在 / 永久不可用）后，把它从待下载队列移除。
+        只置 dirty 位、不立即落盘 —— 旧实现每张图成功都全量重写 ids_data.json，
+        由 flush_pending_ids() 在批次收尾 / 停止 / 切目录时统一写。
+        崩溃窗口的代价仅是：已完成 id 残留在 ids_data，重启重抓时命中「文件已存在」早退，安全。
         同时清掉失败标记 —— 重试成功后该 id 不应再出现在失败横幅里。"""
         ids = str(ids)
         with self.viewer_lock:
-            changed = False
             if ids in self.pending_ids:
                 self.pending_ids.discard(ids)
-                changed = True
-            if ids in self.failed_ids:
-                self.failed_ids.pop(ids, None)
-            if changed:
-                self.db.save_ids_data(sorted(self.pending_ids))
+                self.pending_dirty = True
+                # DB 行立即删（点操作，无写放大）；镜像按 P0 节奏 dirty 批量导出
+                self.db.queue_resolve_id(ids)
+            self.failed_ids.pop(ids, None)
+
+    def flush_pending_ids(self):
+        """把 pending_ids 的移除增量落盘（dirty 才写）。批次收尾 / 每 20 张 / 停止 / 切目录时调。"""
+        with self.viewer_lock:
+            if not self.pending_dirty:
+                return
+            self.db.save_ids_data(sorted(self.pending_ids))
+            self.pending_dirty = False
 
     def record_failed_id(self, ids):
-        """图片下载瞬时失败（已内部重试耗尽）：id 保留在 ids_data.json 里，并记入失败表供前端按 id 重试。"""
+        """图片下载瞬时失败（已内部重试耗尽）：dl_queue 行标记 failed（重启不丢），
+        id 仍留在 ids 镜像里，并记入内存失败表供前端按 id 重试。"""
+        ids = str(ids)
         with self.viewer_lock:
-            self.failed_ids[str(ids)] = self.target_folder
+            try:
+                self.db.queue_mark_failed_id(ids)
+            except Exception as e:
+                self.append_log(f"标记失败 id 落库失败 ({ids}): {e}")
+            self.failed_ids[ids] = self.target_folder
 
 
     @property
@@ -420,22 +368,23 @@ class DownloadJob:
             value = post.get(extra_key)
             if value:
                 tags_full[extra_key] = value
+        entry = {
+            "artist": artist_for_record,
+            "filename": saved_filename,
+            "local_path": os.path.join(self.save_dir, saved_filename),
+            "post_url": post_url,
+            "web_url": web_url,
+            "score": post.get('score', 0) or 0,
+            "fav_count": post.get('fav_count', 0) or 0,
+            "tags": tags_full
+        }
         with self.viewer_lock:
-            for existing in self.viewer_data:
-                if existing.get("post_url") == post_url:
-                    return
-                if existing.get("filename") == saved_filename and existing.get("web_url") == web_url:
-                    return
-            self.viewer_data.append({
-                "artist": artist_for_record,
-                "filename": saved_filename,
-                "local_path": os.path.join(self.save_dir, saved_filename),
-                "post_url": post_url,
-                "web_url": web_url,
-                "score": post.get('score', 0) or 0,
-                "fav_count": post.get('fav_count', 0) or 0,
-                "tags": tags_full
-            })
+            # O(1) set 判重替代旧实现的逐条线性扫描（4 线程下旧实现是 O(n²)）。
+            key = _viewer_item_key(entry)
+            if key in self.viewer_keys:
+                return
+            self.viewer_keys.add(key)
+            self.viewer_data.append(entry)
 
     def flush_viewer_data(self):
         with self.viewer_lock:
@@ -457,11 +406,12 @@ class DownloadJob:
         """
         try:
             with self.viewer_lock:
-                if self.pending_ids:
+                # dirty（有完成移除的增量）才重写；toast 数字按本次实际落盘条数给
+                if self.pending_dirty:
                     self.db.save_ids_data(sorted(self.pending_ids))
+                    self.pending_dirty = False
                     self.last_saved_ids_count = len(self.pending_ids)
                 else:
-                    # pending_ids 空时仍把路径交给前端，便于统一 toast 模板
                     self.last_saved_ids_count = 0
                 # 路径每次 finalize 都更新（save_dir 不会变），保证前端能拿到当前 folder 的 ids_data.json
                 self.last_ids_data_path = os.path.join(self.save_dir, "ids_data.json")
@@ -485,16 +435,44 @@ class DownloadJob:
                 self.db.save_viewer_data(self.viewer_data)
             except Exception as e:
                 self.append_log(f"切换目录前落盘失败 ({self.target_folder}): {e}")
+            # 旧 folder 的 pending 移除增量也要先落盘，否则会残留在旧 ids_data.json
+            try:
+                if self.pending_dirty:
+                    self.db.save_ids_data(sorted(self.pending_ids))
+                    self.pending_dirty = False
+            except Exception as e:
+                self.append_log(f"切换目录前落盘 ids_data 失败 ({self.target_folder}): {e}")
             self.target_folder = new_folder
             self.db = DanbooruData(new_folder)
             self.save_dir = self.db.save_dir
             self.viewer_data = self.db.load_viewer_data()
             self.sent_image_count = len(self.viewer_data)
+            # 去重索引按新 folder 的 viewer_data 重建
+            self.viewer_keys = {
+                _viewer_item_key(it) for it in self.viewer_data if isinstance(it, dict)
+            }
             # 换 folder 后待下载队列也要跟着换成新 folder 的 ids_data.json 镜像。
             try:
                 self.pending_ids = set(str(x) for x in (self.db.load_ids_data() or []))
             except Exception:
                 self.pending_ids = set()
+            self.pending_dirty = False
+            # 页级失败按 folder+page 跨日累积（横幅需要保留前几天的记录）：
+            # 只把新 folder 在「上次运行」持久化、本进程还没见过的失败页合并进来，
+            # 不覆盖内存里已有的条目。图级 failed_ids 同理已带 folder，无需重扫。
+            try:
+                seen = {
+                    (e.get("folder"), e.get("page")) for e in self.failed_pages
+                }
+                for e in deck_db.failed_page_load_scope(
+                    new_folder, self.tag_query or "", self.tag_source or "danbooru"
+                ):
+                    key = (e.get("folder"), e.get("page"))
+                    if key not in seen:
+                        self.failed_pages.append(e)
+                        seen.add(key)
+            except Exception:
+                pass
 
 
 class JobRegistry:
@@ -623,30 +601,29 @@ def count_gallery_media_files(folder: Path) -> int:
     return count
 
 
-def _count_pending_ids(folder: Path) -> int:
-    """读 folder/ids_data.json 里待下载的 id 数量。文件不存在 / 解析失败 / 空列表都按 0 计。
-    给日历标出「有 id 待下载」的日期（按 id 下载 / 收集id 模式的产物）。"""
-    ids_file = folder / "ids_data.json"
-    if not ids_file.is_file():
-        return 0
+def _pending_counts_map() -> dict:
+    """日历 pending 角标：一次 GROUP BY 取全库 {(lib_id, folder): pending+failed 行数}。
+    权威在 deck.db dl_queue（入队即提交）；ids_data.json 只是派生镜像，不再逐文件解析。"""
     try:
-        with open(ids_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, ValueError):
-        return 0
-    if not isinstance(data, list):
-        return 0
-    return len(data)
+        return deck_db.queue_counts_grouped()
+    except Exception as e:
+        print(f"读取待下载计数失败（按 0 计）: {e}")
+        return {}
 
 
 def get_available_date_folder_details():
     date_pattern = re.compile(r"^\d{4}-\d{2}-\d{2}$")
     folders = {}
+    # pending 计数走 DB 一次取完（与盘是否在线无关），不再逐目录解析 ids_data.json
+    pending_map = _pending_counts_map()
     for root in get_library_roots():
         base = root["path"]
+        lib_id = root["id"]
         if not base.exists():
+            # 离线根：日历仍以「磁盘可见」为准（避免冒出打不开的幽灵日期），
+            # DB 里的 queue 行等盘接回后自然出现
             continue
-        # 懒扫根：只枚举日期目录名，不数图、不读 ids_data.json。
+        # 懒扫根：只枚举日期目录名，不数图、不数媒体文件（pending 走 DB 仍然统计）。
         # 机械盘 / 外置盘 / 网盘上有几百个日期文件夹时，逐目录 iterdir 几次就卡死。
         # 图数留 None，让前端走"有图片但未统计"分支；点进具体日期时由
         # build_local_image_library 单日扫描（单目录 IO 很快）补上。
@@ -665,14 +642,27 @@ def get_available_date_folder_details():
                 "has_images": True if is_lazy else False,
                 "pending_ids": 0,
                 "count_known": not is_lazy,
+                # 内部标记：是否有懒扫 root 贡献该日期（不落前端）
+                "_has_lazy_source": is_lazy,
             })
             rec["source_count"] += 1
+            # DB 队列计数不碰磁盘，懒扫根也能拿到角标
+            rec["pending_ids"] += pending_map.get((lib_id, item.name), 0)
             if is_lazy:
-                # 不调 count_gallery_media_files / _count_pending_ids，直接累加 source_count
+                # 不调 count_gallery_media_files，直接进入下一目录
+                rec["_has_lazy_source"] = True
                 continue
             rec["image_count"] += count_gallery_media_files(item)
             rec["has_images"] = rec["image_count"] > 0
-            rec["pending_ids"] += _count_pending_ids(item)
+    # 跨 root 混合的日期：只要有一个懒扫 root（机械盘/外置盘）贡献，图数就是未知，
+    # 不能被另一个非懒扫 root 的 0 计数覆盖成「空文件夹」——否则外置盘有上千张图、
+    # 本地只剩空占位目录时，日历会把该日期画成空（实测 19 个日期中招）。
+    # 统一回归懒扫语义：有图（未统计），点进去由 build_local_image_library 单日扫描补数。
+    for rec in folders.values():
+        if rec.pop("_has_lazy_source", False):
+            rec["image_count"] = None
+            rec["count_known"] = False
+            rec["has_images"] = True
     return sorted(folders.values(), key=lambda x: x["date"], reverse=True)
 
 
@@ -776,22 +766,27 @@ def build_local_image_library(selected_date=None):
     seen_identity = set()
 
     for root in get_library_roots():
+        root_id = root["id"]
+        root_label = root["label"]
+        root_path = str(root["path"])
+        day_folder = resolved_date
         current_day_dir = root["path"] / resolved_date
         viewer_file = current_day_dir / "viewer_data.json"
-        if viewer_file.exists():
-            day_folder = viewer_file.parent.name
-            root_id = root["id"]
-            root_label = root["label"]
-            root_path = str(root["path"])
-        else:
-            day_folder = resolved_date
-            root_id = root["id"]
-            root_label = root["label"]
-            root_path = str(root["path"])
-        if not viewer_file.exists():
+        # viewer 元数据以 deck.db 为权威：先按镜像指纹吸收外部直写，再从 DB 按 id 正序
+        # 取出（下方 reversed → 最新在前，与旧 JSON 列表顺序一致）。离线根目录（盘没接）
+        # 不吐 DB 行——旧版同样读不到盘上镜像，避免刷出一堆打不开的死链卡片。
+        if not current_day_dir.exists():
             items = []
         else:
-            items = dedup_viewer_data(load_json(str(viewer_file), []))
+            try:
+                deck_db.reconcile_viewer(root_id, day_folder, str(viewer_file))
+                items = deck_db.viewer_load_entries(root_id, day_folder)
+            except Exception as _e:
+                print(f"[deck_db] viewer DB 读取失败，回退 JSON {root_id}/{day_folder}: {_e}")
+                items = (
+                    dedup_viewer_data(load_json(str(viewer_file), []))
+                    if viewer_file.exists() else []
+                )
         for item in reversed(items):
             filename = item.get("filename")
             web_url = item.get("web_url")
@@ -883,6 +878,116 @@ def build_local_image_library(selected_date=None):
     return library
 
 
+def _expand_search_tokens(q: str, kind: str):
+    """把搜索框输入归一成 deck_db.viewer_search 的 token 组（组间 AND、组内 OR）。
+
+    含中文时走离线 translator 字典展开成候选角色 tag（中文名可能对应多个 tag）；
+    返回 (token_groups, expanded_tags)，expanded_tags 供前端提示「已展开为哪些 tag」。
+    """
+    raw = (q or "").strip()
+    if not raw:
+        return [], []
+    has_cjk = bool(re.search(r"[一-鿿]", raw))
+    ascii_token = re.sub(r"\s+", "_", raw.lower()).strip("_")
+
+    if has_cjk and kind in ("auto", "character"):
+        try:
+            hits = translator.search_translation_entries(raw, limit=50)
+        except Exception:
+            hits = []
+        # 描述里「提到」该词的条目噪声大（如 ironmouse 简介提到初音），
+        # 中文名直接包含查询词的候选优先；一个都没有时才退回全文匹配。
+        name_hits = [h for h in hits if raw in (h.get("chinese_name") or "")]
+        chosen = name_hits or hits
+        expanded = list(dict.fromkeys(h["tag"] for h in chosen if h.get("tag")))[:12]
+        if expanded:
+            group = expanded[:]
+            # 原文里若带英文/数字片段（如「初音 miku」），也作为 OR 候选
+            if re.search(r"[a-z0-9]", ascii_token) and ascii_token not in group:
+                group.insert(0, ascii_token)
+            return [group], expanded
+
+    # 逗号分隔多个词 = 组间 AND（如 "hatsune_miku, kagamine_rin"）；
+    # 词内空格按下划线归一（Danbooru tag 本来就用下划线，"hatsune miku" → hatsune_miku）。
+    parts = [p for p in re.split(r"[,，]+", raw) if p.strip()]
+    groups = []
+    for part in parts:
+        token = re.sub(r"\s+", "_", part.lower()).strip("_")
+        # 纯中文且没有翻译命中时，它不可能是 deck.db 里的 tag —— 别制造必空的全表扫描
+        if token and not re.fullmatch(r"[一-鿿_]+", token):
+            groups.append([token])
+    return groups, []
+
+
+def _search_rows_to_items(rows, roots_by_id):
+    """把 viewer_search 的原始行归一化成与 build_local_image_library 相同的卡片结构。
+
+    行可能跨多个库 / 多个日期；文件已不在盘上（DB 行残留）的死链直接跳过。
+    """
+    items = []
+    seen_identity = set()
+    for row in rows:
+        entry = deck_db._row_to_entry(row)
+        lib_id = row["library_id"]
+        root = roots_by_id.get(lib_id)
+        if root is None:
+            continue
+        folder = row["folder"]
+        filename = entry.get("filename")
+        if not filename:
+            continue
+        day_dir = root["path"] / folder
+        image_path = day_dir / filename
+        if not image_path.exists():
+            fallback_raw = entry.get("local_path") or ""
+            if fallback_raw:
+                fallback_path = Path(fallback_raw)
+                if not fallback_path.is_absolute():
+                    fallback_path = BASE_DIR / fallback_path
+                if fallback_path.exists():
+                    image_path = fallback_path.resolve()
+            if not image_path.exists():
+                continue
+        image_path = image_path.resolve()
+        post_url = entry.get("post_url") or "#"
+        identity = post_url if post_url and post_url != "#" else str(image_path).lower()
+        if identity in seen_identity:
+            continue
+        seen_identity.add(identity)
+
+        web_url = entry.get("web_url") or f"/images/{folder}/{filename}"
+        tags_dict = entry.get("tags") or {}
+        translated_chars = []
+        for c in (tags_dict.get("tag_string_character", "") or "").split():
+            info = translator.get_tag_info(c)
+            chinese_name = info.get("chinese_name") or translator._format_tag(c)
+            hint = info.get("source_hint", "")
+            alias = translator.get_source_hint_alias(hint) if hint else ""
+            meta = chinese_name
+            if hint:
+                meta += f" [{hint}]"
+            if alias:
+                meta += f" [{alias}]"
+            translated_chars.append(meta)
+
+        items.append({
+            "artist": entry.get("artist") or "未知",
+            "filename": filename,
+            "local_path": str(image_path),
+            "post_url": post_url,
+            "web_url": web_url,
+            "tags": tags_dict,
+            "characters": translated_chars,
+            "score": entry.get("score", 0) or 0,
+            "fav_count": entry.get("fav_count", 0) or 0,
+            "library_id": lib_id,
+            "library_label": root["label"],
+            "library_root": str(root["path"]),
+            "date": folder,
+            "source_dir": str(day_dir),
+        })
+    return items
+
 
 # ==========================================
 # 2. FastAPI 后端与状态管理
@@ -899,7 +1004,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.mount("/images", StaticFiles(directory=str(HOT_PIC_DIR)), name="images")
+# 注意：/images 不再是只挂 HOT_PIC_DIR 的 StaticFiles —— 移动硬盘/外置 root 上的
+# 视频（2676+ 个）和收藏页看图都要靠它跨 root 取文件。见下方 api_library_media 路由。
 app.mount("/static", StaticFiles(directory=str(RESOURCE_DIR / "static")), name="static")
 app.mount("/mosaic", mosaic_editor_app)
 
@@ -990,21 +1096,61 @@ def _generate_thumbnail(src_path: Path, dst_path: Path, max_dim: int) -> bool:
         return False
 
 
+def _resolve_media_in_library(date_str: str, filename: str):
+    """跨所有在线 library root 查找 <root>/<date_str>/<filename>，返回 (Path, root)。
+    外置盘（library_roots.json 里配的 D:/hot_danbooru 等）上的视频播放与缩略图
+    全靠它：旧实现把 /images 静态目录和 /thumb 查找都钉死在 HOT_PIC_DIR，
+    移动硬盘上的媒体一律 404。离线 root 自然落到 is_file()=False，无需特殊处理。
+
+    严格防穿越：两段都只允许单段路径（不含 / \\ ..），resolve 后必须仍在该 root 内。
+    """
+    if not date_str or not filename:
+        return None, None
+    if ("/" in date_str or "\\" in date_str or date_str in (".", "..")
+            or "/" in filename or "\\" in filename or filename in (".", "..")):
+        return None, None
+    for root in get_library_roots():
+        try:
+            base = root["path"].resolve()
+            candidate = (base / date_str / filename).resolve()
+            candidate.relative_to(base)
+        except (OSError, ValueError):
+            continue
+        try:
+            if candidate.is_file():
+                return candidate, root
+        except OSError:
+            continue
+    return None, None
+
+
+@app.get("/images/{date_str}/{filename}")
+async def api_library_media(date_str: str, filename: str):
+    """跨 library root 的媒体文件服务（替代只挂 hot_pic 的 StaticFiles）。
+
+    前端大图/视频查看器对视频固定走 http://127.0.0.1:8000/images/<日期>/<文件>
+    （要 byte-range seek，避开 local:// 的媒体限制），收藏页看图也走这里。
+    FileResponse 原生支持 Range / 条件请求，行为与旧 StaticFiles 一致。
+    同一 date+filename 按 roots 顺序命中第一个（default 优先），文件名是 md5 哈希，
+    跨盘同名即同内容，去重语义不受影响。
+    """
+    path, _root = _resolve_media_in_library(date_str, filename)
+    if path is None:
+        return PlainTextResponse("not found", status_code=404)
+    return FileResponse(str(path))
+
+
 @app.get("/thumb/{date_str}/{filename}")
 def api_thumbnail(date_str: str, filename: str, w: int = 400):
     """返回磁盘缓存的 JPEG 缩略图。非图片格式返回 404 让前端 fallback 到占位符。"""
     if w not in _THUMB_ALLOWED_SIZES:
         w = 400  # 限定档位，避免无限大小占满磁盘
 
-    src_path = (HOT_PIC_DIR / date_str / filename).resolve()
-    # 路径穿越防护：解析后必须仍在 hot_pic 下
-    hot_pic_root = HOT_PIC_DIR.resolve()
-    try:
-        src_path.relative_to(hot_pic_root)
-    except ValueError:
-        return PlainTextResponse("invalid path", status_code=400)
-
-    if not src_path.exists() or not src_path.is_file():
+    # 跨 library root 找源文件（外置盘视频首帧/GIF 首帧同样走这里）。
+    # 缩略图缓存仍按 <w>/<date>/<filename>.jpg 平铺：文件名是内容 md5，跨盘同名即同内容。
+    src_path, _src_root = _resolve_media_in_library(date_str, filename)
+    if src_path is None:
+        # 穿越/不存在统一 404（旧实现对穿越回 400，但前端处理两者完全相同）
         return PlainTextResponse("not found", status_code=404)
 
     ext = src_path.suffix.lower()
@@ -1147,6 +1293,7 @@ class MergeViewerDataRequest(BaseModel):
     source_root: str = ""  # 源 root 的绝对路径；空 = 默认 hot_pic
     target_root: str       # 目标 root 的绝对路径（必填）
     dry_run: bool = False  # True = 只返回将合并的条目数，不写盘
+    move_files: bool = False  # 将源日期目录中的媒体文件迁移到目标日期目录
 
 
 class TranslateCharacterRequest(BaseModel):
@@ -1197,80 +1344,87 @@ class ImageFavoriteRemoveRequest(BaseModel):
 # ==========================================
 
 def _fetch_page_or_pause(fetch_fn, job, label, page=None):
-    """对「页面列表抓取」的单次抓取：失败时静默重试 PAGE_FETCH_SILENT_RETRIES 次
-    （间隔 PAGE_FETCH_BACKOFF 退避），全部失败则记入 failed_pages 并返回 [] 让 grabber
-    跳过本张/本页继续抓下一张/下一页。同时累计「连续失败页数」，达到
-    CONSECUTIVE_PAGE_FAILURE_THRESHOLD 时 auto-pause 一次让用户决策（避免在系统
-    性故障时把整轮抓完才停下）。
+    """对「页面列表抓取」的统一容错层。区分两类失败：
 
-    设计原因：旧版「抓失败即 auto-pause」体验差 —— 一次风控抖动就让任务卡住，
-    用户点「继续」后又同样失败，陷入「失败→暂停→继续→失败」的循环。新版把
-    「瞬时抖动」和「真失败」分开：
-      - 静默重试成功 = 瞬时抖动吸收，不打扰用户。
-      - 静默重试全部失败 = 该页真的没拿到，记入 failed_pages 让前端「需手动
-        重试的页」提示出现，用户跑完整轮后一次性重新入队即可。
-      - 连续多张/页都失败 = 大概率是 host 故障或风控熔断，auto-pause 让用户
-        决定是继续等还是先停。
+    - 永久错误（400 非法查询 / 403 / 404，PermanentHTTPError）：等待无意义，
+      立即记 failed_pages 并返回 [] 跳过本页。连续 CONSECUTIVE_PAGE_FAILURE_THRESHOLD
+      页永久失败时 auto-pause 一次让用户决策。
+    - 瞬时错误（429 / 5xx / 超时 / 断网 —— http_client 自己的 5 次重试也耗尽了）：
+      先在本轮内静默重试 PAGE_FETCH_SILENT_RETRIES 次（PAGE_FETCH_BACKOFF 退避），
+      吸收几秒级的抖动；仍失败则「原地暂停」——不记失败页、不跳页、不动连续计数，
+      play_event 挂起等用户。用户等风控冷却后点「继续」会重新抓同一页（外层
+      while 再走一整轮尝试），点「停止」则收尾返回 None。这样 1-50 页任务在第 10
+      页撞限流时不会牺牲 10,11,12…，等多久都行，恢复后零遗漏。
 
     返回值约定：
-      - list（成功 或 重试后跳过）：fetch_fn 的返回值；空 list 表示该页被跳过
-        或该页本身无数据。grabber 看到 [] 时 _process_posts_concurrent 已自带
-        fast-path（if not posts: return 0, 0, 0）。
-      - None：任务已停（用户点停止 或 auto-pause 后用户点停止），grabber 收尾。
-
-    grabber 仍只需判 None：if posts is None: return [], ...
+      - list：成功（fetch_fn 返回值）或永久错误跳过后的 []。
+      - None：任务已停（原地暂停 / 永久错 auto-pause 后用户点停止），grabber 收尾。
     """
     total_attempts = PAGE_FETCH_SILENT_RETRIES + 1  # 1 初次 + N 静默重试
-    last_err = None
-    for attempt in range(1, total_attempts + 1):
-        if attempt > 1:
-            delay = PAGE_FETCH_BACKOFF[attempt - 2]
-            job.append_log(
-                f"{label} 抓取失败（{last_err}），{delay} 秒后第 {attempt - 1}/{PAGE_FETCH_SILENT_RETRIES} 次重试..."
-            )
-            # 退避 sleep 走 play_event 兼容暂停：暂停时不真正数 sleep，由用户「继续/停止」决定
-            slept = 0
-            while slept < delay:
-                if not job.is_running:
-                    return None
-                job.play_event.wait()
-                if not job.is_running:
-                    return None
-                sleep(1)
-                slept += 1
-        try:
-            result = fetch_fn()
-        except Exception as e:
-            last_err = e
-            continue
-        # 成功（初次成功 或 静默重试成功）：清零连续失败计数
-        if attempt > 1:
-            job.append_log(f"{label} 第 {attempt - 1} 次重试成功。")
-        if job.consecutive_page_failures:
-            job.consecutive_page_failures = 0
-        return result
+    while True:  # 瞬时失败原地暂停后，用户点继续 → 重新走一整轮尝试
+        last_err = None
+        for attempt in range(1, total_attempts + 1):
+            if attempt > 1:
+                delay = PAGE_FETCH_BACKOFF[attempt - 2]
+                job.append_log(
+                    f"{label} 抓取失败（{last_err}），{delay} 秒后第 {attempt - 1}/{PAGE_FETCH_SILENT_RETRIES} 次重试..."
+                )
+                # 退避 sleep 走 play_event 兼容暂停：暂停时不真正数 sleep，由用户「继续/停止」决定
+                slept = 0
+                while slept < delay:
+                    if not job.is_running:
+                        return None
+                    job.play_event.wait()
+                    if not job.is_running:
+                        return None
+                    sleep(1)
+                    slept += 1
+            try:
+                result = fetch_fn()
+            except danbooru_api.PermanentHTTPError as e:
+                # 400（非法 tag 查询）/404/403 等永久错误：重试纯属浪费时间，
+                # 直接记失败页跳过；连续多页都永久失败时 auto-pause 让用户决策。
+                job.append_log(
+                    f"{label} 永久失败（HTTP {e.status_code}），不再重试：{e.url or e}"
+                )
+                if page is not None:
+                    job.record_failed_page(page)
+                job.consecutive_page_failures += 1
+                if job.consecutive_page_failures >= CONSECUTIVE_PAGE_FAILURE_THRESHOLD:
+                    job.append_log(
+                        f"⚠ 连续 {job.consecutive_page_failures} 张/页永久失败，"
+                        f"已自动暂停任务等待用户决策。"
+                    )
+                    job.play_event.clear()
+                    job.play_event.wait()
+                    if not job.is_running:
+                        return None
+                    job.consecutive_page_failures = 0
+                return []
+            except Exception as e:
+                last_err = e
+                continue
+            # 成功（初次成功 或 静默重试成功）：清零连续失败计数
+            if attempt > 1:
+                job.append_log(f"{label} 第 {attempt - 1} 次重试成功。")
+            if job.consecutive_page_failures:
+                job.consecutive_page_failures = 0
+            # 该页曾失败、这次拿到了：内存 + deck.db 双清，失败横幅不再挂它
+            if page is not None:
+                job.clear_failed_page(page)
+            return result
 
-    # 静默重试全部失败
-    if page is not None:
-        job.record_failed_page(page)
-    job.consecutive_page_failures += 1
-    job.append_log(
-        f"{label} 抓取失败：{last_err}（已重试 {PAGE_FETCH_SILENT_RETRIES} 次仍失败）。"
-        f"已记入失败页跳过本张/本页，任务继续跑下一张/下一页。"
-    )
-    if job.consecutive_page_failures >= CONSECUTIVE_PAGE_FAILURE_THRESHOLD:
+        # 瞬时错误：静默重试全部耗尽。不记失败页、不跳页 —— 原地暂停等用户冷却后继续。
         job.append_log(
-            f"⚠ 连续 {job.consecutive_page_failures} 张/页抓取失败，可能 host 故障或风控熔断，"
-            f"已自动暂停任务等待用户决策（点「继续」继续抓，点「停止」结束任务）。"
+            f"{label} 抓取失败：{last_err}（已重试 {PAGE_FETCH_SILENT_RETRIES} 次仍失败）。"
+            f"疑似风控/超时，已在本页原地暂停等待（不跳过、不记失败）。"
         )
+        job.append_log("点「继续」会重新抓取本页（可以等限流解除后再点，等多久都行）；点「停止」结束任务。")
         job.play_event.clear()
         job.play_event.wait()
         if not job.is_running:
             return None
-        # 用户已决定继续：清零计数，给任务一次喘息机会
-        job.append_log("用户已继续，重置连续失败计数为 0，继续抓取。")
-        job.consecutive_page_failures = 0
-    return []
+        job.append_log(f"用户已继续，重新抓取 {label}…")
 
 
 def _rest_between_pages(idx, job, n=5, rest_seconds=15):
@@ -1459,6 +1613,8 @@ def _process_posts_concurrent(job, posts, page_need_update, new_hot_artists,
             _update_artist_stats(job, artist, page_need_update, new_hot_artists)
             job.append_viewer_entry(ids, artist, saved_filename, post)
 
+    # 本页所有图片处理完，统一把 pending 移除增量落盘一次（旧实现每张图都全量重写）
+    job.flush_pending_ids()
     return page_success, page_skipped, page_failed
 
 
@@ -1821,6 +1977,7 @@ def task_download_ids(job, inline_ids=None):
                     if flushed_since_start >= flush_every:
                         try:
                             job.flush_viewer_data()
+                            job.flush_pending_ids()
                         except Exception as e:
                             job.append_log(f"[DownloadIDs] flush viewer_data 失败: {e}")
                         flushed_since_start = 0
@@ -1830,6 +1987,7 @@ def task_download_ids(job, inline_ids=None):
 
     _persist_global_data()
     job.flush_viewer_data()
+    job.flush_pending_ids()
     job.append_log(
         f"[DownloadIDs] 完成：成功 {job.success_count}，"
         f"跳过 {job.skip_count}，失败 {job.fail_count}，共处理 {job.success_count + job.skip_count + job.fail_count}/{job.total_planned}"
@@ -1846,7 +2004,7 @@ def task_popular_recover(job, start_page, end_page):
       - log 无 + 文件无 → 下载（调 API 拿 URL；download_image 内部"文件已存在则跳过"会兜底）
 
     阶段 4（关键）：过滤出 targets 后**先写 ids_data.json**，让：
-      - 日历通过 _count_pending_ids 自动展示"有 N 个待下载"
+      - 日历通过 dl_queue 计数（_pending_counts_map）自动展示"有 N 个待下载"
       - 暂停/继续时下载循环从 pending_ids 自然恢复
       - 失败 ID 留在 ids_data.json，可后续用「按ID下载」消费
       - 与 popular_collect_ids / popular_download_ids 链路对齐
@@ -2085,6 +2243,7 @@ def task_popular_recover(job, start_page, end_page):
                     if flushed_since_start >= flush_every:
                         try:
                             job.flush_viewer_data()
+                            job.flush_pending_ids()
                         except Exception as e:
                             job.append_log(f"[Recover] flush viewer_data 失败: {e}")
                         flushed_since_start = 0
@@ -2093,6 +2252,7 @@ def task_popular_recover(job, start_page, end_page):
 
     _persist_global_data()
     job.flush_viewer_data()
+    job.flush_pending_ids()
     remaining = len(job.pending_ids)
     job.append_log(f"[Recover] 完成，下载 {job.success_count} 张，失败 {job.fail_count} 张（{remaining} 个待重试）")
 
@@ -2110,6 +2270,25 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
 
     def _page_seq(s, e):
         return list(pages) if pages else list(range(s, e + 1))
+
+    # 页级断点（deck.db page_cursor）：仅普通页范围任务写游标，定向重试（pages 非空）/
+    # 下载阶段 / recover / 日期范围 v1 都不写。scope 与 failed_pages 一致。
+    cursor_modes = {"rank", "collect_ids", "popular", "popular_collect_ids", "tags"}
+
+    def _save_cursor(n):
+        if not pages and mode in cursor_modes:
+            try:
+                deck_db.cursor_save(job.target_folder, mode, n, start_page, end_page,
+                                    tag_query=tag_query, tag_source=tag_source)
+            except Exception as e:
+                job.append_log(f"[cursor] 断点保存失败（不影响任务）: {e}")
+
+    def _clear_cursor():
+        if not pages and mode in cursor_modes:
+            try:
+                deck_db.cursor_clear(job.target_folder, tag_query, tag_source)
+            except Exception:
+                pass
 
     try:
         if mode == "download_ids":
@@ -2143,6 +2322,7 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
                     break
                 job.play_event.wait()
                 job.page_current = idx
+                _save_cursor(n)
                 job.append_log(f"--- 正在处理 {source_label} tag [{tag_query}] 第 {n} 页 ---")
                 o, n_u_dict = grabber_tags(job, n, tag_query, source)
                 job.page_done_count += 1
@@ -2152,6 +2332,9 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
                 job.db.save_hot_drawer(list(set(output)))
                 job.db.save_need_update(nu_sets)
                 _rest_between_pages(idx, job)
+            else:
+                # 所有页自然跑完（未 break）：断点清掉
+                _clear_cursor()
         elif mode in ("popular_range", "popular_range_collect_ids", "popular_range_download_ids"):
             # 日期范围 · 按天两阶段（per-day two-phase）。每个日期 folder 内串行跑
             # 阶段 1（collect 收 ID）→ 阶段 2（按 ID 下载），跨日用 switch_target 切换
@@ -2286,6 +2469,7 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
                     break
                 job.play_event.wait()
                 job.page_current = idx
+                _save_cursor(n)
                 job.append_log(f"--- 正在处理第 {n} 页 ---")
 
                 if mode == "popular":
@@ -2349,6 +2533,9 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
             # 这样前端可以看到两次阶段切换：第一阶段"在收 ID"→ 第二阶段"在下载"，
             # 避免一次性把几百张图堆在流式 new_images 里让用户摸不着头脑。
             if mode in ("rank", "popular", "popular_download_ids") and job.is_running:
+                # 页已全部收完（或本就没有页循环），续跑断点清掉；下载阶段停止用
+                # failed_ids / ids_data 的「按 ID 重试」恢复，不再需要页游标
+                _clear_cursor()
                 if mode == "popular":
                     banner = "=== [Popular:Two-Phase] ID 收集完毕，开始按 ID 下载 ==="
                     empty_log = "[Popular:Two-Phase] 没有收集到任何 ID，跳过下载阶段。"
@@ -2382,7 +2569,11 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
                     finally:
                         job.mode = prev_mode
             elif mode == "popular_collect_ids" and job.is_running:
+                _clear_cursor()
                 job.append_log("=== [Popular:Collect] ID 收集完毕（按 ID 下载请用下一阶段） ===")
+            elif mode == "collect_ids" and job.is_running:
+                _clear_cursor()
+                job.append_log("=== [Rank:Collect] ID 收集完毕（按 ID 下载请用下一阶段） ===")
 
     except Exception as e:
         if job.outcome != "stopped":
@@ -2415,14 +2606,17 @@ def check_proxy():
     url = f"https://{danbooru_api.get_host()}"
     proxies = danbooru_api.PROXIES
     try:
-        resp = danbooru_api.requests.get(url, timeout=5, headers=danbooru_api.HEADERS, proxies=proxies, impersonate="chrome120")
-        if resp.status_code == 200:
-            if proxies:
-                return {"status": "success", "msg": "代理可用（已连通）", "color": "green"}
-            else:
-                return {"status": "warning", "msg": "直连可用（未使用代理）", "color": "orange"}
+        # 探活：单次请求不重试，走共享 session（连接池），但不占 Danbooru 限速桶
+        resp = http_client.request(
+            "GET", url, kind="cdn", retries=0, timeout=5,
+            headers=danbooru_api.HEADERS, proxies=proxies,
+        )
+        if proxies:
+            return {"status": "success", "msg": "代理可用（已连通）", "color": "green"}
         else:
-            return {"status": "error", "msg": f"访问异常 ({resp.status_code})", "color": "red"}
+            return {"status": "warning", "msg": "直连可用（未使用代理）", "color": "orange"}
+    except http_client.PermanentHTTPError as e:
+        return {"status": "error", "msg": f"访问异常 ({e.status_code})", "color": "red"}
     except Exception as e:
         return {"status": "error", "msg": f"无法访问: {str(e)}", "color": "red"}
 
@@ -2714,20 +2908,18 @@ def proxy_thumb(url: str = "", size: int = 0):
             pass
         return FileResponse(cache_path, headers={"Cache-Control": "public, max-age=86400"})
 
-    # 2) 未命中：拉取
+    # 2) 未命中：拉取（共享 session 连接池，CDN 类不占限速桶；429/瞬时错允许 2 次重试）
     try:
-        r = danbooru_api.requests.get(
-            url,
+        r = http_client.request(
+            "GET", url,
+            kind="cdn", retries=2, timeout=20,
             headers=danbooru_api.HEADERS,
             proxies=danbooru_api.PROXIES,
-            impersonate="chrome120",
-            timeout=20,
         )
+    except http_client.PermanentHTTPError as e:
+        return PlainTextResponse("upstream error", status_code=e.status_code)
     except Exception as e:
         return PlainTextResponse(f"fetch error: {e}", status_code=502)
-
-    if r.status_code != 200:
-        return PlainTextResponse("upstream error", status_code=r.status_code)
 
     content = r.content
     content_type = r.headers.get("Content-Type", "image/jpeg")
@@ -2890,6 +3082,8 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
     job = _make_job(target_folder, req.mode, filter_tags, label, tag_source=tag_source, download_concurrency=req.download_concurrency, save_dir=save_dir_override, local_only=bool(req.force_local), skip_logged=bool(req.skip_logged), retry_only=bool(req.retry_only))
     job.tag_query = req.tag_query or ""
     job.tag_source = tag_source
+    # tag_query/source 此时才就位：从 deck.db 恢复本 scope 持久化的失败页（旧实现重启即丢）
+    job.hydrate_failed_pages()
     job.is_running = True
     job.outcome = "running"
     job.error_message = ""
@@ -2971,6 +3165,51 @@ def stop_scraper(job_id: str = ""):
     return {"msg": "已强制结束任务", "job_id": job.job_id}
 
 
+@app.post("/api/shutdown")
+def shutdown_backend():
+    """Electron 退出前的优雅关闭口（替代直接 taskkill /F 导致 Python finally 不执行、
+    最后 ≤20 条已下载记录丢失）：
+
+    1. 给所有活跃任务发停止信号（同 /api/stop）；
+    2. 给 worker 线程最多 3s 自行收尾（它们本来就在多个检查点轮询 is_running）；
+    3. 在本请求线程内同步跑一遍 finalize_on_stop() —— 所有写都走 viewer_lock /
+       per-path 文件锁，与 worker 互斥；worker 之后自己的 finalize 只是幂等重放；
+    4. deck.db 做一次 TRUNCATE checkpoint（log/stats 本来就逐条已落 WAL），
+       返回响应，1s 后 os._exit(0)。uvicorn 句柄在 -c 启动串内不可达，os._exit 最直接。
+    """
+    active = jobs.list_active()
+    finalized = []
+    for job in active:
+        job.outcome = "stopped"
+        job.is_running = False
+        job.play_event.set()
+    for job in active:
+        if job.thread is not None and job.thread.is_alive():
+            job.thread.join(timeout=3.0)
+    for job in active:
+        try:
+            job.finalize_on_stop()
+        except Exception as e:
+            print(f"[shutdown] finalize job {job.job_id} failed: {e}")
+        finalized.append(job.job_id)
+    try:
+        _persist_global_data()
+    except Exception as e:
+        print(f"[shutdown] persist global data failed: {e}")
+    try:
+        # 把 WAL 合回 deck.db 主文件再退出，避免长期只靠 -wal 承载历史
+        deck_db.checkpoint("TRUNCATE")
+    except Exception as e:
+        print(f"[shutdown] deck.db checkpoint failed: {e}")
+
+    def _exit():
+        # 守护线程里退出：给 uvicorn 1s 把本响应发回 Electron
+        os._exit(0)
+
+    threading.Timer(1.0, _exit).start()
+    return {"ok": True, "finalized_jobs": finalized}
+
+
 @app.get("/api/status")
 def get_status(job_id: str = ""):
     """返回 primary job（或指定 job_id）的状态。
@@ -2987,6 +3226,7 @@ def get_status(job_id: str = ""):
             "new_images": [],
             "failed_pages": [],
             "failed_ids": [],
+            "cursor": None,
             "job_id": "",
             "outcome": "idle",
             "error_message": "",
@@ -3021,12 +3261,20 @@ def get_status(job_id: str = ""):
         }
 
     thread_alive = bool(job.thread is not None and job.thread.is_alive())
+    # 页断点（deck.db page_cursor）：收 ID 阶段每页落盘，自然跑完/进入下载阶段清掉；
+    # 停止后仍在 → 前端据此出「从第 N 页续跑」。PK 点查，轮询开销可忽略。
+    try:
+        cursor_snapshot = deck_db.cursor_load(
+            job.target_folder, getattr(job, "tag_query", "") or "",
+            getattr(job, "tag_source", "danbooru") or "danbooru")
+    except Exception:
+        cursor_snapshot = None
     return {
         "job_id": job.job_id,
         "is_running": job.is_running,
         "is_stopping": not job.is_running and thread_alive,
-        # 自动暂停（_fetch_page_or_pause 在等用户决策）时不再算 "已暂停"，
-        # 避免和新的"重试中"横幅语义打架；前端走 runningPhaseText 的独立分支
+        # is_paused 属性 = is_running 且 play_event 被清空：用户手动暂停、限流/超时
+        # 「原地暂停」、连续永久错 auto-pause 三种挂起都算 —— 前端「继续」按钮据此可用。
         "is_paused": job.is_paused,
         "outcome": job.outcome,
         "error_message": job.error_message,
@@ -3056,6 +3304,8 @@ def get_status(job_id: str = ""):
         "mode": job.mode,
         "tag_query": job.tag_query,
         "tag_source": job.tag_source,
+        # 收 ID 阶段的页断点：停止后非空 → 一键「从第 N 页续跑（N–原末页）」
+        "cursor": cursor_snapshot,
         # 给前端将来扩展 "多任务 UI" 用的列表；目前只有 1 个（MAX_CONCURRENT=1）
         "jobs": [
             {
@@ -3069,6 +3319,50 @@ def get_status(job_id: str = ""):
             for j in jobs.list_active()
         ],
     }
+
+@app.get("/api/recovery_state")
+def get_recovery_state(folder: str = "", tag_query: str = "", tag_source: str = "danbooru",
+                       mode: str = "", target_date: str = ""):
+    """任务结束（或重启 App）后查询某 scope 的可恢复状态：
+
+    - cursor：收 ID 阶段中途停止留下的页断点 {mode,page,start_page,end_page,...}，
+      前端据此出「从第 N 页续跑（N–原末页）」；自然跑完/已进入下载阶段则为 null。
+    - failed_pages：永久错误（400/403/404）跳过的页号（int 列表），前端出
+      「重试失败页」走 pages=[...] 定向重试；瞬时错误从不进这里。
+
+    scope = (folder, tag_query, tag_source)，与 failed_pages / page_cursor 表一致。
+    folder 可省略，由 mode 推导（前端无需复刻 tag 文件夹命名规则）：tags →
+    sanitize_tag_folder(tag_query)；rank/collect_ids → 真今天；popular* → target_date。
+    纯 deck.db 读取，不碰网络；job 已离开注册表（30s 保留期外/重启后）也能查到。
+    """
+    folder = (folder or "").strip()
+    tag_query = tag_query or ""
+    tag_source = tag_source or "danbooru"
+    if not folder:
+        if mode == "tags":
+            if not tag_query.strip():
+                return {"ok": False, "msg": "tags 模式需要 tag_query",
+                        "cursor": None, "failed_pages": []}
+            folder = sanitize_tag_folder(tag_query)
+        elif mode in ("popular", "popular_collect_ids", "popular_recover"):
+            folder = (target_date or "").strip()
+            if not folder:
+                return {"ok": False, "msg": "popular 模式需要 target_date",
+                        "cursor": None, "failed_pages": []}
+        elif mode in ("rank", "collect_ids"):
+            folder = _resolve_today()
+        else:
+            return {"ok": False, "msg": "缺少 folder 参数（或指定可推导的 mode）",
+                    "cursor": None, "failed_pages": []}
+    try:
+        cursor = deck_db.cursor_load(folder, tag_query=tag_query, tag_source=tag_source)
+        failed = [r["page"] for r in
+                  deck_db.failed_page_load_scope(folder, tag_query=tag_query, tag_source=tag_source)]
+    except Exception as e:
+        return {"ok": False, "msg": f"读取恢复状态失败: {e}", "cursor": None, "failed_pages": []}
+    return {"ok": True, "folder": folder, "tag_query": tag_query, "tag_source": tag_source,
+            "cursor": cursor, "failed_pages": failed}
+
 
 @app.get("/api/gallery_data")
 def get_gallery_data():
@@ -3102,6 +3396,119 @@ def get_gallery_data_by_date(date_str: str):
         "today": datetime.datetime.now().strftime("%Y-%m-%d"),
         "requested_date": date_str
     }
+
+@app.get("/api/search_entries")
+def api_search_entries(q: str = "", kind: str = "auto", start: str = "",
+                       end: str = "", limit: int = 120, offset: int = 0):
+    """跨日期本地搜索：在 deck.db 内按角色/作者整词匹配，日期闭区间可选。
+
+    只查当前在线的图库根目录；纯离线搜索，不发任何网络请求。
+    返回结构与 gallery_data 的 local_images 卡片一致（每项额外带 date，可跨日期）。
+    """
+    empty = {"ok": False, "items": [], "total": 0, "limit": limit, "offset": offset}
+    q = (q or "").strip()
+    if not q:
+        return {**empty, "msg": "请输入要搜索的角色或作者"}
+    if kind not in ("auto", "character", "artist"):
+        kind = "auto"
+    kinds = {"character", "artist"} if kind == "auto" else {kind}
+
+    start = (start or "").strip()
+    end = (end or "").strip()
+    for d in (start, end):
+        if d:
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", d):
+                return {**empty, "msg": "日期必须是 YYYY-MM-DD"}
+            try:
+                datetime.datetime.strptime(d, "%Y-%m-%d")
+            except ValueError:
+                return {**empty, "msg": "日期不是合法日历日期"}
+    if start and end and start > end:
+        start, end = end, start
+
+    token_groups, expanded_tags = _expand_search_tokens(q, kind)
+    if not token_groups:
+        hint = "中文角色名未在离线字典中找到对应 tag" if kind != "artist" else "作者请使用 Danbooru 英文名"
+        return {**empty, "msg": f"没有可搜索的 tag（{hint}）"}
+
+    online_roots = [r for r in get_library_roots() if r["path"].is_dir()]
+    offline_roots = [
+        {"id": r["id"], "label": r["label"]}
+        for r in get_library_roots() if not r["path"].is_dir()
+    ]
+    roots_by_id = {r["id"]: r for r in online_roots}
+    total, rows = deck_db.viewer_search(
+        token_groups, kinds,
+        folder_start=start or None, folder_end=end or None,
+        library_ids=[r["id"] for r in online_roots],
+        limit=limit, offset=offset,
+    )
+    items = _search_rows_to_items(rows, roots_by_id)
+    return {
+        "ok": True,
+        "items": items,
+        "total": total,
+        "returned": len(items),
+        "limit": max(1, min(int(limit or 120), 500)),
+        "offset": max(0, int(offset or 0)),
+        "kind": kind,
+        "matched_kinds": sorted(kinds),
+        "tokens": token_groups,
+        "expanded_tags": expanded_tags,
+        "online_libraries": [{"id": r["id"], "label": r["label"]} for r in online_roots],
+        "offline_libraries": offline_roots,
+    }
+
+@app.get("/api/library_root_summary")
+def get_library_root_summary(date: str = ""):
+    """Return per-root counts for one date so same-date libraries are explicit."""
+    try:
+        datetime.datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        return {"ok": False, "msg": "date 必须是 YYYY-MM-DD"}
+
+    media_exts = {
+        ".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".avif",
+        ".zip", ".mp4", ".webm", ".mov", ".mkv", ".avi"
+    }
+    result = []
+    for root in get_library_roots():
+        date_dir = root["path"] / date
+        viewer_path = date_dir / "viewer_data.json"
+        accessible = False
+        media_count = 0
+        viewer_count = 0
+        try:
+            accessible = date_dir.is_dir()
+            if accessible:
+                media_count = sum(
+                    1 for item in date_dir.iterdir()
+                    if item.is_file() and item.suffix.lower() in media_exts
+                )
+                # viewer_count 以 deck.db 为准（先吸收镜像外部改动）；DB 故障时回退 JSON 解析
+                try:
+                    deck_db.reconcile_viewer(root["id"], date, str(viewer_path))
+                    viewer_count = deck_db.viewer_count(root["id"], date)
+                except Exception:
+                    if viewer_path.is_file():
+                        raw = load_json(str(viewer_path), [])
+                        viewer_count = len(dedup_viewer_data(raw if isinstance(raw, list) else []))
+        except OSError:
+            accessible = False
+        result.append({
+            "id": root["id"],
+            "label": root["label"],
+            "path": str(root["path"]),
+            "is_default": bool(root.get("is_default", False)),
+            "accessible": accessible,
+            "date_dir": str(date_dir),
+            "viewer_path": str(viewer_path),
+            "media_count": media_count,
+            "viewer_count": viewer_count,
+            "has_viewer_data": viewer_path.is_file(),
+        })
+    return {"ok": True, "date": date, "roots": result}
+
 
 @app.post("/api/open_local")
 def open_local_file(req: OpenLocalRequest):
@@ -3157,10 +3564,9 @@ def _backfill_orphan_entries(date_str: str, dd: DanbooruData) -> int:
     data = dd.load_viewer_data()
     known_fns = {item.get("filename") for item in data if item.get("filename")}
 
-    # 反查表：filename -> post_id（取自全局 log_store；snapshot 一份避免下载线程并发写入）
-    fn_to_pid = log_store.filename_to_id_map()
-
-    orphans = []
+    # 先扫出候选孤立文件名，再用 DB 批量点查 filename→post_id（旧实现先建 52 万行全量
+    # 内存 map 再查，单次刷新白白吃 ~30MB；点查语义与 log_pids_for_filenames 完全一致）。
+    candidate_names = []
     for image_path in date_dir.iterdir():
         if not image_path.is_file():
             continue
@@ -3174,9 +3580,10 @@ def _backfill_orphan_entries(date_str: str, dd: DanbooruData) -> int:
             continue
         if name in known_fns:
             continue
-        pid = fn_to_pid.get(name)
-        if pid:
-            orphans.append((name, pid))
+        candidate_names.append(name)
+
+    fn_to_pid = deck_db.log_pids_for_filenames(candidate_names) if candidate_names else {}
+    orphans = [(name, fn_to_pid[name]) for name in candidate_names if fn_to_pid.get(name)]
 
     if not orphans:
         return 0
@@ -3427,26 +3834,50 @@ def _refresh_visible_by_paths(local_paths: list[str]):
     if not targets:
         return {"ok": False, "msg": "local_paths 为空或不在已接管图库内", "updates": []}
 
-    fn_to_pid_log = log_store.filename_to_id_map()
+    # viewer_cache: key(镜像路径) → (lib_id, folder, DB 重组的条目 list)
+    # 权威走 deck.db；先 reconcile 镜像指纹（吸收外部直写）再读行。
     viewer_cache = {}
+    unresolved_names = []
     fetch_jobs = []
     updates = []
 
+    def _load_scope(image_path):
+        parent = image_path.parent
+        key = str(parent / "viewer_data.json")
+        scope = viewer_cache.get(key)
+        if scope is None:
+            lib_id = library_id_for_path(str(parent))
+            folder = parent.name
+            viewer_mirror = parent / "viewer_data.json"
+            try:
+                deck_db.reconcile_viewer(lib_id, folder, str(viewer_mirror))
+                data = deck_db.viewer_load_entries(lib_id, folder)
+            except Exception as e:
+                append_log(f"viewer DB 读取失败，回退 JSON {key}: {e}")
+                raw = load_json(key, []) if viewer_mirror.exists() else []
+                data = raw if isinstance(raw, list) else []
+            scope = (lib_id, folder, data)
+            viewer_cache[key] = scope
+        return scope
+
     for image_path in targets:
-        viewer_path = image_path.parent / "viewer_data.json"
-        key = str(viewer_path)
-        if key not in viewer_cache:
-            data = load_json(key, []) if viewer_path.exists() else []
-            viewer_cache[key] = data if isinstance(data, list) else []
-        data = viewer_cache[key]
+        lib_id, folder, data = _load_scope(image_path)
         post_id = None
         for item in data:
             if item.get("filename") == image_path.name:
                 post_id = _extract_post_id(item.get("post_url", ""))
                 if post_id:
                     break
-        post_id = post_id or fn_to_pid_log.get(image_path.name)
+        if not post_id:
+            unresolved_names.append(image_path.name)
         fetch_jobs.append((image_path, post_id))
+
+    # filename→post_id 只对 viewer 里没查到的少量名字做点查，不建 52 万全量 map
+    fn_to_pid_log = deck_db.log_pids_for_filenames(unresolved_names) if unresolved_names else {}
+    fetch_jobs = [
+        (image_path, post_id or fn_to_pid_log.get(image_path.name))
+        for image_path, post_id in fetch_jobs
+    ]
 
     def _fetch(image_path, post_id):
         if not post_id:
@@ -3500,7 +3931,8 @@ def _refresh_visible_by_paths(local_paths: list[str]):
 
         viewer_path = image_path.parent / "viewer_data.json"
         key = str(viewer_path)
-        data = viewer_cache.setdefault(key, [])
+        # scope 在 _load_scope 阶段必然已建缓存（targets 都过了一遍）
+        lib_id, folder, data = viewer_cache[key]
         item = None
         for existing in data:
             if existing.get("filename") == filename:
@@ -3537,18 +3969,12 @@ def _refresh_visible_by_paths(local_paths: list[str]):
         })
 
     for key in changed_viewers:
-        data = dedup_viewer_data(viewer_cache.get(key, []))
-        temp_path = f"{key}.{os.getpid()}.{threading.get_ident()}.tmp"
-        try:
-            with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=4)
-            os.replace(temp_path, key)
-        finally:
-            if os.path.exists(temp_path):
-                try:
-                    os.remove(temp_path)
-                except OSError:
-                    pass
+        lib_id, folder, data = viewer_cache[key]
+        cleaned = dedup_viewer_data(data)
+        # DB 为权威：整 folder 替换后再导出同名镜像（原子写，与下载线程互斥）。
+        # 这样直接按 path 刷新（跨任意 root/日期）也不会绕过 deck.db 造影子数据。
+        deck_db.viewer_replace(lib_id, folder, cleaned)
+        deck_db.export_viewer_mirror(lib_id, folder, key, items=cleaned)
 
     return {"ok": True, "updates": updates}
 
@@ -3581,8 +4007,8 @@ def refresh_visible(req: RefreshVisibleRequest):
     active_job = jobs.get_by_folder(date_str)
     dd = None if active_job else DanbooruData(target_date=date_str)
 
-    # Step 1: 在锁内快照 filename -> post_id 的反查表（不持锁做网络 I/O）
-    fn_to_pid_log = log_store.filename_to_id_map()
+    # Step 1: filename -> post_id 反查（只对这批文件名做点查，不建 52 万全量 map）
+    fn_to_pid_log = deck_db.log_pids_for_filenames(filenames)
 
     if active_job is not None:
         with active_job.viewer_lock:
@@ -3757,27 +4183,71 @@ def merge_viewer_data(req: MergeViewerDataRequest):
     source_dir = source_root / req.date
     target_dir = target_root / req.date
 
-    # 读源 / 目标
+    # 读源 / 目标（deck.db 为权威：先吸收镜像指纹变化再从行重组；目录不存在保持空，
+    # 与旧版「镜像文件不存在 = []」的语义一致）
+    source_lib = library_id_for_path(str(source_root))
+    target_lib = library_id_for_path(str(target_root))
     source_path = source_dir / "viewer_data.json"
     target_path = target_dir / "viewer_data.json"
-    source_items = load_json(str(source_path), []) if source_path.exists() else []
-    target_items = load_json(str(target_path), []) if target_path.exists() else []
 
-    if not isinstance(source_items, list):
-        source_items = []
-    if not isinstance(target_items, list):
-        target_items = []
+    def _load_scope(lib_id, day_dir, mirror_path):
+        if not day_dir.is_dir():
+            return []
+        try:
+            deck_db.reconcile_viewer(lib_id, day_dir.name, str(mirror_path))
+            return deck_db.viewer_load_entries(lib_id, day_dir.name)
+        except Exception as e:
+            print(f"[deck_db] merge 读取失败，回退 JSON {mirror_path}: {e}")
+            raw = load_json(str(mirror_path), []) if mirror_path.exists() else []
+            return raw if isinstance(raw, list) else []
+
+    source_items = _load_scope(source_lib, source_dir, source_path)
+    target_items = _load_scope(target_lib, target_dir, target_path)
+
+    blocked_move_names = set()
+    if req.move_files and source_dir.is_dir() and target_dir.is_dir():
+        try:
+            target_names = {
+                item.name.lower()
+                for item in target_dir.iterdir()
+                if item.is_file()
+            }
+            blocked_move_names = {
+                item.name.lower()
+                for item in source_dir.iterdir()
+                if item.is_file()
+                and item.suffix.lower() in _MEDIA_EXTS
+                and item.name.lower() in target_names
+            }
+        except OSError as e:
+            return {"ok": False, "msg": f"扫描目标图片失败: {e}"}
 
     # 用现成的 merge_daily_viewer_data：基于 _viewer_item_key(post_url) 去重
     # 1) 先对 target 做 dedup（防御性，目标文件可能历史遗留重复）
     deduped_target = dedup_viewer_data(target_items)
     # 2) 合并：从 source 增量追加到 target
-    merged = merge_daily_viewer_data(deduped_target, source_items)
+    if req.move_files:
+        move_source_names = {
+            item.name.lower()
+            for item in source_dir.iterdir()
+            if item.is_file() and item.suffix.lower() in _MEDIA_EXTS
+            and item.name.lower() not in blocked_move_names
+        } if source_dir.is_dir() else set()
+        merge_source_items = [
+            item for item in source_items
+            if str(item.get("filename", "")).lower() in move_source_names
+        ]
+    else:
+        merge_source_items = source_items
+    # 必须在 merge 之前量 target 基线：merge_daily_viewer_data 对空 target 会复用
+    # deduped_target 这个 list 原地 append（旧 dedup 还会把空列表原样返回），
+    # 事后再 len() 会得到 672 而不是 0 —— 计数全错、local_path 重写边界也跟着失效。
+    target_count_before = len(deduped_target)
+    merged = merge_daily_viewer_data(deduped_target, merge_source_items)
 
     # 3) 重写合并项的 local_path：从 source 路径改写到 target 路径
     # merged 数组前 target_count_before 项是原 target 的（保留不动），
     # 之后的都是从 source 增量来的，需要重写 local_path 到 target 路径。
-    target_count_before = len(deduped_target)
     final_items = []
     rewritten = 0
     for idx, item in enumerate(merged):
@@ -3785,12 +4255,45 @@ def merge_viewer_data(req: MergeViewerDataRequest):
         if idx >= target_count_before:
             # 这一项是从 source 来的，重写 local_path
             fn = new_item.get("filename", "")
-            if fn:
+            source_file = source_dir / fn if fn else None
+            target_file = target_dir / fn if fn else None
+            can_point_to_target = (
+                bool(fn)
+                and (
+                    target_file.is_file()
+                    or (source_file is not None and source_file.is_file())
+                    or not req.move_files
+                )
+            )
+            if can_point_to_target:
                 new_item["local_path"] = str(target_dir / fn)
                 rewritten += 1
         final_items.append(new_item)
 
     merged_count = len(final_items) - target_count_before
+
+    move_candidates = []
+    move_conflicts = []
+    move_missing = []
+    if req.move_files:
+        if source_dir.is_dir():
+            try:
+                target_names = {
+                    item.name.lower()
+                    for item in target_dir.iterdir()
+                    if item.is_file()
+                } if target_dir.is_dir() else set()
+                for item in source_dir.iterdir():
+                    if not item.is_file() or item.suffix.lower() not in _MEDIA_EXTS:
+                        continue
+                    if item.name.lower() in target_names:
+                        move_conflicts.append(item.name)
+                    else:
+                        move_candidates.append(item.name)
+            except OSError as e:
+                return {"ok": False, "msg": f"扫描源图片失败: {e}"}
+        else:
+            move_missing = ["源日期目录不存在"]
 
     if req.dry_run:
         return {
@@ -3800,6 +4303,12 @@ def merge_viewer_data(req: MergeViewerDataRequest):
             "target_count_before": target_count_before,
             "merged_count": merged_count,
             "rewritten_local_path": rewritten,
+            "move_files": bool(req.move_files),
+            "move_count": len(move_candidates),
+            "move_conflict_count": len(move_conflicts),
+            "move_missing_count": len(move_missing),
+            "move_conflicts": move_conflicts[:30],
+            "move_missing": move_missing,
         }
 
     # 写盘
@@ -3809,12 +4318,49 @@ def merge_viewer_data(req: MergeViewerDataRequest):
         except Exception as e:
             return {"ok": False, "msg": f"创建目标目录失败: {e}"}
 
+    moved_files = []
+    move_errors = []
+    if req.move_files:
+        for filename in move_candidates:
+            source_file = source_dir / filename
+            target_file = target_dir / filename
+            try:
+                if source_file.exists() and not target_file.exists():
+                    shutil.move(str(source_file), str(target_file))
+                    moved_files.append(filename)
+            except OSError as e:
+                move_errors.append({"filename": filename, "error": str(e)})
+
+        # Only point newly merged metadata at the target when the file is
+        # actually there. A failed move must not create a broken local_path.
+        moved_set = set(moved_files)
+        for item in final_items[target_count_before:]:
+            filename = item.get("filename", "")
+            if filename and (filename in moved_set or (target_dir / filename).is_file()):
+                item["local_path"] = str(target_dir / filename)
+
     try:
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(target_path, "w", encoding="utf-8") as f:
-            json.dump(final_items, f, ensure_ascii=False, indent=2)
+        # DB 权威写入 + 同名镜像导出（原子写，indent=2 与旧版一致）
+        deck_db.viewer_replace(target_lib, req.date, final_items)
+        deck_db.export_viewer_mirror(target_lib, req.date, str(target_path), items=final_items)
     except Exception as e:
-        return {"ok": False, "msg": f"写目标 viewer_data.json 失败: {e}"}
+        return {"ok": False, "msg": f"写目标 viewer 数据失败: {e}"}
+
+    # Remove successfully moved entries only after target metadata is safely
+    # written. If source cleanup fails, duplication is safer than data loss.
+    source_cleanup_error = ""
+    if req.move_files and moved_files and source_path.exists():
+        remaining_source_items = [
+            item for item in source_items
+            if str(item.get("filename", "")) not in set(moved_files)
+        ]
+        try:
+            remaining_clean = dedup_viewer_data(remaining_source_items)
+            deck_db.viewer_replace(source_lib, req.date, remaining_clean)
+            deck_db.export_viewer_mirror(source_lib, req.date, str(source_path),
+                                         items=remaining_clean)
+        except Exception as e:  # sqlite3 / OSError：宁可报错也不能丢清理失败
+            source_cleanup_error = str(e)
 
     return {
         "ok": True,
@@ -3824,6 +4370,13 @@ def merge_viewer_data(req: MergeViewerDataRequest):
         "merged_count": merged_count,
         "rewritten_local_path": rewritten,
         "target_path": str(target_path),
+        "move_files": bool(req.move_files),
+        "moved_count": len(moved_files),
+        "move_conflict_count": len(move_conflicts),
+        "move_error_count": len(move_errors),
+        "move_conflicts": move_conflicts[:30],
+        "move_errors": move_errors[:30],
+        "source_cleanup_error": source_cleanup_error,
     }
 
 
@@ -3848,17 +4401,19 @@ def api_import_translation(req: TranslationImportRequest):
 @app.get("/api/untranslated_characters")
 def api_untranslated_characters(date: str = ""):
     """聚合本地图库中所有日期 viewer_data 里「翻译字典查不到」的角色 token。
-    返回 {tags: [{tag, post_count, fallback_name}]}，按出现次数倒序。"""
+    返回 {tags: [{tag, post_count, fallback_name}]}，按出现次数倒序。
+    计数直接流式扫 deck.db 的 tag_character 列（旧实现逐日 build_library + 翻译富化，
+    全量跑要解析上百个 JSON）。"""
     counter = {}
-    dates = [date] if date else get_available_date_folders()
-    for date_str in dates:
-        resolved_date, _ = resolve_selected_date(date_str)
-        for item in build_local_image_library(resolved_date):
-            chars_str = (item.get("tags") or {}).get("tag_string_character", "") or ""
-            for token in chars_str.split():
-                token = token.strip()
-                if token:
-                    counter[token] = counter.get(token, 0) + 1
+    folder = None
+    if date:
+        resolved_date, _ = resolve_selected_date(date)
+        folder = resolved_date
+    for chars_str in deck_db.viewer_iter_tag_values("tag_character", folder=folder):
+        for token in (chars_str or "").split():
+            token = token.strip()
+            if token:
+                counter[token] = counter.get(token, 0) + 1
 
     pending = []
     for token, count in counter.items():
@@ -3870,7 +4425,7 @@ def api_untranslated_characters(date: str = ""):
             "fallback_name": translator._format_tag(token),
         })
     pending.sort(key=lambda x: (-x["post_count"], x["tag"]))
-    return {"date": date_str, "tags": pending}
+    return {"date": folder or "", "tags": pending}
 
 
 @app.get("/api/character_source/{tag}")
@@ -3971,42 +4526,15 @@ def api_import_character_chinese_search():
 # ---------------- 画师收藏 ----------------
 
 def _load_artist_favorites() -> dict:
-    if not ARTIST_FAVORITES_JSON.exists():
-        return {}
     try:
-        import json as _json
-        with open(ARTIST_FAVORITES_JSON, "r", encoding="utf-8") as f:
-            data = _json.load(f)
-        if not isinstance(data, dict):
-            return {}
-        # 兼容：值若不是 list 就丢弃；每个 list 内统一 strip + 去重保留顺序
-        out: dict[str, list[str]] = {}
-        for k, v in data.items():
-            if not isinstance(k, str):
-                continue
-            if not isinstance(v, list):
-                continue
-            seen = set()
-            cleaned: list[str] = []
-            for item in v:
-                if not isinstance(item, str):
-                    continue
-                name = item.strip()
-                if not name or name in seen:
-                    continue
-                seen.add(name)
-                cleaned.append(name)
-            out[k] = cleaned
-        return out
+        return deck_db.fav_group_reconcile("artist", str(ARTIST_FAVORITES_JSON))
     except Exception as e:
         print(f"Failed to load artist favorites: {e}")
         return {}
 
 
 def _save_artist_favorites(groups: dict) -> None:
-    import json as _json
-    with open(ARTIST_FAVORITES_JSON, "w", encoding="utf-8") as f:
-        _json.dump(groups, f, ensure_ascii=False, indent=2)
+    deck_db.fav_group_save("artist", groups, str(ARTIST_FAVORITES_JSON))
 
 
 @app.get("/api/artist_favorites")
@@ -4044,39 +4572,15 @@ def api_artist_favorites_set(req: ArtistFavoritesRequest):
 # ---------------- 角色收藏 ----------------
 
 def _load_character_favorites() -> dict:
-    if not CHARACTER_FAVORITES_JSON.exists():
-        return {}
     try:
-        import json as _json
-        with open(CHARACTER_FAVORITES_JSON, "r", encoding="utf-8") as f:
-            data = _json.load(f)
-        if not isinstance(data, dict):
-            return {}
-        out: dict[str, list[str]] = {}
-        for k, v in data.items():
-            if not isinstance(k, str) or not isinstance(v, list):
-                continue
-            seen = set()
-            cleaned: list[str] = []
-            for item in v:
-                if not isinstance(item, str):
-                    continue
-                name = item.strip()
-                if not name or name in seen:
-                    continue
-                seen.add(name)
-                cleaned.append(name)
-            out[k] = cleaned
-        return out
+        return deck_db.fav_group_reconcile("character", str(CHARACTER_FAVORITES_JSON))
     except Exception as e:
         print(f"Failed to load character favorites: {e}")
         return {}
 
 
 def _save_character_favorites(groups: dict) -> None:
-    import json as _json
-    with open(CHARACTER_FAVORITES_JSON, "w", encoding="utf-8") as f:
-        _json.dump(groups, f, ensure_ascii=False, indent=2)
+    deck_db.fav_group_save("character", groups, str(CHARACTER_FAVORITES_JSON))
 
 
 @app.get("/api/character_favorites")
@@ -4129,47 +4633,31 @@ def _image_fav_key(date: str, filename: str, library_id: str = "default", local_
 
 
 def _load_image_favorites() -> dict:
-    if not IMAGE_FAVORITES_JSON.exists():
-        return {}
     try:
-        import json as _json
-        with open(IMAGE_FAVORITES_JSON, "r", encoding="utf-8") as f:
-            data = _json.load(f)
-        return data if isinstance(data, dict) else {}
+        return deck_db.fav_image_reconcile(str(IMAGE_FAVORITES_JSON))
     except Exception as e:
         print(f"Failed to load image favorites: {e}")
         return {}
 
 
-def _save_image_favorites(data: dict) -> None:
-    import json as _json
-    with open(IMAGE_FAVORITES_JSON, "w", encoding="utf-8") as f:
-        _json.dump(data, f, ensure_ascii=False, indent=2)
-
-
 @app.get("/api/image_favorites")
 def api_image_favorites_get():
     """返回 {ok, items: [...], keys: [...]}。items 按 added_at 倒序，keys 给前端快速做 Set 查询。"""
-    data = _load_image_favorites()
-    items = []
-    for key, v in data.items():
-        if not isinstance(v, dict):
-            continue
-        items.append({"key": key, **v})
-    items.sort(key=lambda x: x.get("added_at", 0), reverse=True)
-    return {"ok": True, "items": items, "keys": list(data.keys()), "count": len(items)}
+    _load_image_favorites()  # 触发一次镜像指纹对账（外部改动吸收）
+    items = deck_db.fav_image_items()
+    keys = [it["key"] for it in items]
+    return {"ok": True, "items": items, "keys": keys, "count": len(items)}
 
 
 @app.post("/api/image_favorites/toggle")
 def api_image_favorites_toggle(req: ImageFavoriteToggleRequest):
-    """切换单张图片的收藏状态，幂等。"""
+    """切换单张图片的收藏状态，幂等。DB 点 upsert/delete 后导出小镜像。"""
     item = req.item
     if not item.date or not item.filename:
         return {"ok": False, "msg": "date / filename 不能为空"}
-    data = _load_image_favorites()
     key = _image_fav_key(item.date, item.filename, item.library_id, item.local_path)
-    if key in data:
-        del data[key]
+    if key in deck_db.fav_image_load_all():
+        deck_db.fav_image_delete(key)
         favorited = False
     else:
         import time as _time
@@ -4178,21 +4666,20 @@ def api_image_favorites_toggle(req: ImageFavoriteToggleRequest):
         except AttributeError:
             payload = item.dict()
         payload["added_at"] = int(_time.time())
-        data[key] = payload
+        deck_db.fav_image_upsert(key, payload)
         favorited = True
-    _save_image_favorites(data)
-    return {"ok": True, "favorited": favorited, "key": key, "count": len(data)}
+    deck_db.export_fav_image_mirror(str(IMAGE_FAVORITES_JSON))
+    return {"ok": True, "favorited": favorited, "key": key,
+            "count": deck_db.fav_image_count()}
 
 
 @app.post("/api/image_favorites/remove")
 def api_image_favorites_remove(req: ImageFavoriteRemoveRequest):
     """按 key 显式移除（收藏页用，避免依赖整条 item）。"""
-    data = _load_image_favorites()
-    if req.key in data:
-        del data[req.key]
-        _save_image_favorites(data)
-        return {"ok": True, "removed": True, "count": len(data)}
-    return {"ok": True, "removed": False, "count": len(data)}
+    removed = deck_db.fav_image_delete(req.key)
+    if removed:
+        deck_db.export_fav_image_mirror(str(IMAGE_FAVORITES_JSON))
+    return {"ok": True, "removed": removed, "count": deck_db.fav_image_count()}
 
 @app.post("/api/convert_local_zip")
 def api_convert_local_zip(req: ConvertLocalZipRequest):
@@ -4279,21 +4766,30 @@ class CaptionPromptRequest(BaseModel):
 
 
 def _find_caption_meta(image_path: Path):
-    """在图片同目录查 viewer_data.json 并按 filename 匹配，取出该图元数据
-    （角色 / 作品 / 画师 / tags），供构造手动模式提示词用。"""
-    viewer_json = image_path.parent / "viewer_data.json"
-    if not viewer_json.exists():
-        return None
-    try:
-        with open(viewer_json, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
-        return None
+    """在图片同目录的 deck.db viewer 行里按 filename 点查，取出该图元数据
+    （角色 / 作品 / 画师 / tags），供构造手动模式提示词用。
+    先 reconcile 一次镜像（吸收外部直写），DB 异常才回退 JSON 直读。"""
+    parent = image_path.parent
+    viewer_json = parent / "viewer_data.json"
+    lib_id = library_id_for_path(str(parent))
+    folder = parent.name
     target = image_path.name
-    for entry in data:
-        if entry.get("filename") == target:
-            return entry
-    return None
+    try:
+        deck_db.reconcile_viewer(lib_id, folder, str(viewer_json))
+        rows = deck_db.viewer_find_entries(lib_id, folder, filenames=[target])
+        return rows[0] if rows else None
+    except Exception:
+        if not viewer_json.exists():
+            return None
+        try:
+            with open(viewer_json, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return None
+        for entry in data if isinstance(data, list) else []:
+            if entry.get("filename") == target:
+                return entry
+        return None
 
 
 @app.post("/api/caption_prompt")

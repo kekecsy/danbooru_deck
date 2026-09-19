@@ -6,10 +6,16 @@ const props = defineProps({
   placeholder: { type: String, default: '选择日期' },
   clearable: { type: Boolean, default: true },
   availableDates: { type: Array, default: () => [] },
-  dateFolders: { type: Array, default: () => [] }
+  dateFolders: { type: Array, default: () => [] },
+  // ISO YYYY-MM-DD：晚于该日期的日格置灰不可选（日期热门传今天，今天/未来榜单不完整）
+  maxDate: { type: String, default: '' },
+  // 触发框两侧显示 ‹ › 逐日步进按钮（仅单日选择用）
+  dayStep: { type: Boolean, default: false },
+  // 快捷栏显示「前往」按钮：点击后 emit('jump', 选中日期)，由父组件驱动右侧画廊跳转
+  jumpable: { type: Boolean, default: false }
 });
 
-const emit = defineEmits(['update:modelValue']);
+const emit = defineEmits(['update:modelValue', 'jump']);
 
 const rootEl = ref(null);
 const panelEl = ref(null);
@@ -57,7 +63,9 @@ const dateFolderRecords = computed(() => {
       imageCount,
       sourceCount: toFiniteCount(item.sourceCount ?? item.source_count, 1),
       hasImages: hasCount ? imageCount > 0 : Boolean(item.hasImages ?? item.has_images ?? true),
-      countKnown: hasCount
+      countKnown: hasCount,
+      // ids_data.json 待下载 id 数（后端扫盘，与右侧 GalleryCalendar 同源）
+      pendingIds: toFiniteCount(item.pendingIds ?? item.pending_ids, 0)
     });
   }
   for (const value of props.availableDates || []) {
@@ -67,7 +75,8 @@ const dateFolderRecords = computed(() => {
       imageCount: null,
       sourceCount: 1,
       hasImages: true,
-      countKnown: false
+      countKnown: false,
+      pendingIds: 0
     });
   }
   return Array.from(records.values()).sort((a, b) => b.date.localeCompare(a.date));
@@ -141,7 +150,10 @@ const cells = computed(() => {
       countKnown: !!folder?.countKnown,
       imageCount: folder?.imageCount ?? null,
       selected: date === selected,
-      today: date === todayValue
+      today: date === todayValue,
+      disabled: !!(props.maxDate && date > props.maxDate),
+      pendingIds: folder?.pendingIds || 0,
+      hasPendingIds: (folder?.pendingIds || 0) > 0
     };
   });
 });
@@ -154,11 +166,14 @@ const monthItems = computed(() => {
     const prefix = `${String(currentYear.value).padStart(4, '0')}-${String(month).padStart(2, '0')}-`;
     const folders = dateFolderRecords.value.filter(item => item.date.startsWith(prefix));
     const imageCount = folders.reduce((sum, item) => sum + (item.imageCount || 0), 0);
+    const pendingIds = folders.reduce((sum, item) => sum + (item.pendingIds || 0), 0);
     return {
       month,
       label: `${month}月`,
       folderCount: folders.length,
       imageCount,
+      pendingIds,
+      hasPendingIds: pendingIds > 0,
       hasImages: folders.some(item => item.hasImages),
       countKnown: folders.some(item => item.countKnown),
       selected: !!selected && selected.year === currentYear.value && selected.month === month,
@@ -175,10 +190,13 @@ const yearItems = computed(() => {
     const prefix = `${String(year).padStart(4, '0')}-`;
     const folders = dateFolderRecords.value.filter(item => item.date.startsWith(prefix));
     const imageCount = folders.reduce((sum, item) => sum + (item.imageCount || 0), 0);
+    const pendingIds = folders.reduce((sum, item) => sum + (item.pendingIds || 0), 0);
     return {
       year,
       folderCount: folders.length,
       imageCount,
+      pendingIds,
+      hasPendingIds: pendingIds > 0,
       hasImages: folders.some(item => item.hasImages),
       countKnown: folders.some(item => item.countKnown),
       selected: !!selected && selected.year === year,
@@ -242,17 +260,20 @@ function imageCountLabel(count) {
 }
 
 function dateCellTitle(cell) {
-  if (!cell.hasFolder) return cell.date;
-  if (!cell.countKnown) return `${cell.date} · 图数未统计（点入即扫）`;
-  return cell.hasImages ? `${cell.date} · 有图片` : `${cell.date} · 文件夹为空`;
+  // ids_data.json 非空时与右侧日历一致追加"有未下载 id"提示
+  const pending = cell.pendingIds > 0 ? ' · 有未下载 id' : '';
+  if (!cell.hasFolder) return cell.date + pending;
+  if (!cell.countKnown) return `${cell.date} · 图数未统计（点入即扫）${pending}`;
+  return cell.hasImages ? `${cell.date} · 有图片${pending}` : `${cell.date} · 文件夹为空${pending}`;
 }
 
 function periodTitle(label, item) {
-  if (!item.folderCount) return label;
-  if (!item.countKnown) return `${label} · ${item.folderCount} 个日期文件夹 · 图数未统计（点入即扫）`;
+  const pending = item.pendingIds > 0 ? ' · 有未下载 id' : '';
+  if (!item.folderCount) return label + pending;
+  if (!item.countKnown) return `${label} · ${item.folderCount} 个日期文件夹 · 图数未统计（点入即扫）${pending}`;
   return item.hasImages
-    ? `${label} · ${item.folderCount} 个日期`
-    : `${label} · ${item.folderCount} 个日期 · 文件夹为空`;
+    ? `${label} · ${item.folderCount} 个日期${pending}`
+    : `${label} · ${item.folderCount} 个日期 · 文件夹为空${pending}`;
 }
 
 function jumpLatestGalleryDate() {
@@ -262,12 +283,39 @@ function jumpLatestGalleryDate() {
 }
 
 function selectDate(date) {
+  if (props.maxDate && date > props.maxDate) return;
   emit('update:modelValue', date);
   open.value = false;
 }
 
+function shiftDateIso(value, deltaDays) {
+  const parsed = parseDate(value);
+  if (!parsed) return '';
+  const d = new Date(parsed.year, parsed.month - 1, parsed.day + deltaDays);
+  return formatDate(d.getFullYear(), d.getMonth() + 1, d.getDate());
+}
+
+// toolbar 逐日步进：无值时以昨天为基准；+1 不超过 maxDate
+const stepBaseDate = computed(() => props.modelValue || yesterday());
+const stepPrevDate = computed(() => shiftDateIso(stepBaseDate.value, -1));
+const stepNextDate = computed(() => shiftDateIso(stepBaseDate.value, 1));
+const stepNextDisabled = computed(() => !!(props.maxDate && stepNextDate.value > props.maxDate));
+
+function stepDay(delta) {
+  if (delta > 0 && stepNextDisabled.value) return;
+  const next = delta > 0 ? stepNextDate.value : stepPrevDate.value;
+  if (next) emit('update:modelValue', next);
+}
+
 function clearDate() {
   emit('update:modelValue', '');
+  open.value = false;
+}
+
+// 「前往」：不改任务日期，只通知父组件把右侧画廊跳到当前选中日期；面板收起让用户看到结果
+function jumpToGallery() {
+  if (!props.modelValue) return;
+  emit('jump', props.modelValue);
   open.value = false;
 }
 
@@ -331,7 +379,14 @@ onBeforeUnmount(() => {
 
 <template>
   <div ref="rootEl" class="calendar task-date-picker">
-    <div class="calendar-toolbar task-date-toolbar">
+    <div class="calendar-toolbar task-date-toolbar" :class="{ 'with-day-step': dayStep }">
+      <button
+        v-if="dayStep"
+        type="button"
+        class="day-step-btn"
+        title="前一天"
+        @click="stepDay(-1)"
+      >‹</button>
       <button
         type="button"
         class="calendar-trigger task-date-trigger"
@@ -341,6 +396,14 @@ onBeforeUnmount(() => {
         <span class="trigger-text">{{ triggerLabel }}</span>
         <span class="trigger-caret">▾</span>
       </button>
+      <button
+        v-if="dayStep"
+        type="button"
+        class="day-step-btn"
+        title="后一天"
+        :disabled="stepNextDisabled"
+        @click="stepDay(1)"
+      >›</button>
     </div>
 
     <Teleport to="body">
@@ -370,6 +433,14 @@ onBeforeUnmount(() => {
         <button type="button" class="date-quick" :disabled="!dateFolderRecords.length" @click="jumpLatestGalleryDate">最新目录</button>
         <button type="button" class="date-quick" @click="dateView = 'months'">选月份</button>
         <button type="button" class="date-quick" @click="dateView = 'years'">选年份</button>
+        <button
+          v-if="jumpable"
+          type="button"
+          class="date-quick date-quick-go"
+          :disabled="!modelValue"
+          :title="modelValue ? `右侧画廊前往 ${modelValue}` : '请先选择日期'"
+          @click="jumpToGallery"
+        >前往 →</button>
       </div>
 
       <template v-if="dateView === 'days'">
@@ -382,8 +453,9 @@ onBeforeUnmount(() => {
             :key="cell.date"
             type="button"
             class="day-cell"
-            :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.hasFolder, 'has-images': cell.hasImages, 'uncounted': cell.hasFolder && !cell.countKnown, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages }"
-            :title="dateCellTitle(cell)"
+            :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.hasFolder, 'has-images': cell.hasImages, 'uncounted': cell.hasFolder && !cell.countKnown, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages, 'has-pending-ids': cell.hasPendingIds }"
+            :disabled="cell.disabled"
+            :title="cell.disabled ? `${cell.date}（超过可选上限 ${maxDate}）` : dateCellTitle(cell)"
             @click="selectDate(cell.date)"
           >
             <span>{{ cell.day }}</span>
@@ -397,7 +469,7 @@ onBeforeUnmount(() => {
           :key="item.month"
           type="button"
           class="month-cell"
-          :class="{ selected: item.selected, today: item.today, 'has-folder': item.folderCount, 'has-images': item.hasImages, 'empty-folder': item.folderCount && item.countKnown && !item.hasImages }"
+          :class="{ selected: item.selected, today: item.today, 'has-folder': item.folderCount, 'has-images': item.hasImages, 'empty-folder': item.folderCount && item.countKnown && !item.hasImages, 'has-pending-ids': item.hasPendingIds }"
           :title="periodTitle(`${currentYear} 年 ${item.label}`, item)"
           @click="pickMonth(item.month)"
         >
@@ -417,7 +489,7 @@ onBeforeUnmount(() => {
             :key="item.year"
             type="button"
             class="year-cell"
-            :class="{ selected: item.selected, today: item.today, 'has-folder': item.folderCount, 'has-images': item.hasImages, 'uncounted': item.folderCount && !item.countKnown, 'empty-folder': item.folderCount && item.countKnown && !item.hasImages }"
+            :class="{ selected: item.selected, today: item.today, 'has-folder': item.folderCount, 'has-images': item.hasImages, 'uncounted': item.folderCount && !item.countKnown, 'empty-folder': item.folderCount && item.countKnown && !item.hasImages, 'has-pending-ids': item.hasPendingIds }"
             :title="periodTitle(`${item.year} 年`, item)"
             @click="pickYear(item.year)"
           >
@@ -446,6 +518,37 @@ onBeforeUnmount(() => {
 .task-date-toolbar {
   margin: 0;
   display: block;
+}
+
+.task-date-toolbar.with-day-step {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) 30px;
+  gap: 5px;
+  align-items: center;
+}
+
+.day-step-btn {
+  width: 30px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--accent-deep);
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.day-step-btn:hover:not(:disabled) {
+  background: var(--soft-violet);
+}
+
+.day-step-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .task-date-trigger {
@@ -488,7 +591,10 @@ onBeforeUnmount(() => {
   width: 268px;
   padding: 10px;
   border-radius: 12px;
-  z-index: 10050;
+  /* 面板 Teleport 到 body + position:fixed，必须高于所有可能承载它的弹窗：
+     控制面板(10000) / 合并 modal(10020) / 跨日期搜索浮层(10060) / 搜索 lightbox(10070)。
+     否则满屏遮罩会盖住面板，点日格变成点遮罩把搜索浮层关掉。 */
+  z-index: 10080;
 }
 
 .task-date-header {
@@ -613,6 +719,73 @@ onBeforeUnmount(() => {
 .day-cell:not(.has-folder):not(.selected) {
   background: rgba(230, 224, 214, 0.42);
   color: #b8aa99;
+}
+
+/* 超过 maxDate 的未来日格：统一置灰，盖掉有图/斜纹等状态 */
+.calendar-grid .day-cell:disabled,
+.calendar-grid .day-cell:disabled:hover {
+  background: #efeef4;
+  background-image: none;
+  color: #c6c2d0;
+  box-shadow: none;
+  font-weight: 400;
+  cursor: not-allowed;
+}
+
+.calendar-grid .day-cell:disabled::after {
+  content: none;
+}
+
+/* ids_data.json 非空（待下载 id 队列）：与右侧 GalleryCalendar 完全同款——
+   有图时右上角橙点；空文件夹整格变橙强调；选中态用白描边橙点。
+   规则放在 uncounted 斜纹的 '·' 标记之后，同 specificity 下橙点胜出。 */
+.day-cell.has-pending-ids.has-images:not(.selected)::after {
+  content: '';
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 1.5px rgba(255, 252, 246, 0.9);
+}
+.day-cell.has-pending-ids.has-images.selected::after,
+.day-cell.has-pending-ids.empty-folder.selected::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3.5px rgba(245, 158, 11, 0.6);
+}
+.day-cell.has-pending-ids.empty-folder:not(.selected) {
+  background: rgba(245, 158, 11, 0.22);
+  color: #8a5a0a;
+  box-shadow: inset 0 0 0 1px rgba(245, 158, 11, 0.45);
+  font-weight: 600;
+}
+
+/* 月 / 年聚合格：含待下载 id 的日期时橙色顶边 + 渐变，与右日历一致 */
+.month-cell.has-pending-ids:not(.selected),
+.year-cell.has-pending-ids:not(.selected) {
+  border-top: 2px solid #f59e0b;
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.18) 0%, rgba(255, 252, 246, 0.86) 60%);
+  color: var(--ink);
+  font-weight: 600;
+}
+.month-cell.has-pending-ids.has-images:not(.selected),
+.year-cell.has-pending-ids.has-images:not(.selected) {
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.22) 0%, rgba(77, 139, 87, 0.16) 70%);
+  color: #276136;
+  font-weight: 700;
+}
+.month-cell.selected.has-pending-ids,
+.year-cell.selected.has-pending-ids {
+  border-top: 2px solid #f59e0b;
 }
 
 .month-grid,
@@ -770,4 +943,21 @@ onBeforeUnmount(() => {
 .year-cell.selected { background: var(--accent-gradient); }
 .task-date-clear { border-color: rgba(var(--violet-rgb), 0.12); background: var(--soft-violet); color: var(--accent-deep); }
 .task-date-clear:hover { background: #e8e4ff; }
+
+/* 「前往」主动作：渐变填充；本段位于样式表末尾，同特异性下压过上方 .date-quick 的 hover 覆盖 */
+.date-quick-go,
+.date-quick-go:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--accent-gradient);
+  color: #fff;
+  font-weight: 600;
+}
+
+.date-quick-go:disabled {
+  border-color: var(--line);
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-weight: 400;
+  opacity: 0.5;
+}
 </style>

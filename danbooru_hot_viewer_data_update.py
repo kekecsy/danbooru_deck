@@ -1,4 +1,12 @@
 # update_viewer_data.py
+#
+# ⚠️ SQLite 迁移后（2026-09）本脚本是「直改镜像」工具：它直接覆写
+# hot_pic/<date>/viewer_data.json，而权威存储已经是 deck.db 的 viewer_entries。
+# 改完之后必须在 app 里打开一次对应日期的画廊（或触发任何会读该日期的操作），
+# 后端的 reconcile_folder 发现镜像 mtime/size 指纹变化后会自动把内容吸收进 deck.db；
+# 不打开则画廊仍显示 DB 旧内容，镜像与 DB 的差异会在下次 DB→镜像导出时被覆盖。
+# （脚本把旧文件改名为 .backup_时间戳 再写新文件，对 reconcile 而言等同镜像被替换，
+# 能被正常检测到。）
 import os
 import json
 import requests

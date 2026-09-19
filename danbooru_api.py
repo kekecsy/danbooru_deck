@@ -1,11 +1,56 @@
+import json
 import os
 import socket
 import urllib.parse
 from time import sleep
-from curl_cffi import requests
-from my_utils import get_proxies_for_url
 
-COOKIES = "_danbooru2_session=dzlzD2gYvCdxOQfBzhHUpXyPWZdvd8kXWARK6n0KdX4VDPgzGj9sLOyHfTrMVFdFpaJLHAP3LfMiptyeQeiNGE1yNM8tY7IGQXtYV2u8aFKglH7khCVW8FVqurTZSNR25VdDBgoTBDzu9p/gTeTrazCCWzLRPlg7hglvs6F6Xmfd7VVN/Mb+HbA5y7HAykGYk9kXDOTbE5s/HTOvPZd3hT6t/WcVUL8VlEW0nv1aiJt2h0byWwJBgBDGIvPgTebOWaH+xlRuqaHPhU0BmTEP+MtffzowVs9EQBUaO6LCky5e+fYQmcxXl68ANSAF/DQmp1EqppEU/TDW86rPMwoLCJZmIfC+XaAe5Z+PnwLV+DeOrBVtWdYWa8klazul6KqGHX8W6Z7WYMOoB9LpDfCzVnyDXOqCA+w2wbM2GuAUI7uH3A3Nuc/Z73esVF/qhN3CyImze/KOleoApwSRSjMXeb6oSpks1MvFGvN2lADMAtibu3cEfpC0glc+0YieVxc2J8TTQFVAhhSb+PYzohNdDR533ubSH5fikI2D8hiZmR1WSl1gWTol2eDkohCDmi5S+tqGOE1em0ZzJ/lpdfBhoJcwMYMA7dWp--YLXy4wFzNb8Zce8g--/4vINxtQJS/LT/9J9QoqKA=="
+import http_client
+from http_client import PermanentHTTPError
+from my_utils import get_proxies_for_url
+from runtime_paths import DATA_DIR, RESOURCE_DIR
+
+# 旧版本硬编码的 session cookie，仅作为「用户未做任何配置」时的兜底，保证开箱即用。
+# 过期后请通过环境变量 DANBOORU_COOKIE 或 env_config.json 的 danbooru_cookie 键配置
+# （值为完整 Cookie 头字符串，或仅 _danbooru2_session 的 token 本体）。
+_FALLBACK_COOKIE = "_danbooru2_session=dzlzD2gYvCdxOQfBzhHUpXyPWZdvd8kXWARK6n0KdX4VDPgzGj9sLOyHfTrMVFdFpaJLHAP3LfMiptyeQeiNGE1yNM8tY7IGQXtYV2u8aFKglH7khCVW8FVqurTZSNR25VdDBgoTBDzu9p/gTeTrazCCWzLRPlg7hglvs6F6Xmfd7VVN/Mb+HbA5y7HAykGYk9kXDOTbE5s/HTOvPZd3hT6t/WcVUL8VlEW0nv1aiJt2h0byWwJBgBDGIvPgTebOWaH+xlRuqaHPhU0BmTEP+MtffzowVs9EQBUaO6LCky5e+fYQmcxXl68ANSAF/DQmp1EqppEU/TDW86rPMwoLCJZmIfC+XaAe5Z+PnwLV+DeOrBVtWdYWa8klazul6KqGHX8W6Z7WYMOoB9LpDfCzVnyDXOqCA+w2wbM2GuAUI7uH3A3Nuc/Z73esVF/qhN3CyImze/KOleoApwSRSjMXeb6oSpks1MvFGvN2lADMAtibu3cEfpC0glc+0YieVxc2J8TTQFVAhhSb+PYzohNdDR533ubSH5fikI2D8hiZmR1WSl1gWTol2eDkohCDmi5S+tqGOE1em0ZzJ/lpdfBhoJcwMYMA7dWp--YLXy4wFzNb8Zce8g--/4vINxtQJS/LT/9J9QoqKA=="
+
+
+def _normalize_cookie(value):
+    value = (value or "").strip()
+    if not value:
+        return ""
+    # 用户只贴了 token 本体时自动补成完整 Cookie 头
+    if "=" not in value:
+        return f"_danbooru2_session={value}"
+    return value
+
+
+def _load_cookie():
+    """优先级：DANBOORU_COOKIE 环境变量 → DATA_DIR/env_config.json → 源码目录 env_config.json
+    → 内置兜底常量（首次使用打印一次警告）。"""
+    env_cookie = os.environ.get("DANBOORU_COOKIE", "").strip()
+    if env_cookie:
+        return _normalize_cookie(env_cookie)
+    for base in (DATA_DIR, RESOURCE_DIR):
+        cfg_path = os.path.join(str(base), "env_config.json")
+        if os.path.exists(cfg_path):
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                val = (cfg.get("danbooru_cookie") or "").strip() if isinstance(cfg, dict) else ""
+                if val:
+                    return _normalize_cookie(val)
+            except Exception:
+                pass
+    print("[danbooru_api] 未配置 danbooru_cookie，使用内置兜底 session（过期后请在 env_config.json 配置）。")
+    return _FALLBACK_COOKIE
+
+
+COOKIES = _load_cookie()
+
+# 实测（2026-09）：对 safebooru/danbooru 而言，这个 Firefox UA 是 200 的必要条件 ——
+# 纯 chrome120 指纹默认头 / 显式 Chrome UA 都吃 403，Firefox UA + chrome TLS 指纹反而通过。
+# 虽与 TLS 指纹「不一致」，以实际可用性为准，保留；不要为了洁癖删掉。
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0"
 
 
@@ -39,6 +84,8 @@ def set_safe_mode(safe: bool):
     global _HOST, HEADERS
     _HOST = HOST_SAFE if safe else HOST_FULL
     HEADERS["Referer"] = f"https://{_HOST}/posts"
+    # host 变了，池化的 keep-alive 连接（SNI/证书）不能复用
+    http_client.reset_sessions()
 
 def post_url(post_id):
     return f"https://{_HOST}/posts/{post_id}"
@@ -96,11 +143,14 @@ def set_proxy_mode(use_proxy: bool):
     global PROXIES
     if not use_proxy:
         PROXIES = {}
+        # 代理变更后旧连接全部作废（否则 session 池会继续走死代理的 keep-alive 连接）
+        http_client.reset_sessions()
         return {"use_proxy": False, "proxies": {}, "alive": True}
     proxies = get_proxies_for_url(f"https://{_HOST}")
     if not proxies:
         proxies = {"http": DEFAULT_PROXY, "https": DEFAULT_PROXY}
     PROXIES = proxies
+    http_client.reset_sessions()
     return {"use_proxy": True, "proxies": proxies, "alive": _proxy_alive(proxies)}
 
 
@@ -109,11 +159,15 @@ def get_proxy_state():
     return {"use_proxy": bool(PROXIES), "proxies": PROXIES, "alive": _proxy_alive(PROXIES)}
 
 def check_proxy_simple():
+    # 探活只发一次（retries=0），不允许退避重试把死代理检查拖到几十秒
     url = f"https://{_HOST}"
     try:
-        resp = requests.get(url, timeout=10, proxies=PROXIES, headers=HEADERS, impersonate="chrome120")
+        resp = http_client.request(
+            "GET", url, kind="cdn", retries=0, timeout=10,
+            proxies=PROXIES, headers=HEADERS,
+        )
         return resp.status_code == 200
-    except:
+    except Exception:
         return False
 
 def get_posts_by_rank(page, limit=20, timeout=20):
@@ -126,15 +180,13 @@ def get_posts_by_rank(page, limit=20, timeout=20):
         "limit": limit,
         "tags": "order:rank"
     }
-    r = requests.get(
-        f"https://{_HOST}/posts.json",
-        params=params,
-        headers=HEADERS,
-        proxies=PROXIES,
-        impersonate="chrome120",
-        timeout=timeout
+    r = http_client.request(
+        "GET", f"https://{_HOST}/posts.json",
+        kind="json", retries=4, timeout=timeout,
+        params=params, headers=HEADERS, proxies=PROXIES,
+        permanent=http_client.LIST_PERMANENT_STATUS,
+        limiter=http_client.danbooru_limiter,
     )
-    r.raise_for_status()
     return r.json()
 
 def get_popular_posts(date_str, page, scale="day", timeout=20):
@@ -143,15 +195,29 @@ def get_popular_posts(date_str, page, scale="day", timeout=20):
         "page": page,
         "scale": scale
     }
-    r = requests.get(
-        f"https://{_HOST}/explore/posts/popular.json",
-        params=params,
-        headers=HEADERS,
-        proxies=PROXIES,
-        impersonate="chrome120",
-        timeout=timeout
+    r = http_client.request(
+        "GET", f"https://{_HOST}/explore/posts/popular.json",
+        kind="json", retries=4, timeout=timeout,
+        params=params, headers=HEADERS, proxies=PROXIES,
+        permanent=http_client.LIST_PERMANENT_STATUS,
+        limiter=http_client.danbooru_limiter,
     )
-    r.raise_for_status()
+    return r.json()
+
+
+def get_viewed_posts(date_str, page, timeout=20):
+    """explore/posts/viewed（某日浏览量榜）一页，JSON 形式，和 popular 同一套 host/代理/限流。"""
+    params = {
+        "date": date_str,
+        "page": page,
+    }
+    r = http_client.request(
+        "GET", f"https://{_HOST}/explore/posts/viewed.json",
+        kind="json", retries=4, timeout=timeout,
+        params=params, headers=HEADERS, proxies=PROXIES,
+        permanent=http_client.LIST_PERMANENT_STATUS,
+        limiter=http_client.danbooru_limiter,
+    )
     return r.json()
 
 
@@ -164,15 +230,13 @@ def get_posts_by_tags(tags, page, limit=20, timeout=20):
         "tags": tags,
         "limit": limit,
     }
-    r = requests.get(
-        f"https://{_HOST}/posts.json",
-        params=params,
-        headers=HEADERS,
-        proxies=PROXIES,
-        impersonate="chrome120",
-        timeout=timeout,
+    r = http_client.request(
+        "GET", f"https://{_HOST}/posts.json",
+        kind="json", retries=4, timeout=timeout,
+        params=params, headers=HEADERS, proxies=PROXIES,
+        permanent=http_client.LIST_PERMANENT_STATUS,
+        limiter=http_client.danbooru_limiter,
     )
-    r.raise_for_status()
     return r.json()
 
 
@@ -258,17 +322,13 @@ def get_wiki(name, timeout=10):
     """
     encode_tag = urllib.parse.quote(name, safe='')
     url = f"https://{_HOST}/wiki_pages.json?search[title]={encode_tag}"
-    proxies = PROXIES  # 跟随运行时代理开关（set_proxy_mode），与其余请求保持一致
     try:
-        resp = requests.get(
-            url,
-            timeout=timeout,
-            proxies=proxies,
-            headers=HEADERS,
-            impersonate="chrome120",
+        resp = http_client.request(
+            "GET", url,
+            kind="json", retries=3, timeout=timeout,
+            headers=HEADERS, proxies=PROXIES,
+            limiter=http_client.danbooru_limiter,
         )
-        if resp.status_code != 200:
-            return []
         data = resp.json()
         return data if isinstance(data, list) else []
     except Exception as e:
@@ -284,31 +344,22 @@ def fetch_data_with_retry(post_id, retries=5, delay=3, timeout=10):
     - 瞬时错误（429/5xx/超时/连接错）：仍按 retries × delay 重试；耗尽后返回 None。
     """
     url = f'https://{_HOST}/posts/{post_id}.json'
-    PERMANENT_STATUS = {403, 404, 410, 451}
-    attempt = 0
-    while attempt < retries:
-        try:
-            r = requests.get(
-                url,
-                headers=HEADERS,
-                proxies=PROXIES,
-                impersonate="chrome120",
-                timeout=timeout
-            )
-            if r.status_code in PERMANENT_STATUS:
-                # 永久错误：不再重试，不再伪装成 None 让人误以为是瞬时失败
-                raise PermanentPostError(post_id, r.status_code)
-            r.raise_for_status()
-            return r.json()
-        except PermanentPostError:
-            # 自己抛的，往上传，不算「重试次数」
-            raise
-        except Exception as e:
-            attempt += 1
-            print(f"请求ID {post_id} 失败 ({attempt}/{retries}): {e}")
-            if attempt < retries:
-                sleep(delay)
-    return None
+    try:
+        r = http_client.request(
+            "GET", url,
+            kind="json", retries=retries, timeout=timeout,
+            headers=HEADERS, proxies=PROXIES,
+            # delay=3 的旧节奏近似为：首退避 ~1.5s，之后指数增长
+            base_delay=max(1.0, delay / 2),
+            limiter=http_client.danbooru_limiter,
+        )
+        return r.json()
+    except PermanentHTTPError as e:
+        # 永久错误：不再重试，不再伪装成 None 让人误以为是瞬时失败
+        raise PermanentPostError(post_id, e.status_code)
+    except Exception as e:
+        print(f"请求ID {post_id} 失败（重试 {retries} 次仍失败）: {e}")
+        return None
 
 def download_image(url, folder, custom_print=print, retries=3, delay=3, raise_on_transient=False):
     """下载单张图片。瞬时错误（超时 / 连接错误 / 429 / 5xx）内部重试 retries 次。
@@ -324,29 +375,25 @@ def download_image(url, folder, custom_print=print, retries=3, delay=3, raise_on
         custom_print(f"文件已存在: {filename}")
         return filename
 
-    PERMANENT = {403, 404, 410, 451}
-    attempt = 0
-    while attempt < retries:
-        attempt += 1
-        try:
-            custom_print(f"正在下载: {filename} ...")
-            r = requests.get(url, timeout=30, proxies=PROXIES, headers=HEADERS, impersonate="chrome120")
-            if r.status_code == 200:
-                with open(filepath, 'wb') as f:
-                    f.write(r.content)
-                custom_print(f"下载完成: {filename}")
-                return filename
-            if r.status_code in PERMANENT:
-                custom_print(f"下载失败(已删除/不可用 {r.status_code}): {url}")
-                return None
-            # 其余状态码（429 / 5xx 等）视为瞬时，重试
-            custom_print(f"下载失败(状态码 {r.status_code})，第 {attempt}/{retries} 次: {url}")
-        except Exception as e:
-            custom_print(f"下载出错(网络)，第 {attempt}/{retries} 次: {e}")
-        if attempt < retries:
-            sleep(delay)
-    if raise_on_transient:
-        raise TransientImageError(f"图片下载重试 {retries} 次仍失败: {filename}")
-    custom_print(f"下载失败(网络，重试 {retries} 次仍失败): {filename}")
-    return None
+    try:
+        custom_print(f"正在下载: {filename} ...")
+        # CDN 下载不过令牌桶（保持每线程 sleep(1) 的既有节奏），重试读 Retry-After
+        r = http_client.request(
+            "GET", url,
+            kind="cdn", retries=retries, timeout=30,
+            headers=HEADERS, proxies=PROXIES,
+            base_delay=delay,
+        )
+        with open(filepath, 'wb') as f:
+            f.write(r.content)
+        custom_print(f"下载完成: {filename}")
+        return filename
+    except PermanentHTTPError as e:
+        custom_print(f"下载失败(已删除/不可用 {e.status_code}): {url}")
+        return None
+    except Exception as e:
+        custom_print(f"下载失败(网络，重试 {retries} 次仍失败)，第 {retries}/{retries} 次: {e}")
+        if raise_on_transient:
+            raise TransientImageError(f"图片下载重试 {retries} 次仍失败: {filename}")
+        return None
 

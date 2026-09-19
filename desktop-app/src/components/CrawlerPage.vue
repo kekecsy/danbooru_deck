@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch, nextTick } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import GalleryCalendar from './GalleryCalendar.vue';
 import TaskDatePicker from './TaskDatePicker.vue';
 import TutorialsModal from './crawler/TutorialsModal.vue';
@@ -117,6 +117,41 @@ function openDownloadByIdsMode() {
   form.value.dateRange = false;
   popularAction.value = 'download_by_ids';
 }
+// 左侧任务日历「前往」：任务日期与画廊解耦后，用这个按钮按需把右侧画廊显式跳到选中日期
+function onTaskDateJump(date) {
+  if (date) loadGallery(date);
+}
+// 右侧画廊日历「同步左」：把画廊当前日期反向灌进左侧任务日期。
+// - 不在日期热门模式时先切到日期热门（单日），否则左侧没有日期控件可同步；
+//   selectTaskMode 会顺带退出可能残留的按ID 子态。
+// - 单日模式直接写 targetDate；范围模式按「先填起、再填止、都有则覆盖起」的直觉顺序。
+function onGallerySyncTaskDate(date) {
+  if (!ISO_DATE.test(date)) return;
+  if (form.value.mode !== 'popular') {
+    selectTaskMode('popular');
+    form.value.dateRange = false;
+    form.value.targetDate = date;
+    return;
+  }
+  if (form.value.dateRange) {
+    if (!form.value.startDate) {
+      form.value.startDate = date;
+    } else if (!form.value.endDate || form.value.endDate < date) {
+      form.value.endDate = date;
+    } else {
+      form.value.startDate = date;
+    }
+  } else {
+    form.value.targetDate = date;
+  }
+}
+// 点模式 chip 的统一入口。按ID下载是只能从工具按钮进入的 popular 子态：
+// 不在这里清掉的话，① 已在按ID 时点「日期热门」—— mode 赋了相同的值，watcher 不触发，
+// 界面永远留在按ID；② 绕道排行榜/标签再回日期热门 —— watcher 不管 popularAction，又落回按ID。
+function selectTaskMode(mode) {
+  if (popularAction.value === 'download_by_ids') popularAction.value = 'download';
+  form.value.mode = mode;
+}
 // 「按ID下载」子操作迁移到 popularAction 下后，全局条件统一走这个 computed：
 // 包括日期同步、ID 粘贴区、下载策略行、resolveActualMode 等。
 // 放在 popularAction 后面、下面的 form↔gallery watch 前面：
@@ -138,9 +173,7 @@ watch(downloadConcurrency, (v) => {
 });
 
 watch(() => form.value.mode, (newMode) => {
-  // 切 mode 会触发 applyDefaultDatesForMode 默认填"画廊日期 / 昨天"，
-  // 这一帧内的 form 变化不应再触发 form→gallery 同步。
-  isModeSwitching = true;
+  // 切 mode 时 applyDefaultDatesForMode 会给 popular 的空日期补"昨天"
   if (newMode === 'rank') {
     form.value.startPage = habits.rank_start || 1;
     form.value.endPage = habits.rank_end || 16;
@@ -154,7 +187,6 @@ watch(() => form.value.mode, (newMode) => {
   applyDefaultDatesForMode(newMode);
   recentStartPages.value = loadRecentPages(newMode, 'start');
   recentEndPages.value = loadRecentPages(newMode, 'end');
-  nextTick(() => { isModeSwitching = false; });
 });
 
 // ---------------- 日期工具 + 「默认昨天」 ----------------
@@ -186,22 +218,19 @@ function dateTokenLabel(v) {
   if (v === '@today') return `今天(${todayString()})`;
   return v || '今天';
 }
+// 日期热门日历的可选上限：昨天（当天榜单不完整，今天/未来一律置灰）
+const POPULAR_MAX_DATE = yesterdayString();
+
 function applyDefaultDatesForMode(mode) {
-  if (mode === 'popular') {
-    // 切到「日期热门」时优先用画廊当前选中日期作为默认目标日期；
-    // 画廊为空 / 是 tag 文件夹时才回退到昨天。修复用户报修的"日期热门目标日期
-    // 不跟随画廊日历"问题——之前无条件写 yesterday 会和画廊当前日期错位，
-    // 必须先点画廊的"上一天/下一天"才能让 gallery→form watch 把 form 拉回画廊日期。
-    // 用局部 regex 不用 ISO_DATE：ISO_DATE 在文件靠后位置才声明，避免 TDZ 报错。
-    const galleryDate = gallery.value.selectedDate;
-    const galleryHasDate = !!galleryDate && /^\d{4}-\d{2}-\d{2}$/.test(galleryDate);
-    const defaultDate = galleryHasDate ? galleryDate : yesterdayString();
-    if (form.value.dateRange) {
-      if (!form.value.startDate) form.value.startDate = defaultDate;
-      if (!form.value.endDate) form.value.endDate = defaultDate;
-    } else if (!form.value.targetDate) {
-      form.value.targetDate = defaultDate;
-    }
+  if (mode !== 'popular') return;
+  // 日期热门的任务日期与右侧画廊完全独立：空值一律默认昨天
+  // （用户每日例行：排行榜跑完后下载昨天的热门）。画廊停在哪天不影响这里。
+  const defaultDate = yesterdayString();
+  if (form.value.dateRange) {
+    if (!form.value.startDate) form.value.startDate = defaultDate;
+    if (!form.value.endDate) form.value.endDate = defaultDate;
+  } else if (!form.value.targetDate) {
+    form.value.targetDate = defaultDate;
   }
 }
 
@@ -232,20 +261,14 @@ function pushRecentPage(mode, field, value) {
   }
 }
 
-function applyRecentPage(field, value) {
-  if (field === 'start') form.value.startPage = value;
-  else form.value.endPage = value;
-}
-
 // 「补全/补齐」子操作专属：原实现硬编码 50 页（用户已确认这是合理默认）。
-// 切到该子操作时，若 endPage<50 提到 50（不覆盖用户主动设的更大值），
-// 保持与原 `recoverPopular()` 函数行为一致。
-function onPickPopularRecover() {
-  popularAction.value = 'recover';
-  if ((Number(form.value.endPage) || 0) < 50) {
+// 切到该子操作时，若 endPage<50 提到 50（不覆盖用户主动设的更大值）。
+// 现在动作选择器是下拉框，统一用 watch 覆盖任何入口。
+watch(popularAction, (v) => {
+  if (v === 'recover' && (Number(form.value.endPage) || 0) < 50) {
     form.value.endPage = 50;
   }
-}
+});
 
 // 「按ID下载」子操作专属：仅在单日模式有效，UI 上对应按钮 v-if 隐藏；
 // 这里再多一道防御：watch dateRange=true 时若 popularAction 落在单日专属的子操作
@@ -255,20 +278,19 @@ watch(() => form.value.dateRange, (newVal) => {
   if (newVal && (popularAction.value === 'recover' || popularAction.value === 'download_by_ids')) {
     popularAction.value = 'download';
   }
-});
-
-function deleteRecentPage(mode, field, value) {
-  const rp = { ...(habits.recentPages || {}) };
-  const prev = rp[mode] && Array.isArray(rp[mode][field]) ? rp[mode][field] : [];
-  const cur = prev.filter(v => v !== value);
-  rp[mode] = { ...(rp[mode] || {}), [field]: cur };
-  habits.recentPages = rp;
-  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
-  if (mode === form.value.mode) {
-    if (field === 'start') recentStartPages.value = cur;
-    else recentEndPages.value = cur;
+  // popular 下单日 ⇄ 范围互切：日期相互带过去，保证三个日历"说的是同一天"：
+  // 单日→范围：起始日沿用单日所选日，结束日补昨天；范围→单日：沿用起始日。
+  // 用户已经显式填过的值不覆盖（只补空）。任务日期与画廊独立。
+  if (form.value.mode === 'popular') {
+    const fallback = yesterdayString();
+    if (newVal) {
+      if (!form.value.startDate) form.value.startDate = form.value.targetDate || fallback;
+      if (!form.value.endDate) form.value.endDate = fallback;
+    } else if (!form.value.targetDate) {
+      form.value.targetDate = form.value.startDate || fallback;
+    }
   }
-}
+});
 
 // 过滤标签单独写一个 watcher，确保即使用户清空成 "" 也立刻写盘
 watch(() => form.value.tags, (v) => {
@@ -318,11 +340,8 @@ const gallery = ref({
   // 至少含一个默认项 { id: 'default', label: 'hot_pic', path: <绝对路径> }，外置盘按 library_roots.json 追加
   libraryRoots: []
 });
-// 初始模式若是 popular，进来就把日期填成昨天 / 画廊日期。
-// 必须在 gallery 定义之后调：函数体内访问 gallery.value.selectedDate，
-// const 在 TDZ 阶段会抛 ReferenceError。
+// 初始模式若是 popular，进来就把空日期填成昨天（与画廊日期无关）。
 applyDefaultDatesForMode(form.value.mode);
-const showGalleryPanel = ref(habits.showGalleryPanel !== false);
 
 watch(() => [gallery.value.sortBy, gallery.value.cardSize, gallery.value.thumbSize, gallery.value.refreshOnView, gallery.value.pageSize], () => {
   habits.sortBy = gallery.value.sortBy;
@@ -333,31 +352,20 @@ watch(() => [gallery.value.sortBy, gallery.value.cardSize, gallery.value.thumbSi
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
 });
 
-watch(showGalleryPanel, (value) => {
-  habits.showGalleryPanel = value;
-  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
-});
-
-// ---------------- form ↔ gallery 双向日期同步 ----------------
-// 目标：日期热门 / 日期范围 / 按ID下载 的目标日期 和 右侧 GalleryCalendar 当前日期 联动。
-// 选一边改，另一边跟着跳；省去"下载较早年份时两边都要选"的来回。
-//
-// 防回环：任一方向写入后，另一方向 watch 触发时先比值，值已一致就直接 return，
-// 不会出现 A→B→A→B 死循环。
-//
-// popular_range 驱动侧用 startDate（"下载较早年份" 的目标日就是区间起点）；
-// tags / rank / collect_ids 不参与同步。
+// ---------------- gallery → form 的单向日期跟随 ----------------
+// 抓图任务日期（排行榜无日期 / 日期热门 / 日期范围 / 按ID下载）与右侧画廊**完全独立**：
+// 右画廊随便切日期不会改任务日期，任务日期面板里选日期也不跳画廊——
+// 任务完成后的画廊跳转在 pollStatus 完成分支统一处理。
+// 唯一仍然跟随右画廊的是：Tag 浏览 footer 的日期（用户没显式覆盖时）。
 //
 // 位置注意：必须放在 gallery ref 定义之后。
 // watch 注册时会立即调一次 getter 建立依赖；若 gallery 还在 TDZ 会抛
 // "Cannot access 'gallery' before initialization"，整个组件挂载失败。
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-let isModeSwitching = false;
 
 // 右侧 GalleryCalendar → 左侧 form
 watch(() => gallery.value.selectedDate, (newDate) => {
   if (!newDate) return;
-  const mode = form.value.mode;
   // Tag browse has its own date picker, but it should follow the gallery date
   // until the user explicitly overrides it in the browse footer.
   if (
@@ -372,93 +380,33 @@ watch(() => gallery.value.selectedDate, (newDate) => {
     browse.value.targetDate = newDate;
     browse.value.galleryTargetDate = newDate;
   }
-  // 「按ID下载」子操作：目标日期跟随右侧 GalleryCalendar，
-  // 同时主动 fetch 新日期 folder 的待下载 ID 写回 idsText，
-  // 解决"切到 B 日期 → 粘贴区仍是 A 的 ID"这个频繁补日期的痛点。
-  // 必须放在最前面：原版 if/else if 链在 popular+单日 模式下第一个分支先匹配，
-  // 导致这里成 dead code，「按ID下载」状态下切日期只会改 targetDate、不会同步 idsText，
-  // 出现"日期 A 的 IDs 被下载到日期 B folder"的跨日期污染。
-  if (isDownloadByIdsMode.value) {
-    if (form.value.targetDate !== newDate) {
-      form.value.targetDate = newDate;
-      fetchCollectedIdsForDate(newDate, {
-        onSuccess: (fetchedDate, payload) => {
-          // 防竞态：用户在 fetch 期间又切了日期 → 丢弃过期结果，让新日期的 watch 接管
-          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
-          form.value.idsText = payload.ids.join('\n');
-          showToast(`已加载 ${fetchedDate} 的 ${payload.ids.length} 个待下载 ID`, 'success');
-        },
-        onEmpty: (fetchedDate) => {
-          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
-          form.value.idsText = '';
-          showToast(`${fetchedDate} folder 没有待下载 ID，可粘贴自定义 ID`, 'info');
-        },
-        onError: (fetchedDate, err) => {
-          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
-          showToast(`加载 ${fetchedDate} 的 ID 失败：${err.message}`, 'error');
-        },
-      });
-    }
-    return;
-  }
-  if (mode === 'popular' && !form.value.dateRange) {
-    if (form.value.targetDate !== newDate) form.value.targetDate = newDate;
-  } else if (mode === 'popular' && form.value.dateRange) {
-    if (form.value.startDate !== newDate) form.value.startDate = newDate;
-  }
+  // popular（日期热门 / 日期范围 / 按ID下载）任务日期全部独立，不随画廊移动
 });
 
-// 左侧 TaskDatePicker → 右侧 gallery
-watch(() => [form.value.targetDate, form.value.startDate], ([newTarget, newStart]) => {
-  if (isModeSwitching) return;
-  const mode = form.value.mode;
-  if (mode === 'popular') {
-    const candidate = form.value.dateRange ? newStart : newTarget;
-    if (candidate && ISO_DATE.test(candidate) && candidate !== gallery.value.selectedDate) {
-      loadGallery(candidate);
-    }
-  } else if (isDownloadByIdsMode.value) {
-    // 「按ID下载」目前没有自己的日期选择器，targetDate 由右侧 gallery 同步过来；
-    // 这里保持单一来源：不再反向写 gallery，避免与上面 watch 互相回环。
-  }
-});
-
-// 切到「按ID下载」组合时，主动把 form.targetDate 校准成 gallery 当前日期。
-// 场景：用户先在 popular 模式选过日期，form.targetDate 残留了 popular 的值，
-// 然后切到 popular+按ID下载 — gallery 没动，上面的 watch 不会触发，
-// 残留值会让提示文案/hint 指向错误 folder。watcher 注册时会立即跑一次，
-// 所以打开页面直接落在该组合时也会被校准到 gallery 的当前日期。
-watch([() => form.value.mode, rankAction, popularAction], () => {
-  // 复用一个助手：gallery 校准 + 拉取并回填 idsText（防竞态）
-  const calibrateAndFetch = () => {
-    const galleryDate = gallery.value.selectedDate;
-    if (galleryDate && galleryDate !== form.value.targetDate) {
-      form.value.targetDate = galleryDate;
-    }
-    const target = (form.value.targetDate || '').trim();
-    if (target) {
-      fetchCollectedIdsForDate(target, {
-        onSuccess: (fetchedDate, payload) => {
-          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
-          form.value.idsText = payload.ids.join('\n');
-          showToast(`已加载 ${fetchedDate} 的 ${payload.ids.length} 个待下载 ID`, 'success');
-        },
-        onEmpty: (fetchedDate) => {
-          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
-          form.value.idsText = '';
-          showToast(`${fetchedDate} folder 没有待下载 ID，可粘贴自定义 ID`, 'info');
-        },
-        onError: (fetchedDate, err) => {
-          if ((form.value.targetDate || '').trim() !== fetchedDate) return;
-          showToast(`加载 ${fetchedDate} 的 ID 失败：${err.message}`, 'error');
-        },
-      });
-    }
-  };
-  // 「按ID下载」组合（已迁到 popular 下）
-  if (isDownloadByIdsMode.value) {
-    calibrateAndFetch();
-  }
+// 「按ID下载」日期独立后：进入该子操作、或在该子操作里改目标日期时，
+// 主动 fetch 目标 folder 的待下载 ID 回填 idsText，
+// 解决"日期选到 B → 粘贴区还是 A 的 ID"导致的跨日期下载污染。
+// 防竞态：回调里比对当前 targetDate，用户快速切日期时丢弃过期结果。
+watch([isDownloadByIdsMode, () => form.value.targetDate], ([byIds]) => {
+  if (!byIds) return;
+  const target = (form.value.targetDate || '').trim();
+  if (!target) return;
+  fetchCollectedIdsForDate(target, {
+    onSuccess: (fetchedDate, payload) => {
+      if (!isDownloadByIdsMode.value || (form.value.targetDate || '').trim() !== fetchedDate) return;
+      form.value.idsText = payload.ids.join('\n');
+      showToast(`已加载 ${fetchedDate} 的 ${payload.ids.length} 个待下载 ID`, 'success');
+    },
+    onEmpty: (fetchedDate) => {
+      if (!isDownloadByIdsMode.value || (form.value.targetDate || '').trim() !== fetchedDate) return;
+      form.value.idsText = '';
+      showToast(`${fetchedDate} folder 没有待下载 ID，可粘贴自定义 ID`, 'info');
+    },
+    onError: (fetchedDate, err) => {
+      if (!isDownloadByIdsMode.value || (form.value.targetDate || '').trim() !== fetchedDate) return;
+      showToast(`加载 ${fetchedDate} 的 ID 失败：${err.message}`, 'error');
+    },
+  });
 }, { immediate: true });
 
 const task = ref({
@@ -480,6 +428,13 @@ const task = ref({
   // 让用户在不点击失败横幅时也能直观看到「当前已经有 N 页抓失败」，配 runningPhaseText 一起渲染。
   runningFailedPages: 0,
   runningFailedIds: 0,
+  // 最近一次/当前 job 的 scope 快照（/api/status 透出）：恢复按钮据此重建请求，
+  // 不用当前 form 的 tag/日期，避免「任务跑 A、恢复时 form 已切到 B」的误命中。
+  targetFolder: '',
+  tagQuery: '',
+  tagSource: 'danbooru',
+  filterTags: [],
+  cursor: null,             // 收 ID 阶段页断点 {mode,page,start_page,end_page,...}
   backendError: '',
   backendErrorExpanded: false,
   backendTail: []
@@ -542,6 +497,178 @@ function showRetryPagesHint(report) {
 function dismissRetryPagesHint() {
   if (retryPagesHint.value.signature) dismissedHintSignatures.add(retryPagesHint.value.signature);
   retryPagesHint.value = { show: false, signature: '', pages: [], text: '' };
+}
+
+// ===== 任务结束后的断点恢复横幅 =====
+// 两个动作（对应"限流原地暂停"方案的收尾 UI）：
+//  ① 从第 N 页续跑：收 ID 阶段被停止时 page_cursor 留在最后一页，一键以原 mode/日期/tag
+//     发起 N–原末页任务，不必再手动改页码新建任务。
+//  ② 重试失败页：永久错误（400/403/404）跳过的页，一键走 pages=[...] 定向重试。
+// 数据快照必须在完成那一刻抓住 —— job 在注册表里只保留 30s，之后 /api/status 不再给
+// mode/tag_query 等字段。重启 App 后用 checkRecoveryForCurrentScope() 走
+// /api/recovery_state（直读 deck.db）找回。
+// page_cursor 续跑支持的 mode（普通页范围任务）
+const RECOVERY_MODES = new Set(['rank', 'collect_ids', 'popular', 'popular_collect_ids', 'tags']);
+// pages=[...] 定向重试支持的 mode：比续跑多一个 popular_recover（补全/补齐的 pages_list）
+const RETRY_PAGES_MODES = new Set([...RECOVERY_MODES, 'popular_recover']);
+const RECOVERY_MODE_LABELS = {
+  rank: '排行榜', collect_ids: '排行榜·仅收集ID',
+  popular: '日期热门', popular_collect_ids: '日期热门·仅收集ID', tags: 'Tag下载',
+  popular_recover: '日期热门·补全/补齐',
+};
+function recoveryModeLabel(mode) {
+  return RECOVERY_MODE_LABELS[mode] || mode || '';
+}
+const recoveryBanner = ref({
+  show: false,
+  cursor: null,        // {mode,page,start_page,end_page,...}
+  failedPages: [],     // number[]
+  scope: { folder: '', mode: '', tagQuery: '', tagSource: 'danbooru', filterTags: [] },
+});
+
+function dismissRecoveryBanner() {
+  recoveryBanner.value = {
+    show: false, cursor: null, failedPages: [],
+    scope: { folder: '', mode: '', tagQuery: '', tagSource: 'danbooru', filterTags: [] },
+  };
+}
+
+// 用完成时快照填横幅；同一 job 的完成块只触发一次（syncStatusOnce 的 wasActive 边沿保证）
+function populateRecoveryBanner(status) {
+  const scope = {
+    folder: status.target_folder || '',
+    mode: status.mode || '',
+    tagQuery: status.tag_query || '',
+    tagSource: status.tag_source || 'danbooru',
+    filterTags: Array.isArray(status.filter_tags) ? status.filter_tags : [],
+  };
+  // pages=[...] 定向重试只有单日页循环 mode 支持（popular_range/日期范围不支持）
+  const failedPages = !RETRY_PAGES_MODES.has(scope.mode) ? [] : [...new Set(
+    (Array.isArray(status.failed_pages) ? status.failed_pages : [])
+      .filter(e => e && (e.folder || '') === scope.folder)
+      .map(e => Number(e.page))
+      .filter(n => Number.isInteger(n) && n > 0)
+  )].sort((a, b) => a - b);
+  // cursor 只在「主动停止 + 支持的 mode」时作为续跑入口；自然完成后端已清游标
+  const cursor = status.outcome === 'stopped' && scope.mode && RECOVERY_MODES.has(scope.mode)
+    ? (status.cursor || null)
+    : null;
+  if (!cursor && !failedPages.length) return;
+  recoveryBanner.value = { show: true, cursor, failedPages, scope };
+}
+
+function _recoveryPayloadBase(scope) {
+  return {
+    tags: (scope.filterTags || []).join(','),
+    target_date: '',
+    start_date: '',
+    end_date: '',
+    tag_query: scope.tagQuery || '',
+    tag_source: scope.tagSource || 'danbooru',
+    download_concurrency: downloadConcurrency.value,
+  };
+}
+
+async function _startRecovery(payload, label) {
+  if (task.value.isRunning || task.value.isStopping || queueRunning.value) {
+    showToast('有任务正在运行，请先停止', 'info');
+    return;
+  }
+  try {
+    const result = await window.desktopAPI.crawler.start(payload);
+    if (result?.ok === false) {
+      showToast(result.msg || '恢复启动失败', 'error');
+      appendLog(`[恢复] ${label}启动失败：${result.msg || ''}`);
+      return;
+    }
+    appendLog(`[恢复] ${label}：${result.msg || '已启动'}`);
+    // 旧横幅收起：重跑过程中新失败会重新累计，结束后再弹新横幅
+    dismissRecoveryBanner();
+    await syncStatus();
+  } catch (error) {
+    showToast(`恢复启动失败：${error.message}`, 'error');
+    appendLog(`[恢复] ${label}启动异常：${error.message}`);
+  }
+}
+
+async function resumeFromCursor() {
+  const b = recoveryBanner.value;
+  if (!b.cursor) return;
+  const payload = {
+    ..._recoveryPayloadBase(b.scope),
+    mode: b.cursor.mode,
+    start_page: Number(b.cursor.page) || 1,
+    end_page: Number(b.cursor.end_page) || Number(b.cursor.page) || 1,
+  };
+  if (payload.mode === 'popular' || payload.mode === 'popular_collect_ids') {
+    payload.target_date = b.scope.folder;  // popular 的 folder 就是目标日期
+  }
+  await _startRecovery(payload, `从第 ${payload.start_page} 页续跑（到第 ${payload.end_page} 页）`);
+}
+
+async function retryFailedPages() {
+  const b = recoveryBanner.value;
+  if (!b.failedPages.length) return;
+  const pages = [...b.failedPages].sort((a, z) => a - z);
+  const payload = {
+    ..._recoveryPayloadBase(b.scope),
+    mode: b.scope.mode,
+    pages,                                   // 定向重试：后端只抓这些页，忽略区间
+    start_page: pages[0],                    // 仅给日志/页进度兜底
+    end_page: pages[pages.length - 1],
+  };
+  if (['popular', 'popular_collect_ids', 'popular_recover'].includes(payload.mode)) {
+    payload.target_date = b.scope.folder;    // popular 系 folder 就是目标日期
+  }
+  await _startRecovery(payload, `重试失败页 ${pages.join(',')}`);
+}
+
+// 重启 App / job 已离开注册表后：按当前表单配置的 scope 直查 deck.db 找回断点。
+async function checkRecoveryForCurrentScope() {
+  if (task.value.isRunning || task.value.isStopping || queueRunning.value) {
+    showToast('有任务正在运行', 'info');
+    return;
+  }
+  const params = {};
+  if (form.value.mode === 'tags') {
+    params.mode = 'tags';
+    params.tagQuery = form.value.tagQuery || '';
+    params.tagSource = form.value.tagSource || 'danbooru';
+    if (!params.tagQuery.trim()) { showToast('先填写 tag 查询串', 'info'); return; }
+  } else if (form.value.mode === 'popular' && !form.value.dateRange) {
+    params.mode = popularAction.value === 'collect_only'
+      ? 'popular_collect_ids'
+      : (popularAction.value === 'recover' ? 'popular_recover' : 'popular');
+    params.targetDate = (form.value.targetDate || '').trim();
+    if (!params.targetDate) { showToast('先选择目标日期', 'info'); return; }
+  } else if (form.value.mode === 'rank') {
+    params.mode = rankAction.value === 'collect_only' ? 'collect_ids' : 'rank';
+  } else {
+    showToast('当前模式不支持断点查询（仅排行榜/单日热门/Tag 下载）', 'info');
+    return;
+  }
+  try {
+    const r = await window.desktopAPI.crawler.recoveryState(params);
+    if (!r?.ok) { showToast(r?.msg || '查询失败', 'error'); return; }
+    if (!r.cursor && !(r.failed_pages || []).length) {
+      showToast('当前任务配置没有未完成的断点或失败页', 'info');
+      return;
+    }
+    recoveryBanner.value = {
+      show: true,
+      cursor: r.cursor || null,
+      failedPages: r.failed_pages || [],
+      scope: {
+        folder: r.folder || '',
+        mode: (r.cursor && r.cursor.mode) || params.mode,
+        tagQuery: r.tag_query || params.tagQuery || '',
+        tagSource: r.tag_source || params.tagSource || 'danbooru',
+        filterTags: [],  // deck.db 不存过滤 tag；重试沿用空过滤（原任务通常也不过滤）
+      },
+    };
+  } catch (error) {
+    showToast(`断点查询失败：${error.message}`, 'error');
+  }
 }
 const viewer = ref({
   open: false,
@@ -969,8 +1096,34 @@ const galleryStats = computed(() => {
   // 只保留总数 / 已筛选数；分数均/中位这类统计信息取消展示（右侧改放边框含义图例）
   const all = gallery.value.images;
   const filtered = filteredLocalImages.value;
-  return { total: all.length, filtered: filtered.length };
+  const byRoot = new Map();
+  for (const item of all) {
+    const key = item.libraryId || item.library_id || item.libraryRoot || 'default';
+    const current = byRoot.get(key) || {
+      key,
+      label: item.libraryLabel || item.library_label || key,
+      count: 0,
+    };
+    current.count += 1;
+    byRoot.set(key, current);
+  }
+  return {
+    total: all.length,
+    filtered: filtered.length,
+    roots: [...byRoot.values()].sort((a, b) => b.count - a.count),
+  };
 });
+
+function rootBreakdownText(items) {
+  const byRoot = new Map();
+  for (const item of items || []) {
+    const label = item.libraryLabel || item.library_label || item.libraryId || item.library_id || 'hot_pic';
+    byRoot.set(label, (byRoot.get(label) || 0) + 1);
+  }
+  return [...byRoot.entries()]
+    .map(([label, count]) => `${label} ${count}`)
+    .join(' / ');
+}
 
 // 输入框绑 searchInput 即时回显；显式提交（Enter / 搜索按钮 / 选历史 / 清空）才写回 gallery.search 真正参与过滤
 const searchInput = ref(gallery.value.search);
@@ -1523,9 +1676,22 @@ function closeMergeViewerDataModal() {
   }
 }
 
+async function onLibraryRootsChanged(roots) {
+  const next = Array.isArray(roots) ? roots : [];
+  gallery.value.libraryRoots = next;
+  mergeViewerDataModal.value.roots = next;
+  await reloadCurrentGallery();
+}
+
 async function onMergeViewerDataSuccess({ result, source }) {
+  const movedText = result.moved_count != null
+    ? `，移动 ${result.moved_count} 张`
+    : '';
+  const conflictText = result.move_conflict_count
+    ? `，冲突 ${result.move_conflict_count} 张未覆盖`
+    : '';
   showToast(
-    `合并完成：新增 ${result.merged_count} 条，已写入 ${result.target_path}`,
+    `合并完成：新增 ${result.merged_count} 条${movedText}${conflictText}，已写入 ${result.target_path}`,
     'success'
   );
   // 合并源是当前 gallery 对应的目录时，刷新图库让新数据可见
@@ -1632,6 +1798,12 @@ async function syncStatusOnce() {
     task.value.outcome = status.outcome || (status.is_running ? 'running' : 'idle');
     task.value.errorMessage = status.error_message || '';
     task.value.backendError = status.backendError || '';
+    // job scope 快照（job 离开注册表后这些字段不再返回，所以任务结束的恢复横幅只信完成帧）
+    task.value.targetFolder = status.target_folder || '';
+    task.value.tagQuery = status.tag_query || '';
+    task.value.tagSource = status.tag_source || 'danbooru';
+    task.value.filterTags = Array.isArray(status.filter_tags) ? status.filter_tags : [];
+    task.value.cursor = status.cursor || null;
 
     // 进度条数据：后端每帧回吐 {total, success, fail}；JobRegistry.primary() 保证新 job 启动时
     // 自动切到新 job，这里不用 prevJobId 兜底
@@ -1722,6 +1894,12 @@ async function syncStatusOnce() {
     }
 
     if (wasActive && !task.value.isRunning && !task.value.isStopping) {
+      // 断点恢复横幅：只在单任务路径自动弹（队列中途的失败页等队列跑完用「检查断点」）。
+      // 必须在本帧抓快照：job 注册表只保留 30s，之后 status 不再给 mode/tag 字段。
+      if (!queueRunning.value) populateRecoveryBanner(status);
+      // 运行期那条"手动配 pages 重新入队"的提示已被一键按钮取代，任务结束直接收掉
+      // （不记 dismiss，避免新 job 的同 signature 提示被永久压制）
+      retryPagesHint.value = { show: false, signature: '', pages: [], text: '' };
       if (status.outcome === 'error' || status.error_message) {
         showToast("抓取任务异常停止！", "error");
       } else if (status.outcome === 'stopped') {
@@ -1749,33 +1927,53 @@ async function syncStatusOnce() {
       } else {
         showToast("抓取任务已完成！", "success");
       }
-      // 只有「下载的日期 == 正在看的日期」才需要整盘 reload。下载 A 但在看 B 时，
-      // B 的盘上数据没变，reload 只会白白跳回第 1 页 + 重排，还会打断 B 正在进行的刷新。
-      // 复用上面 new_images 同款 target_folder 门控；preserveView=true 让同日期 reload
-      // 也保持当前页与排序快照（新图落末尾，等用户主动「重新排序」）。
-      // 同日期下走 reloadCurrentGallery（= 右侧「↻ 刷新图库」按钮），行为完全一致：
-      // 清 zip 缩略图、保留当前页、追加「已刷新 ... 新增 N 张」toast。tag / popular / 按ID下载
-      // 这三种 mode 的 target_date 都联动右侧画廊日期，命中这条分支即可。
+      // 下载落盘后的画廊处理：
+      //  - 「下载的日期 == 正在看的日期」→ 整盘 reload（= 右侧「↻ 刷新图库」按钮）；
+      //  - 日期类任务（排行榜/日期热门/日期范围等）完成在别的日期 → 跳过去看新图：
+      //    单任务立即跳；队列中只记录最后一个目标日期，等队列自然跑完再一次性跳，
+      //    避免队列中途把视图连续拽走。用户主动停止（stopped）/出错（error）不跳。
+      //  - tags / collect_ids / download_ids 等非 ISO 日期 folder 维持原行为：只刷索引。
       const finishedFolder = targetFolder;
-      if (finishedFolder && finishedFolder === gallery.value.selectedDate) {
+      const FOLDER_JUMP_MODES = new Set([
+        'rank', 'popular', 'popular_collect_ids', 'popular_recover',
+        'popular_range', 'popular_range_collect_ids', 'download_ids',
+      ]);
+      const canJumpFolder = !!finishedFolder
+        && ISO_DATE.test(finishedFolder)
+        && FOLDER_JUMP_MODES.has(status.mode)
+        && (status.outcome === 'completed' || status.outcome === 'completed_with_failures')
+        && finishedFolder !== gallery.value.selectedDate;
+      if (queueRunning.value) {
+        if (canJumpFolder) pendingFolderJump = finishedFolder;
+        if (finishedFolder && finishedFolder === gallery.value.selectedDate) {
+          await reloadCurrentGallery();
+        } else {
+          await refreshGalleryIndex(gallery.value.selectedDate);
+        }
+      } else if (canJumpFolder) {
+        // 跨日期跳转等同手动点该日期：第 1 页 + 重建排序快照
+        await loadGallery(finishedFolder);
+      } else if (finishedFolder && finishedFolder === gallery.value.selectedDate) {
         await reloadCurrentGallery();
       } else {
         await refreshGalleryIndex(gallery.value.selectedDate);
       }
-      // 「按ID下载」子操作 + 任务结束 + 下载目标 = 当前画廊日期：
+      // 「按ID下载」任务结束 + 下载目标 = 表单当前目标日期（已与画廊解耦）：
       // 主动重读 ids_data.json，把"已下载成功"的 ID（被 resolve_pending_id 移除）剔除，
-      // 剩下的写回 idsText，让用户切回表单能直接看到「还剩哪些没下」+ 一键重新入队。
-      // 防竞态：fetch 期间用户又切了日期 → 丢弃过期结果。
+      // 剩下的写回 idsText，让用户直接看到「还剩哪些没下」+ 一键重新入队。
+      // 防竞态：fetch 期间用户又切了日期/子操作 → 丢弃过期结果。
       // 不覆盖 'error'：任务异常时 ids_data.json 状态不可信，让用户自己决定下一步。
+      const byIdsTargetDate = (form.value.targetDate || '').trim();
       if (isDownloadByIdsMode.value
           && finishedFolder
-          && finishedFolder === gallery.value.selectedDate
+          && finishedFolder === byIdsTargetDate
           && (status.outcome === 'completed'
               || status.outcome === 'completed_with_failures'
               || status.outcome === 'stopped')) {
         fetchCollectedIdsForDate(finishedFolder, {
           onSuccess: (fetchedDate, payload) => {
-            if (gallery.value.selectedDate !== fetchedDate) return;
+            if (!isDownloadByIdsMode.value
+                || (form.value.targetDate || '').trim() !== fetchedDate) return;
             const before = (form.value.idsText || '').trim();
             form.value.idsText = payload.ids.join('\n');
             const after = (form.value.idsText || '').trim();
@@ -1788,7 +1986,8 @@ async function syncStatusOnce() {
             );
           },
           onEmpty: (fetchedDate) => {
-            if (gallery.value.selectedDate !== fetchedDate) return;
+            if (!isDownloadByIdsMode.value
+                || (form.value.targetDate || '').trim() !== fetchedDate) return;
             if ((form.value.idsText || '').trim()) {
               form.value.idsText = '';
               showToast(`任务完成，${fetchedDate} folder 已无可下载 ID`, 'info');
@@ -1847,6 +2046,7 @@ async function startTask() {
   // 避免把旧 job 的失败页带过来误导。新 job 跑出来的失败页会重新弹。
   retryPagesHint.value = { show: false, signature: '', pages: [], text: '' };
   dismissedHintSignatures.clear();
+  dismissRecoveryBanner();
   try {
     // resolveActualMode() 现在已统一处理 popular / popular_range / popular_*
     // 翻译，无需再在 startTask 内额外覆盖。
@@ -1935,6 +2135,16 @@ let _queueIdSeq = 0;
 const taskQueue = ref([]);          // [{id, mode, startPage, endPage, tags, targetDate, startDate, endDate, tagQuery, tagSource, idsText, label, status, error}]
 const queueRunning = ref(false);    // 整个队列是否在跑
 const queueAbort = ref(false);      // 停止队列的中断旗标
+// 队列面板默认折叠成一行标题（省左侧纵向空间），选择持久化到 habits
+const queueCollapsed = ref(habits.queueCollapsed !== false);
+function toggleQueueCollapsed() {
+  queueCollapsed.value = !queueCollapsed.value;
+  habits.queueCollapsed = queueCollapsed.value;
+  localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+}
+// 队列跑完后待跳转的画廊日期：pollStatus 在队列中只记录最后一个完成的日期类任务
+// 目标 folder，队列自然 drain 后才跳一次（见 runQueue 尾部）
+let pendingFolderJump = '';
 const queueSkipItemId = ref(null);  // 仅跳过当前项；与停止整个队列严格分开
 const queueIndex = ref(-1);         // 当前正在跑的项下标（-1 = 没在跑）
 const justAddedId = ref(null);      // 刚加入队列的项 id：驱动一次入场高亮脉冲
@@ -2252,7 +2462,9 @@ async function runQueue() {
   if (task.value.isRunning || task.value.isStopping) { showToast('已有任务在运行或收尾，请稍候', 'error'); return; }
   queueRunning.value = true;
   queueAbort.value = false;
+  dismissRecoveryBanner();
   queueSkipItemId.value = null;
+  pendingFolderJump = '';
   let okCount = 0, warningCount = 0, failCount = 0, skippedCount = 0;
   try {
     while (!queueAbort.value) {
@@ -2342,12 +2554,23 @@ async function runQueue() {
     queueIndex.value = -1;
   }
   if (queueAbort.value) {
+    pendingFolderJump = '';  // 用户主动中止：不跳画廊
     showToast(`队列已停止（完成 ${okCount}，待重试 ${warningCount}，失败 ${failCount}）`, 'info');
   } else {
     showToast(
       `队列完成：成功 ${okCount}，待重试 ${warningCount}，跳过 ${skippedCount}，失败 ${failCount}`,
       failCount || warningCount ? 'warning' : 'success'
     );
+    // 队列自然跑完：跳到最后一个完成的日期类任务 folder（如昨天的日期热门）
+    if (pendingFolderJump) {
+      const jumpDate = pendingFolderJump;
+      pendingFolderJump = '';
+      if (jumpDate !== gallery.value.selectedDate) {
+        await loadGallery(jumpDate);
+      } else {
+        await reloadCurrentGallery();
+      }
+    }
   }
 }
 
@@ -2467,7 +2690,8 @@ async function startRefreshScores() {
   refresh.value.dateStr = date;
   refresh.value.total = localPaths.length;
   refresh.value.done = 0;
-  showToast(`正在刷新当前页 ${localPaths.length} 张...`, 'info');
+  const rootsText = rootBreakdownText(pageItems);
+  showToast(`正在刷新当前页 ${localPaths.length} 张${rootsText ? `（${rootsText}）` : ''}`, 'info');
 
   try {
     const res = await fetch('http://127.0.0.1:8000/api/refresh_visible', {
@@ -2644,9 +2868,9 @@ async function startRefreshScoresRange() {
   try {
     if (throttled) {
       showToast(`共 ${pageCount} 页，将分 ${batches.length} 批刷新（每 ${BATCH_PAGES} 页一批，批间休息 ${REST_MS / 1000}s 防风控）`, 'info');
-    } else {
-      showToast(`正在刷新第 ${start}-${end} 页共 ${localPaths.length} 张...`, 'info');
-    }
+  } else {
+      showToast(`正在刷新第 ${start}-${end} 页共 ${localPaths.length} 张（${rootBreakdownText(items)}）`, 'info');
+  }
     for (let bi = 0; bi < batches.length; bi += 1) {
       if (!refresh.value.isRunning) break;
       const b = batches[bi];
@@ -3534,9 +3758,9 @@ function onCharacterContextMenu(event, item, index) {
     showToast('找不到该角色对应的原始 tag', 'warning');
     return;
   }
-  // 视口边界兜底：菜单宽约 180 / 高约 96（角色含「编辑词条」会更高），
-  // 画师只有一项更矮，统一用 96 足够。预留边距 8px
-  const MENU_W = 180, MENU_H = 96, MARGIN = 8;
+  // 视口边界兜底：菜单宽约 180；角色菜单含「编辑词条」+「在范围日期内搜索」共 4 项
+  // 更高（约 128），统一用 128 足够。预留边距 8px
+  const MENU_W = 180, MENU_H = 128, MARGIN = 8;
   let x = event.clientX;
   let y = event.clientY;
   if (x + MENU_W + MARGIN > window.innerWidth) x = window.innerWidth - MENU_W - MARGIN;
@@ -3562,7 +3786,7 @@ function onArtistContextMenu(event, item, index) {
     showToast('找不到该画师对应的原始 tag', 'warning');
     return;
   }
-  const MENU_W = 180, MENU_H = 64, MARGIN = 8;  // 画师只有一项，更矮
+  const MENU_W = 180, MENU_H = 100, MARGIN = 8;  // 画师无「编辑词条」，比角色菜单矮一项
   let x = event.clientX;
   let y = event.clientY;
   if (x + MENU_W + MARGIN > window.innerWidth) x = window.innerWidth - MENU_W - MARGIN;
@@ -3655,6 +3879,16 @@ function charMenuSearchTag() {
   const tag = charContextMenu.value.rawTag;
   closeCharContextMenu();
   if (tag) openBrowseWithQuery(tag);
+}
+
+// 单 tag：「在范围日期内搜索」打开跨日期本地搜索浮层，按角色/作者锁定类型并立即搜一次
+// （空日期范围 = 全部日期；用户可在浮层里收窄范围后重搜）。
+function charMenuSearchCrossDate() {
+  const tag = charContextMenu.value.rawTag;
+  const kind = charContextMenu.value.kind === 'artist' ? 'artist' : 'character';
+  closeCharContextMenu();
+  if (!tag) return;
+  openSearchModal({ q: tag, kind, auto: true });
 }
 
 // 多 tag：「复制 N 个 Tag」把所有选中 raw tag 空格分隔写剪贴板
@@ -4207,6 +4441,181 @@ function editItem(item) {
   emit('edit-image', item);
 }
 
+// ---------- 跨日期本地搜索（deck.db / /api/search_entries） ----------
+const SEARCH_PAGE_SIZE = 120;
+const searchModal = ref({
+  open: false,
+  q: '',
+  kind: 'auto', // auto | character | artist
+  start: '',
+  end: '',
+  loading: false,
+  loadingMore: false,
+  searched: false,
+  msg: '',
+  images: [],
+  total: 0,
+  nextOffset: 0,
+  expandedTags: [],
+  offlineLibraries: [],
+  lightbox: { open: false, url: '', item: null, isVideo: false }
+});
+
+// preset: { q, kind, start, end, auto } —— viewer 里右键「在范围日期内搜索」时
+// 用 raw tag + kind 预填；auto=true 立即搜一次（空范围=全部日期，再收窄重搜）。
+function openSearchModal(preset = null) {
+  const sm = searchModal.value;
+  sm.open = true;
+  sm.msg = '';
+  if (preset) {
+    sm.q = preset.q || '';
+    if (preset.kind) sm.kind = preset.kind;
+    if (preset.start != null) sm.start = preset.start;
+    if (preset.end != null) sm.end = preset.end;
+    if (preset.auto && sm.q.trim()) runSearch();
+  }
+}
+
+function closeSearchModal() {
+  searchModal.value.open = false;
+  showModalSearchHistory.value = false;
+  closeSearchLightbox();
+}
+
+async function requestSearch(offset, append) {
+  const sm = searchModal.value;
+  const res = await window.desktopAPI.gallery.searchEntries({
+    q: sm.q.trim(),
+    kind: sm.kind,
+    start: sm.start || '',
+    end: sm.end || '',
+    limit: SEARCH_PAGE_SIZE,
+    offset
+  });
+  if (!res) throw new Error('无响应（后端可能没启动）');
+  if (!res.ok) {
+    if (!append) {
+      sm.images = [];
+      sm.total = 0;
+      sm.nextOffset = 0;
+      sm.expandedTags = [];
+    }
+    sm.msg = res.msg || '没有找到结果';
+    return;
+  }
+  const incoming = res.images || [];
+  if (append) {
+    const known = new Set(sm.images.map(it => it.localPath || it.filename));
+    for (const it of incoming) {
+      const key = it.localPath || it.filename;
+      if (!known.has(key)) {
+        sm.images.push(it);
+        known.add(key);
+      }
+    }
+  } else {
+    sm.images = incoming;
+  }
+  sm.total = res.total || 0;
+  sm.nextOffset = (res.offset || 0) + (res.limit || SEARCH_PAGE_SIZE);
+  sm.expandedTags = res.expandedTags || [];
+  sm.offlineLibraries = res.offlineLibraries || [];
+  sm.msg = sm.images.length ? '' : '没有匹配的图片（可能对应文件已不在盘上）';
+  await hydrateThumbs(incoming);
+}
+
+async function runSearch() {
+  const sm = searchModal.value;
+  if (!sm.q.trim() || sm.loading) return;
+  // 与画廊顶部「搜索作者/角色」共用同一份历史（crawlerSearchHistory），两边互相继承
+  pushSearchHistory(sm.q.trim());
+  sm.loading = true;
+  sm.msg = '';
+  sm.searched = true;
+  try {
+    await requestSearch(0, false);
+  } catch (err) {
+    sm.msg = '搜索失败：' + (err?.message || err) + '（需要 Python 后端在运行）';
+    sm.images = [];
+    sm.total = 0;
+  } finally {
+    sm.loading = false;
+  }
+}
+
+async function loadMoreSearch() {
+  const sm = searchModal.value;
+  if (sm.loadingMore || sm.loading) return;
+  sm.loadingMore = true;
+  try {
+    await requestSearch(sm.nextOffset, true);
+  } catch (err) {
+    sm.msg = '加载更多失败：' + (err?.message || err);
+  } finally {
+    sm.loadingMore = false;
+  }
+}
+
+const searchHasMore = computed(() => searchModal.value.nextOffset < searchModal.value.total);
+
+// 跨日期搜索输入框的历史下拉：直接复用画廊顶部搜索框的 searchHistory（同一份
+// localStorage crawlerSearchHistory），两边互相继承——画廊里搜过的作者/角色
+// 在这里 focus 即见；这里搜的也回到顶部框历史。
+const showModalSearchHistory = ref(false);
+const modalSearchHistoryRef = ref(null);
+function onModalSearchHistoryBlur() {
+  setTimeout(() => { showModalSearchHistory.value = false; }, 150);
+}
+function onPickModalSearchHistory(entry) {
+  searchModal.value.q = entry;
+  showModalSearchHistory.value = false;
+  runSearch();
+}
+
+async function openSearchLightbox(item) {
+  const lb = searchModal.value.lightbox;
+  lb.item = item;
+  lb.url = '';
+  lb.isVideo = false;
+  lb.open = true;
+  if (isVideoItem(item) && item.date) {
+    lb.isVideo = true;
+    lb.url = `http://127.0.0.1:8000/images/${item.date}/${encodeURIComponent(item.filename)}`;
+    return;
+  }
+  if (itemExtension(item) === 'zip') {
+    const gifPath = item.localPath.replace(/\.zip$/i, '.gif');
+    if (item.localPath && await window.desktopAPI.file.exists(gifPath)) {
+      lb.url = await window.desktopAPI.file.toLocalUrl(gifPath);
+    }
+    // 无伴生 gif 的 zip 无法在浮层预览，用按钮走「本地」在外部打开
+    return;
+  }
+  if (item.localPath) {
+    lb.url = await window.desktopAPI.file.toLocalUrl(item.localPath);
+  }
+}
+
+function closeSearchLightbox() {
+  const lb = searchModal.value.lightbox;
+  lb.open = false;
+  lb.url = '';
+  lb.item = null;
+  lb.isVideo = false;
+}
+
+async function jumpToSearchDate(item) {
+  if (!item?.date || !ISO_DATE.test(item.date)) return;
+  const date = item.date;
+  closeSearchModal();
+  await loadGallery(date);
+}
+
+function editSearchItem(item) {
+  closeSearchModal();
+  editItem(item);
+}
+
 function applySearch(keyword) {
   setSearch(keyword);
 }
@@ -4256,9 +4665,11 @@ async function openViewer(item) {
   if (gallery.value.refreshOnView) refreshSinglePost(item);
 
   const ext = (item.filename || '').split('.').pop().toLowerCase();
-  // 视频走 FastAPI 静态服务，自带 byte-range 支持，避开 local:// 协议的媒体限制
-  if (VIDEO_EXTS.includes(ext) && gallery.value.selectedDate && item.filename) {
-    viewer.value.imageUrl = `http://127.0.0.1:8000/images/${gallery.value.selectedDate}/${encodeURIComponent(item.filename)}`;
+  // 视频走 FastAPI 静态服务，自带 byte-range 支持，避开 local:// 协议的媒体限制。
+  // folder 优先取 item.date：跨日期搜索结果不属于 gallery.selectedDate。
+  const itemFolder = item.date || gallery.value.selectedDate;
+  if (VIDEO_EXTS.includes(ext) && itemFolder && item.filename) {
+    viewer.value.imageUrl = `http://127.0.0.1:8000/images/${itemFolder}/${encodeURIComponent(item.filename)}`;
     return;
   }
 
@@ -4287,8 +4698,9 @@ async function syncViewerImage() {
   if (!viewerItem.value) return;
 
   const ext = (viewerItem.value.filename || '').split('.').pop().toLowerCase();
-  if (VIDEO_EXTS.includes(ext) && gallery.value.selectedDate && viewerItem.value.filename) {
-    viewer.value.imageUrl = `http://127.0.0.1:8000/images/${gallery.value.selectedDate}/${encodeURIComponent(viewerItem.value.filename)}`;
+  const viewerFolder = viewerItem.value.date || gallery.value.selectedDate;
+  if (VIDEO_EXTS.includes(ext) && viewerFolder && viewerItem.value.filename) {
+    viewer.value.imageUrl = `http://127.0.0.1:8000/images/${viewerFolder}/${encodeURIComponent(viewerItem.value.filename)}`;
     return;
   }
 
@@ -4595,27 +5007,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onCharMenuKey);
 });
 
-const modeDescription = computed(() => {
-  if (form.value.mode === 'rank') {
-    if (rankAction.value === 'collect_only') return '网络状况不佳时的极速模式：仅拉取排行榜列表和元数据，不下载图片本体。';
-    return '获取当日 Danbooru 排行榜：先按页收集所有 ID，再按 ID 批量下载（中间可暂停/停止）。';
-  }
-  if (form.value.mode === 'popular') {
-    const sub = popularAction.value;
-    if (form.value.dateRange) {
-      if (sub === 'collect_only') return '日期范围仅收集 ID：按日期迭代逐日收齐所有 ID，不下载图片。';
-      return '日期范围两阶段：每个日期 folder 都先收齐所有 ID，再按 ID 批量下载，跨日自动落盘并防风控。';
-    }
-    if (sub === 'recover') return '热门·补全/补齐：按文件存在性判定热门页前 N 页。本地文件在 → 跳过；本地文件不在 → 下载（log 缓存 URL 优先）。可入队、暂停/继续，过程写 ids_data.json。';
-    if (sub === 'collect_only') return '日期热门仅收集 ID：只拉取该日热门列表，不下载图片本体。';
-    if (sub === 'download_by_ids') return '日期热门·按ID下载：粘贴 ID 列表或消费目标日期 folder 已收集的待下载 ID，针对该日期 folder 批量下载。';
-    return '日期热门两阶段：先按页收齐所有 ID，再按 ID 批量下载（中间可暂停/停止）。';
-  }
-  if (form.value.mode === 'tags') {
-    return `按 ${form.value.tagSource === 'gelbooru' ? 'Gelbooru' : 'Danbooru'} tag 查询下载到 tag 文件夹。`;
-  }
-  return '选择模式后配置参数，点击加入队列追加任务。';
-});
 
 // 前端按和后端 sanitize_tag_folder 同样的规则预览将要生成的文件夹名
 // （后端会再 sanitize 一次，这里只是 UI 提示）
@@ -4631,199 +5022,169 @@ const tagFolderPreview = computed(() => {
   if (!s) return '';
   return ('tag_' + s).slice(0, 80);
 });
+
+// 「到底下到哪个日期文件夹」的明示：任务日期与右侧画廊日期独立，
+// 在入队按钮前直接写出后端会用的 target folder（与 main.py start_scraper 规则一致：
+// rank/collect_ids = 真今天；popular/download_ids = 左栏日期；popular_range = 起→止迭代）。
+const downloadTargetHint = computed(() => {
+  if (form.value.mode === 'tags') return '';  // tags 已有 tag_xxx folder 预览行
+  if (form.value.mode === 'rank') return `下载到今天的图库文件夹：${todayString()}`;
+  if (form.value.dateRange) {
+    return `按天迭代下载到图库文件夹：${form.value.startDate || '…'} → ${form.value.endDate || '…'}`;
+  }
+  return `下载到图库文件夹：${form.value.targetDate || yesterdayString()}`;
+});
 </script>
 
 <template>
-  <div class="crawler-layout" :class="{ 'gallery-hidden': !showGalleryPanel }">
+  <div class="crawler-layout">
     <section class="panel card control-panel">
-      <div class="panel-head compact-head">
-        <div>
-          <h2>抓图任务</h2>
-          <p class="inline-note">{{ modeDescription }}</p>
-        </div>
-        <div class="crawler-head-actions">
-          <!-- 第 1 行：设置类（教程 / SFW / 直连 / 隐藏图库）。
-               这 4 个都属于「开关 / 配置」类语义，把它们放在第一行；
-               第 2 行放「浏览 / 收集 / 协程」三件套，让两行的功能有清晰分组。 -->
-          <button class="ghost hosts-btn" @click="openTutorials" title="教程：修改 hosts 直连 Danbooru / 安装 ffmpeg（用于 zip→gif）">教程</button>
-          <button
-            class="ghost safe-mode-btn"
-            :class="{ 'is-safe': safeMode, 'is-unsafe': !safeMode }"
-            @click="toggleSafeMode"
-            :title="safeMode ? '当前走 safebooru.donmai.us（无 R-18）。点击切换为完整 danbooru' : '当前走 danbooru.donmai.us（含 NSFW）。点击切回 SFW'"
-          >{{ safeMode ? 'SFW' : 'NSFW' }}</button>
-          <button
-            class="ghost proxy-mode-btn"
-            :class="{ 'is-proxy': useProxy, 'is-direct': !useProxy }"
-            @click="toggleProxy"
-            :title="useProxy ? '当前走代理下载。关掉代理软件后请点这里切到「直连」，否则下载会连不上死代理端口' : '当前直连下载（不走代理）。开了代理软件可点这里切回「走代理」'"
-          >{{ useProxy ? '走代理' : '直连' }}</button>
-          <button
-            class="ghost gallery-toggle-btn"
-            @click="showGalleryPanel = !showGalleryPanel"
-            :title="showGalleryPanel ? '隐藏右侧本地图库' : '显示右侧本地图库'"
-          >{{ showGalleryPanel ? '隐藏图库' : '显示图库' }}</button>
-          <!-- 第 2 行：浏览 / 收集 / 协程 -->
-          <button
-            class="ghost quick-id-download-btn"
-            @click="openDownloadByIdsMode"
-            title="切换到日期热门的按 ID 下载：粘贴 ID 列表，或使用当前日期 folder 中待下载的 ID"
-          >按ID下载</button>
-          <button
-            class="ghost"
-            @click="openBrowse"
-            title="按 tag 像 Danbooru 原网页一样预览缩略图，勾选后下载到指定日期"
-          >Tag</button>
-          <button
-            class="ghost"
-            @click="openRankBrowse"
-            title="按 Danbooru 排行榜 order:rank 分页预览缩略图，勾选后下载到指定日期"
-          >Rank</button>
-          <button
-            class="ghost"
-            @click="openCollectedBrowse"
-            title="查看「仅收集ID」模式收集到的 ID 的在线预览图，勾选后下载"
-          >收集ID</button>
-          <label class="concurrency-field concurrency-field-inline" title="下载协程数：1=最稳，4=平衡，8+=速度优先但易撞风控。rank/日期/标签 都用它">
-            <span>并发</span>
-            <input type="number" min="1" max="16" step="1" v-model.number="downloadConcurrency" class="concurrency-input" />
-          </label>
-        </div>
+      <div class="panel-head compact-head cp-head">
+        <h2>抓图任务</h2>
+        <button class="cp-icon-btn" @click="openTutorials"
+          title="教程：修改 hosts 直连 Danbooru / 安装 ffmpeg（用于 zip→gif）">?</button>
+      </div>
+
+      <!-- 快速开关行：站点模式 / 代理（高频切换的小药丸）+ 并发数 -->
+      <div class="cp-quick-row">
+        <button
+          class="cp-chip safe-mode-btn"
+          :class="{ 'is-safe': safeMode, 'is-unsafe': !safeMode }"
+          @click="toggleSafeMode"
+          :title="safeMode ? '当前走 safebooru.donmai.us（无 R-18）。点击切换为完整 danbooru' : '当前走 danbooru.donmai.us（含 NSFW）。点击切回 SFW'"
+        >{{ safeMode ? 'SFW' : 'NSFW' }}</button>
+        <button
+          class="cp-chip proxy-mode-btn"
+          :class="{ 'is-proxy': useProxy, 'is-direct': !useProxy }"
+          @click="toggleProxy"
+          :title="useProxy ? '当前走代理下载。关掉代理软件后点这里切「直连」' : '当前直连下载。开了代理软件点这里切「走代理」'"
+        >{{ useProxy ? '走代理' : '直连' }}</button>
+        <label class="concurrency-field-inline" title="下载协程数：1=最稳，4=平衡，8+=速度优先但易撞风控">
+          <span>并发</span>
+          <input type="number" min="1" max="16" step="1" v-model.number="downloadConcurrency" class="concurrency-input" />
+        </label>
+      </div>
+
+      <!-- 在线预览/浏览工具：四等分连体按钮，任何分辨率都保持在同一行 -->
+      <div class="cp-tools">
+        <button class="cp-tool-btn" @click="openRankBrowse"
+          title="按 Danbooru 排行榜 order:rank 分页预览缩略图，勾选后下载到指定日期">Rank</button>
+        <button class="cp-tool-btn" @click="openBrowse"
+          title="按 tag 像 Danbooru 原网页一样预览缩略图，勾选后下载到指定日期">Tag</button>
+        <button class="cp-tool-btn" @click="openCollectedBrowse"
+          title="查看「仅收集ID」模式收集到的 ID 的在线预览图，勾选后下载">收集ID</button>
+        <button class="cp-tool-btn" :class="{ active: isDownloadByIdsMode }" @click="openDownloadByIdsMode"
+          title="日期热门·按 ID 下载：粘贴 ID 列表，或消费目标日期 folder 已收集的待下载 ID">按ID</button>
       </div>
 
       <div class="mode-selector">
-        <button class="mode-chip" :class="{ active: form.mode === 'rank' }" @click="form.mode = 'rank'"
+        <button class="mode-chip" :class="{ active: form.mode === 'rank' }" @click="selectTaskMode('rank')"
           title="按 Danbooru 排行榜：先收集所有 ID，再按 ID 批量下载">排行榜</button>
-        <button class="mode-chip" :class="{ active: form.mode === 'popular' }" @click="form.mode = 'popular'"
-          title="按指定日期（或日期范围）获取热门帖子并下载">日期热门</button>
-        <button class="mode-chip" :class="{ active: form.mode === 'tags' }" @click="form.mode = 'tags'"
+        <button class="mode-chip" :class="{ active: form.mode === 'popular' && !isDownloadByIdsMode }" @click="selectTaskMode('popular')"
+          title="按指定日期（或日期范围）获取热门帖子并下载；其下含仅收集ID/补全/按ID下载">日期热门</button>
+        <button class="mode-chip" :class="{ active: form.mode === 'tags' }" @click="selectTaskMode('tags')"
           title="按 tag 查询下载到独立的 tag_xxx 文件夹，与日期文件夹并行">标签下载</button>
-      </div>
-
-      <!-- 排行榜子操作栏：默认「下载」（先收 ID 再下）；点「仅收集ID」可只跑 ID 收集阶段。
-           排行榜的目标文件夹是「今日」（没有日期语义），
-           「按ID下载」语义上是针对日期 folder 的，已迁到「日期热门」栏下。 -->
-      <div v-if="form.mode === 'rank'" class="rank-action-bar">
-        <span class="action-row-label">执行方式</span>
-        <div class="seg-group">
-          <button type="button" class="seg-btn" :class="{ active: rankAction === 'download' }"
-            @click="rankAction = 'download'" title="默认：先按页收齐所有 ID，再按 ID 批量下载">下载</button>
-          <button type="button" class="seg-btn" :class="{ active: rankAction === 'collect_only' }"
-            @click="rankAction = 'collect_only'" title="只跑 ID 收集阶段：网不好时把 ID 先存到 folder 里，等网好再回来按 ID 下载">仅收集ID</button>
-        </div>
       </div>
 
       <!-- 中间可滚动区：表单/按钮/失败横幅/多任务队列/状态/错误条都放这里，超高时内部滚动，永不溢出卡片 -->
       <div class="control-scroll">
-      <!-- 「按 ID 下载」子操作没有页码概念：数据源是 ID 列表/folder；其它 rank 子操作和 popular 都还要页码 -->
-      <div class="field-grid pages-grid" v-if="(form.mode === 'rank') || (form.mode === 'popular' && !isDownloadByIdsMode)">
-        <label class="page-field">
-          <span>起始页</span>
-          <div class="page-field-row">
-            <input v-model.number="form.startPage" type="number" min="1" class="page-input" />
-            <div class="recent-pages" v-if="recentStartPages.length" title="最近使用的起始页">
-              <span
-                v-for="p in recentStartPages"
-                :key="`rs-${form.mode}-${p}`"
-                class="recent-page-chip"
-                :class="{ active: p === form.startPage }"
-                @click="applyRecentPage('start', p)"
-                :title="`点击设为 ${p}`"
-              >
-                {{ p }}
-                <button
-                  type="button"
-                  class="recent-page-x"
-                  @click.stop="deleteRecentPage(form.mode, 'start', p)"
-                  title="删除这条记录"
-                >×</button>
-              </span>
-            </div>
-          </div>
+      <!-- 紧凑参数区：下拉选动作/范围，页码两个小输入框（最近用过的值走原生 datalist）。
+            by-ids 子操作没有页码/动作概念，单独跳过这一行。 -->
+      <div v-if="form.mode === 'rank'" class="cp-rows">
+        <label class="cp-field">
+          <span class="cp-label">方式</span>
+          <select v-model="rankAction" class="cp-select" title="下载 = 先收集排行榜所有 ID 再批量下载；仅收集ID = 只攒 ID 不下图">
+            <option value="download">下载</option>
+            <option value="collect_only">仅收集ID</option>
+          </select>
         </label>
-        <label class="page-field">
-          <span>结束页</span>
-          <div class="page-field-row">
-            <input v-model.number="form.endPage" type="number" min="1" class="page-input" />
-            <div class="recent-pages" v-if="recentEndPages.length" title="最近使用的结束页">
-              <span
-                v-for="p in recentEndPages"
-                :key="`re-${form.mode}-${p}`"
-                class="recent-page-chip"
-                :class="{ active: p === form.endPage }"
-                @click="applyRecentPage('end', p)"
-                :title="`点击设为 ${p}`"
-              >
-                {{ p }}
-                <button
-                  type="button"
-                  class="recent-page-x"
-                  @click.stop="deleteRecentPage(form.mode, 'end', p)"
-                  title="删除这条记录"
-                >×</button>
-              </span>
-            </div>
-          </div>
+        <label class="cp-field cp-pages" title="最近使用的页码可从输入框下拉历史中选择">
+          <span class="cp-label">页码</span>
+          <input v-model.number="form.startPage" type="number" min="1" class="cp-num" list="cp-recent-start" />
+          <span class="cp-dash">–</span>
+          <input v-model.number="form.endPage" type="number" min="1" class="cp-num" list="cp-recent-end" />
+          <datalist id="cp-recent-start">
+            <option v-for="p in recentStartPages" :key="`rs-${p}`" :value="p"></option>
+          </datalist>
+          <datalist id="cp-recent-end">
+            <option v-for="p in recentEndPages" :key="`re-${p}`" :value="p"></option>
+          </datalist>
         </label>
       </div>
 
-      <!-- 日期热门 / 日期范围：合到一个 mode（popular），用 dateRange 切单日/范围。
-           操作（popularAction）四档，默认「下载」（两阶段）。
-           「补全/补齐」和「按ID下载」仅在单日（!dateRange）时可用：
-             - recover：后端 popular_recover 不支持跨日
-             - download_by_ids：按 ID 下载语义上针对具体日期 folder，范围下无意义
-           下载协程数统一在头部，与 rank/tags 共享。 -->
-      <div v-if="form.mode === 'popular'" class="date-mode-row">
-        <div class="action-row-group" title="单日 vs 范围：单日=一个日期 folder，范围=跨日按天迭代">
-          <span class="action-row-label">时间范围</span>
-          <div class="seg-group">
-            <button type="button" class="seg-btn" :class="{ active: !form.dateRange }" @click="form.dateRange = false">单日</button>
-            <button type="button" class="seg-btn" :class="{ active: form.dateRange }" @click="form.dateRange = true">日期范围</button>
-          </div>
-        </div>
-        <div class="action-row-group">
-          <span class="action-row-label">执行动作</span>
-          <div class="seg-group">
-            <button type="button" class="seg-btn" :class="{ active: popularAction === 'download' }"
-              @click="popularAction = 'download'" title="默认：先按页收齐所有 ID，再按 ID 批量下载">下载</button>
-            <button type="button" class="seg-btn" :class="{ active: popularAction === 'collect_only' }"
-              @click="popularAction = 'collect_only'" title="只跑 ID 收集阶段：网不好时把 ID 先存到 folder 里，等网好再按 ID 下载">仅收集ID</button>
-            <button v-if="!form.dateRange" type="button" class="seg-btn" :class="{ active: popularAction === 'recover' }"
-              @click="onPickPopularRecover" title="按文件存在性补全热门页前 N 页：本地文件在 → 跳过；本地文件不在 → 下载（log 缓存 URL 优先）。可入队、暂停/继续，过程写 ids_data.json。仅在单日时可用">补全/补齐</button>
-          </div>
-        </div>
+      <!-- popular：动作下拉（下载/仅收集ID/补全补齐；范围下自动隐藏不支持项）+
+           单日/日期范围下拉（切范围会自动把 recover/download_by_ids 重置为 download）。
+           「按ID下载」从顶部工具按钮进入，不在此下拉中。 -->
+      <div v-if="form.mode === 'popular' && !isDownloadByIdsMode" class="cp-rows">
+        <label class="cp-field">
+          <span class="cp-label">动作</span>
+          <select v-model="popularAction" class="cp-select" title="下载 = 先收 ID 再批量下载；仅收集ID = 只攒 ID；补全补齐 = 按文件存在性补缺失页">
+            <option value="download">下载</option>
+            <option value="collect_only">仅收集ID</option>
+            <option v-if="!form.dateRange" value="recover">补全补齐</option>
+          </select>
+        </label>
+        <label class="cp-field">
+          <span class="cp-label">范围</span>
+          <select v-model="form.dateRange" class="cp-select" title="单日=一个日期 folder；日期范围=跨日按天迭代">
+            <option :value="false">单日</option>
+            <option :value="true">日期范围</option>
+          </select>
+        </label>
+        <label class="cp-field cp-pages" title="最近使用的页码可从输入框下拉历史中选择">
+          <span class="cp-label">页码</span>
+          <input v-model.number="form.startPage" type="number" min="1" class="cp-num" list="cp-recent-start" />
+          <span class="cp-dash">–</span>
+          <input v-model.number="form.endPage" type="number" min="1" class="cp-num" list="cp-recent-end" />
+          <datalist id="cp-recent-start">
+            <option v-for="p in recentStartPages" :key="`rs-${p}`" :value="p"></option>
+          </datalist>
+          <datalist id="cp-recent-end">
+            <option v-for="p in recentEndPages" :key="`re-${p}`" :value="p"></option>
+          </datalist>
+        </label>
       </div>
-      <label class="field-full target-date-field" v-if="form.mode === 'popular' && !form.dateRange">
-        <span>目标日期 <span class="muted compact-text">（默认昨天，可改）</span></span>
+      <label class="cp-field cp-field-date" v-if="form.mode === 'popular' && !form.dateRange">
+        <span class="cp-label">{{ isDownloadByIdsMode ? '目标日期' : '日期' }}</span>
         <TaskDatePicker
           v-model="form.targetDate"
-          placeholder="默认昨天"
+          :placeholder="isDownloadByIdsMode ? '选择下载到哪个日期 folder' : '默认昨天'"
           :available-dates="gallery.availableDates"
           :date-folders="gallery.availableDateFolders"
+          :max-date="isDownloadByIdsMode ? '' : POPULAR_MAX_DATE"
+          day-step
+          jumpable
+          @jump="onTaskDateJump"
         />
       </label>
-      <div class="field-grid" v-if="form.mode === 'popular' && form.dateRange">
-        <label>
-          <span>起始日期</span>
+      <div class="cp-rows cp-range-row" v-if="form.mode === 'popular' && form.dateRange">
+        <label class="cp-field">
+          <span class="cp-label">起</span>
           <TaskDatePicker
             v-model="form.startDate"
             placeholder="起始日期"
             :available-dates="gallery.availableDates"
             :date-folders="gallery.availableDateFolders"
+            :max-date="POPULAR_MAX_DATE"
+            day-step
+            jumpable
+            @jump="onTaskDateJump"
           />
         </label>
-        <label>
-          <span>结束日期</span>
+        <label class="cp-field">
+          <span class="cp-label">止</span>
           <TaskDatePicker
             v-model="form.endDate"
             placeholder="结束日期"
             :available-dates="gallery.availableDates"
             :date-folders="gallery.availableDateFolders"
+            :max-date="POPULAR_MAX_DATE"
+            day-step
+            jumpable
+            @jump="onTaskDateJump"
           />
         </label>
       </div>
-
-      <!-- 标签下载无独立协程行：协程数在头部共享 -->
 
       <!-- 日期热门·按ID下载：粘贴/消费 folder 的 ID（已从排行榜栏迁到这里） -->
       <label class="field-full id-download-panel" v-if="isDownloadByIdsMode">
@@ -4837,63 +5198,86 @@ const tagFolderPreview = computed(() => {
         <div class="muted compact-text" style="margin-top: 4px;">
           已解析到 <strong>{{ parsedPastedIds.length }}</strong> 个 ID
           <span v-if="isPastedCompressed"> · 🗜 识别为压缩格式</span>
-          <span v-if="parsedPastedIds.length"> · 将下载到 <strong style="color: var(--accent-deep);">{{ downloadByIdsTargetDateLabel }}</strong> 的图库（跟右侧画廊日期联动）</span>
+          <span v-if="parsedPastedIds.length"> · 将下载到 <strong style="color: var(--accent-deep);">{{ downloadByIdsTargetDateLabel }}</strong> 的图库（日期独立选择）</span>
         </div>
       </label>
-      <!-- log.json 去重策略：和上面的 ID 列表同级成块，套用项目现成的 seg-group 模式（顶部
-           popularAction 都在用），和子操作栏视觉完全一致。独立的 field-full 而非
-           嵌套 label：避免点击文本框区域误触切换。 -->
-      <div class="field-full dl-strategy-row id-download-panel" v-if="isDownloadByIdsMode">
-        <span>下载策略</span>
-        <div class="seg-group">
-          <button type="button" class="seg-btn" :class="{ active: form.skipLogged }"
-            @click="form.skipLogged = true" title="默认：log 命中即跳过（去重）">已下载则跳过</button>
-          <button type="button" class="seg-btn" :class="{ active: !form.skipLogged }"
-            @click="form.skipLogged = false" title="补齐 50 页时遇到「log 里有记录但文件其实丢了」切到这档重新拉一次">强制重下</button>
-        </div>
-      </div>
-      <label class="field-full" v-if="form.mode === 'tags'">
-        <span>Tag 来源</span>
-        <select v-model="form.tagSource">
-          <option value="danbooru">Danbooru</option>
-          <option value="gelbooru">Gelbooru</option>
+      <!-- log.json 去重策略：与动作选择一致收成下拉框 -->
+      <label class="cp-field id-download-panel" v-if="isDownloadByIdsMode">
+        <span class="cp-label">策略</span>
+        <select v-model="form.skipLogged" class="cp-select" title="log 命中即跳过（去重）；强制重下用于补齐时文件丢失的情况">
+          <option :value="true">已下载则跳过</option>
+          <option :value="false">强制重下</option>
         </select>
       </label>
-      <label class="field-full" v-if="form.mode === 'tags'">
-        <span>
-          Tag 查询串
-        </span>
-        <input
-          v-model="form.tagQuery"
-          type="text"
-          placeholder="例如：hatsune_miku rating:safe -comic"
-          style="font-family: Consolas, monospace; font-size: 12.5px;"
-        />
-        <div class="muted compact-text" style="margin-top: 4px; line-height: 1.5;">
-          {{ form.tagSource === 'gelbooru' ? 'Gelbooru' : 'Danbooru' }} 下载到独立文件夹 <strong style="color: var(--accent-deep); font-family: Consolas, monospace;">{{ tagFolderPreview || 'tag_...' }}</strong>
-        </div>
-      </label>
-      <label class="field-full">
-        <span>过滤标签</span>
-        <input v-model="form.tags" type="text" />
+      <div v-if="form.mode === 'tags'" class="cp-rows">
+        <label class="cp-field">
+          <span class="cp-label">来源</span>
+          <select v-model="form.tagSource" class="cp-select">
+            <option value="danbooru">Danbooru</option>
+            <option value="gelbooru">Gelbooru</option>
+          </select>
+        </label>
+        <label class="cp-field cp-grow">
+          <span class="cp-label">Tag</span>
+          <input
+            v-model="form.tagQuery"
+            type="text"
+            placeholder="hatsune_miku rating:safe -comic"
+            style="font-family: Consolas, monospace; font-size: 12.5px;"
+          />
+        </label>
+      </div>
+      <div v-if="form.mode === 'tags'" class="muted compact-text cp-folder-preview">
+        {{ form.tagSource === 'gelbooru' ? 'Gelbooru' : 'Danbooru' }} →
+        <strong style="color: var(--accent-deep); font-family: Consolas, monospace;">{{ tagFolderPreview || 'tag_...' }}</strong>
+      </div>
+      <label class="cp-field cp-field-date">
+        <span class="cp-label">过滤</span>
+        <input v-model="form.tags" type="text" placeholder="过滤标签（留空不过滤）" />
       </label>
 
+      <div class="muted compact-text cp-target-hint" v-if="downloadTargetHint">
+        📁 {{ downloadTargetHint }}
+      </div>
       <div class="button-row">
         <button class="tq-add-btn" @click="addCurrentToQueue" title="把当前配置追加到顺序队列">入队</button>
-        <!-- 暂停/继续/停止 已搬到下方「顺序队列」面板的 actions 区，与运行/跳过/清除
-             排在一起（都属于"任务运行时控制"，与"入队"这种"配置提交"语义不同） -->
+        <button
+          class="tq-add-btn tq-add-btn-ghost"
+          @click="checkRecoveryForCurrentScope"
+          title="按当前任务配置查询中途停止留下的断点和永久失败页（deck.db）"
+        >检查断点</button>
       </div>
 
-      <!-- 顺序任务队列：常驻展开，运行中可继续追加任务，可删除未运行任务 -->
-      <div class="task-queue-panel">
-        <div class="tq-header">
-          <span class="tq-title">
-            顺序队列<span v-if="queueRunning" class="tq-running-badge">运行中 {{ queueIndex + 1 }}/{{ taskQueue.length }}</span>
+      <!-- 顺序任务队列：默认折叠成一行标题（含图标化的运行/暂停/停止/跳过/清除），
+           点 ▸ 展开明细；运行中可继续追加任务，可删除未运行任务。折叠选择持久化。 -->
+      <div class="task-queue-panel cp-tq" :class="{ collapsed: queueCollapsed }">
+        <div class="tq-header cp-tq-header">
+          <button type="button" class="tq-caret" @click="toggleQueueCollapsed"
+            :title="queueCollapsed ? '展开队列明细' : '折叠'">{{ queueCollapsed ? '▸' : '▾' }}</button>
+          <button type="button" class="tq-name" @click="toggleQueueCollapsed">
+            顺序队列<span v-if="queueRunning" class="tq-running-badge">{{ queueIndex + 1 }}/{{ taskQueue.length }}</span>
             <span v-else-if="taskQueue.length" class="tq-count-badge">{{ taskQueue.length }}项</span>
+          </button>
+          <span class="cp-tq-ops" @click.stop>
+            <button type="button" class="tq-ico tq-ico-run" @click="runQueue"
+              :disabled="queueRunning || task.isRunning || task.isStopping || !pendingQueueCount"
+              :title="`按顺序依次执行待执行任务（${pendingQueueCount} 项）`">▶</button>
+            <button type="button" class="tq-ico" @click="pauseTask"
+              :disabled="!task.isRunning || task.isPaused" title="暂停当前任务">⏸</button>
+            <button type="button" class="tq-ico" @click="resumeTask"
+              :disabled="!task.isRunning || !task.isPaused" title="继续">⏵</button>
+            <button type="button" class="tq-ico" @click="skipCurrentQueueItem"
+              :disabled="!queueRunning || queueIndex < 0 || !task.isRunning || task.isStopping || queueSkipItemId !== null"
+              title="结束当前任务，保留队列并继续下一项">⏭</button>
+            <button type="button" class="tq-ico tq-ico-stop" @click="stopTaskOrQueue" :disabled="!task.isRunning"
+              :title="queueRunning ? '结束当前任务并停止整个顺序队列' : '结束当前任务'">⏹</button>
+            <button type="button" class="tq-ico" @click="clearQueue"
+              :disabled="queueRunning && taskQueue.every(item => item.status === 'running')"
+              :title="queueRunning ? '清除尚未执行的项（不影响正在跑的任务）' : '清空整个队列'">🗑</button>
           </span>
         </div>
 
-        <TransitionGroup v-if="taskQueue.length" name="tq" tag="div" class="tq-list">
+        <TransitionGroup v-if="taskQueue.length && !queueCollapsed" name="tq" tag="div" class="tq-list">
           <div
             v-for="(it, i) in taskQueue"
             :key="it.id"
@@ -4925,34 +5309,9 @@ const tagFolderPreview = computed(() => {
             </div>
           </div>
         </TransitionGroup>
-        <div v-else class="tq-empty">
-          上方“加入队列”会把当前配置追加到这里，任务按列表顺序依次执行。
+        <div v-if="!taskQueue.length && !queueCollapsed" class="tq-empty">
+          配置好任务后点「入队」，任务按列表顺序依次执行。
         </div>
-
-        <div v-if="task.isRunning || task.isPaused || taskQueue.length" class="tq-actions">
-          <!-- 任务运行控制：暂停 / 继续 / 停止。这组按钮单条任务跑（即使没入队）时也要显示，
-               所以 v-if 条件放宽为「任务在跑 / 已暂停 / 队列非空」三个之一。 -->
-          <div class="tq-action-group">
-            <span class="tq-action-label">任务控制</span>
-            <button class="secondary" @click="pauseTask" :disabled="!task.isRunning || task.isPaused">暂停</button>
-            <button class="secondary" @click="resumeTask" :disabled="!task.isRunning || !task.isPaused">继续</button>
-            <button class="ghost" @click="stopTaskOrQueue" :disabled="!task.isRunning" :title="queueRunning ? '结束当前任务并停止整个顺序队列' : '结束当前任务'">停止</button>
-          </div>
-          <!-- 队列控制：运行 / 跳过 / 清除。仅队列里有项时启用，否则 disabled 也不隐藏
-               —— 让用户随时知道"队列存在但还没运行"也能点"清除"清空。 -->
-          <div class="tq-action-group" v-if="taskQueue.length">
-            <span class="tq-action-label">队列</span>
-            <button class="tq-run" @click="runQueue" :disabled="queueRunning || task.isRunning || task.isStopping || !pendingQueueCount" :title="`按顺序依次执行队列里的待执行任务（${pendingQueueCount} 项）`">运行</button>
-            <button class="secondary" @click="skipCurrentQueueItem" :disabled="!queueRunning || queueIndex < 0 || !task.isRunning || task.isStopping || queueSkipItemId !== null" title="结束当前任务，但保留队列并继续下一项">跳过</button>
-            <button class="ghost" @click="clearQueue" :disabled="queueRunning && taskQueue.every(item => item.status === 'running')" :title="queueRunning ? '清除尚未执行的项（不影响正在跑的任务）' : '清空整个队列'">清除</button>
-          </div>
-        </div>
-      </div>
-
-      <div class="status-pills">
-        <span class="pill" :class="{ active: task.isRunning }">运行中: {{ task.isRunning ? '是' : '否' }}</span>
-        <span class="pill" :class="{ warning: task.isStopping }">收尾中: {{ task.isStopping ? '是' : '否' }}</span>
-        <span class="pill" :class="{ warning: task.isPaused }">已暂停: {{ task.isPaused ? '是' : '否' }}</span>
       </div>
 
       <div v-if="task.backendError" class="error-banner" :class="{ 'is-expanded': task.backendErrorExpanded }">
@@ -4979,6 +5338,19 @@ const tagFolderPreview = computed(() => {
           </div>
         </div>
         <div class="progress-panel">
+          <!-- 刷新热度进度：独立于下载任务的前台批次刷新，放在下载进度的上面一行。
+               与工具栏「刷新热度」按钮的 running 文案共享同一 refresh 状态；× 就地停止。 -->
+          <div v-if="refresh.isRunning" class="refresh-progress-row">
+            <span class="rp-label">刷新热度</span>
+            <div class="progress-bar rp-bar" :title="`${refresh.dateStr}：${refresh.done} / ${refresh.total}`">
+              <div
+                class="progress-seg progress-seg-page"
+                :style="{ width: pct(refresh.done, refresh.total) + '%' }"
+              ></div>
+            </div>
+            <span class="rp-count">{{ refresh.done }}/{{ refresh.total }}</span>
+            <button type="button" class="rp-stop" title="停止刷新热度" @click="stopRefreshScores">×</button>
+          </div>
           <!-- 阶段提示：仅在任务运行/暂停/停止中显示，区分"抓取ID"与"下载" -->
           <div v-if="runningPhaseText || runningFailureHint" class="progress-phase">
             <span>{{ runningPhaseText }}</span>
@@ -5012,6 +5384,50 @@ const tagFolderPreview = computed(() => {
               title="关闭"
               aria-label="关闭提示"
               @click="dismissRetryPagesHint"
+            >×</button>
+          </div>
+          <!-- 断点恢复横幅：任务结束后给两个一键动作。
+               续跑 = 收 ID 阶段停止时从 page_cursor 的最后一页跑到原末页（零遗漏）；
+               重试失败页 = 永久错误跳过的页走 pages=[...] 定向重试。
+               重启 App 后用入队区的「检查断点」从 deck.db 找回。 -->
+          <div
+            v-if="recoveryBanner.show"
+            class="recovery-banner"
+            role="status"
+          >
+            <div class="recovery-banner-body">
+              <template v-if="recoveryBanner.cursor">
+                <div class="recovery-line">
+                  任务在收 ID 阶段停止于<strong>第 {{ recoveryBanner.cursor.page }} 页</strong>
+                  <span class="recovery-muted">（原范围 {{ recoveryBanner.cursor.start_page }}–{{ recoveryBanner.cursor.end_page }} · {{ recoveryModeLabel(recoveryBanner.cursor.mode) }}）</span>
+                </div>
+                <button
+                  type="button"
+                  class="recovery-btn recovery-btn-primary"
+                  :disabled="task.isRunning || task.isStopping || queueRunning"
+                  :title="`用原配置从第 ${recoveryBanner.cursor.page} 页跑到第 ${recoveryBanner.cursor.end_page} 页`"
+                  @click="resumeFromCursor"
+                >▶ 从第 {{ recoveryBanner.cursor.page }} 页续跑（{{ recoveryBanner.cursor.page }}–{{ recoveryBanner.cursor.end_page }}）</button>
+              </template>
+              <template v-if="recoveryBanner.failedPages.length">
+                <div class="recovery-line" :class="{ 'recovery-line-second': recoveryBanner.cursor }">
+                  永久失败已跳过的页：<strong>{{ recoveryBanner.failedPages.join(', ') }}</strong>
+                </div>
+                <button
+                  type="button"
+                  class="recovery-btn"
+                  :disabled="task.isRunning || task.isStopping || queueRunning"
+                  title="只重新抓取这些页（成功后自动从失败列表移除）"
+                  @click="retryFailedPages"
+                >↻ 重试失败页 {{ recoveryBanner.failedPages.join(', ') }}</button>
+              </template>
+            </div>
+            <button
+              type="button"
+              class="recovery-close"
+              title="关闭（下次可用「检查断点」找回）"
+              aria-label="关闭恢复提示"
+              @click="dismissRecoveryBanner"
             >×</button>
           </div>
           <!-- 单条分段 bar：仅当后端给了 total（task_download_ids 模式）才渲染；
@@ -5066,7 +5482,7 @@ const tagFolderPreview = computed(() => {
       </div>
     </section>
 
-    <section v-if="showGalleryPanel" class="panel card gallery-panel">
+    <section class="panel card gallery-panel">
       <div class="gallery-head">
         <div class="gallery-title-row">
           <!-- 统一选择器：日期日历 + tag 文件夹列表（搜索 + 最近使用置顶）。
@@ -5079,10 +5495,20 @@ const tagFolderPreview = computed(() => {
             :available-tags="gallery.availableTags"
             :selected-date="gallery.selectedDate"
             :today="gallery.today"
+            syncable
             @select="loadGallery"
+            @sync-task-date="onGallerySyncTaskDate"
           />
           <span class="gallery-stats-inline">
             共 {{ galleryStats.total }} 张<span v-if="galleryStats.filtered !== galleryStats.total"> · 已筛选 {{ galleryStats.filtered }} 张</span>
+            <span v-if="galleryStats.roots.length > 1" class="gallery-root-breakdown">
+              <span
+                v-for="root in galleryStats.roots"
+                :key="root.key"
+                class="gallery-root-pill"
+                :title="`${root.label}: ${root.count} 张`"
+              >{{ root.label }} {{ root.count }}</span>
+            </span>
             <span class="border-legend" aria-label="图片边框颜色含义">
               <span class="legend-item" title="含有已收藏的画师或角色">
                 <span class="legend-dot legend-dot-fav" aria-hidden="true"></span>收藏画师/角色
@@ -5094,6 +5520,11 @@ const tagFolderPreview = computed(() => {
           </span>
         </div>
         <div class="gallery-tools">
+          <button
+            class="secondary tool-btn search-entry-btn"
+            @click="openSearchModal"
+            title="在本地 deck.db 内跨日期搜索角色/作者：支持中文名（离线字典展开）与 Danbooru 英文 tag，可限定日期范围，只搜当前在线的图库"
+          >🔍 跨日期搜索</button>
           <button
             class="secondary tool-btn"
             @click="reloadCurrentGallery"
@@ -5278,6 +5709,7 @@ const tagFolderPreview = computed(() => {
                 @focus="showSearchHistory = true"
                 @blur="onSearchHistoryBlur"
                 @keyup.enter="commitGallerySearch"
+                @input="searchHistoryRef?.resetSelection?.()"
                 @keydown="searchHistoryRef?.handleKeydown?.($event)"
               />
               <button
@@ -5469,6 +5901,7 @@ const tagFolderPreview = computed(() => {
         <button v-if="charContextMenu.kind === 'character'" class="char-ctx-item" @click="charMenuEditDictionary">编辑词条</button>
         <button class="char-ctx-item" @click="charMenuCopyRawTag">复制</button>
         <button class="char-ctx-item" @click="charMenuSearchTag">搜索 Tag</button>
+        <button class="char-ctx-item" @click="charMenuSearchCrossDate">在范围日期内搜索…</button>
 
         <!-- 多选区：仅当右键命中的 tag 已在 tagMultiSelect 集合里时显示。
              集合大小 >=1 时出现 divider + 复制 N / 搜索 N。 -->
@@ -5496,6 +5929,152 @@ const tagFolderPreview = computed(() => {
       @load-from-selection="loadSelectionToCryptoInput"
       @notify="({ message, type }) => showToast(message, type)"
     />
+
+    <!-- 跨日期本地搜索：只查 deck.db + 当前在线图库根，结果卡片自带 date，可跨日期操作 -->
+    <Teleport to="body">
+      <div v-if="searchModal.open" class="search-modal-overlay" @click.self="closeSearchModal">
+        <div class="search-modal">
+          <div class="search-modal-head">
+            <h3>🔍 跨日期搜索（本地库）</h3>
+            <button class="search-modal-close" @click="closeSearchModal" title="关闭">×</button>
+          </div>
+          <div class="search-form">
+            <span class="search-input-wrap search-modal-input-wrap">
+              <input
+                v-model="searchModal.q"
+                class="search-input"
+                type="text"
+                placeholder="角色或作者：hatsune_miku / 初音 / 作者英文名"
+                @focus="showModalSearchHistory = true"
+                @blur="onModalSearchHistoryBlur"
+                @keyup.enter="runSearch"
+                @input="modalSearchHistoryRef?.resetSelection?.()"
+                @keydown="modalSearchHistoryRef?.handleKeydown?.($event)"
+              />
+              <SearchHistoryDropdown
+                ref="modalSearchHistoryRef"
+                :items="searchHistory"
+                :open="showModalSearchHistory"
+                header-label="最近搜索（与画廊搜索共用）"
+                @pick="onPickModalSearchHistory"
+                @remove="removeSearchHistoryEntry"
+                @clear="clearSearchHistory"
+                @close="showModalSearchHistory = false"
+              />
+            </span>
+            <div class="seg-group search-kind-group">
+              <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'auto' }" @click="searchModal.kind = 'auto'" title="同时匹配角色 tag 与作者">自动</button>
+              <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'character' }" @click="searchModal.kind = 'character'" title="只匹配角色 tag（tag_character）">角色</button>
+              <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'artist' }" @click="searchModal.kind = 'artist'" title="只匹配作者（artist 列 / tag_artist，需英文原名）">作者</button>
+            </div>
+            <div class="search-date-row">
+              <TaskDatePicker
+                v-model="searchModal.start"
+                placeholder="开始日期（空=不限）"
+                :available-dates="gallery.availableDates"
+                :date-folders="gallery.availableDateFolders"
+              />
+              <span class="search-date-sep">～</span>
+              <TaskDatePicker
+                v-model="searchModal.end"
+                placeholder="结束日期（空=不限）"
+                :available-dates="gallery.availableDates"
+                :date-folders="gallery.availableDateFolders"
+              />
+            </div>
+            <button class="primary search-run-btn" :disabled="searchModal.loading || !searchModal.q.trim()" @click="runSearch">
+              {{ searchModal.loading ? '搜索中…' : '搜索' }}
+            </button>
+          </div>
+
+          <div v-if="searchModal.expandedTags.length" class="search-hint-text" :title="searchModal.expandedTags.join(', ')">
+            中文名已展开为 {{ searchModal.expandedTags.length }} 个 tag：{{ searchModal.expandedTags.slice(0, 6).join(', ') }}{{ searchModal.expandedTags.length > 6 ? ' …' : '' }}
+          </div>
+          <div v-if="searchModal.offlineLibraries.length" class="search-hint-text search-hint-warn">
+            ⚠ 有 {{ searchModal.offlineLibraries.length }} 个图库离线未参与搜索：{{ searchModal.offlineLibraries.map(r => r.label).join('、') }}
+          </div>
+          <div v-if="searchModal.msg" class="search-hint-text" :class="{ 'search-hint-warn': searchModal.searched }">{{ searchModal.msg }}</div>
+
+          <div class="search-result-meta" v-if="searchModal.images.length">
+            共匹配 <strong>{{ searchModal.total }}</strong> 条 · 当前显示 {{ searchModal.images.length }} 条（按日期倒序）
+          </div>
+
+          <div class="search-results-scroll">
+            <div v-if="searchModal.images.length" class="gallery-grid search-results-grid" style="--card-min-w: 150px">
+              <article
+                v-for="item in searchModal.images"
+                :key="item.localPath || item.filename"
+                class="image-card search-result-card"
+                :title="`${item.date} · ${item.artist} · ${item.filename}`"
+              >
+                <div class="thumb-wrap">
+                  <img
+                    class="thumb clickable-thumb"
+                    :class="{ 'is-loaded': item.loaded }"
+                    :src="item.thumbUrl"
+                    :alt="item.filename"
+                    loading="lazy"
+                    decoding="async"
+                    @load="onThumbLoad(item)"
+                    @error="onThumbError(item)"
+                    @click="openSearchLightbox(item)"
+                  />
+                  <div class="thumb-skeleton" :class="{ 'is-hidden': item.loaded }" aria-hidden="true"></div>
+                  <span
+                    v-if="isAnimatedCard(item)"
+                    class="video-format-watermark"
+                    :class="`format-${cardFormatLabel(item)}`"
+                  >
+                    <svg v-if="isVideoItem(item)" class="format-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                      <path d="M8 5v14l11-7z"/>
+                    </svg>
+                    <span v-else class="format-text">GIF</span>
+                  </span>
+                  <span class="search-date-badge">{{ item.date }}</span>
+                  <span v-if="item.libraryLabel && item.libraryLabel !== 'hot_pic'" class="search-lib-badge" :title="item.libraryRoot">{{ item.libraryLabel }}</span>
+                </div>
+                <div v-if="(item.score || 0) > 0 || (item.favCount || 0) > 0" class="score-badge">
+                  <span><span class="score-star">★</span> {{ item.score || 0 }}</span>
+                  <span><span class="score-heart">♥</span> {{ item.favCount || 0 }}</span>
+                </div>
+                <div class="search-card-artist" :title="item.artist">{{ item.artist }}</div>
+                <div class="button-row compact card-actions search-card-actions">
+                  <button class="secondary" @click="openOriginal(item)" :disabled="!item.postUrl" title="打开 Danbooru 原帖">原帖</button>
+                  <button class="secondary" @click="openLocal(item)" :disabled="!item.localPath" title="打开本地文件 / 在文件夹中选中">本地</button>
+                  <button @click="editSearchItem(item)" title="编辑打码">编辑</button>
+                  <button class="secondary" @click="jumpToSearchDate(item)" :title="`画廊前往 ${item.date}`">前往</button>
+                </div>
+              </article>
+            </div>
+            <div v-else-if="!searchModal.loading && searchModal.searched && !searchModal.msg" class="search-empty">没有匹配的图片</div>
+          </div>
+
+          <div v-if="searchModal.images.length" class="search-modal-foot">
+            <button class="secondary" :disabled="!searchHasMore || searchModal.loadingMore" @click="loadMoreSearch">
+              {{ searchModal.loadingMore ? '加载中…' : (searchHasMore ? `加载更多（还有 ${searchModal.total - searchModal.images.length} 条左右）` : '没有更多了') }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- 搜索结果大图预览（轻量 lightbox，不接入主 viewer 的跨日期索引） -->
+    <Teleport to="body">
+      <div v-if="searchModal.lightbox.open" class="search-lightbox-overlay" @click.self="closeSearchLightbox">
+        <button class="search-lightbox-close" @click="closeSearchLightbox" title="关闭">×</button>
+        <video v-if="searchModal.lightbox.isVideo && searchModal.lightbox.url" :src="searchModal.lightbox.url" controls autoplay class="search-lightbox-video"></video>
+        <img v-else-if="searchModal.lightbox.url" :src="searchModal.lightbox.url" class="search-lightbox-img" />
+        <div v-else class="search-lightbox-nopreview">该 ZIP 动图没有伴生 GIF，无法在此预览，请点「本地」打开</div>
+        <div v-if="searchModal.lightbox.item" class="search-lightbox-bar" @click.stop>
+          <span class="search-lightbox-date">{{ searchModal.lightbox.item.date }}</span>
+          <span class="search-lightbox-artist">{{ searchModal.lightbox.item.artist }}</span>
+          <button class="secondary" @click="openOriginal(searchModal.lightbox.item)" :disabled="!searchModal.lightbox.item.postUrl">原帖</button>
+          <button class="secondary" @click="openLocal(searchModal.lightbox.item)" :disabled="!searchModal.lightbox.item.localPath">本地</button>
+          <button @click="editSearchItem(searchModal.lightbox.item)">编辑</button>
+          <button class="secondary" @click="jumpToSearchDate(searchModal.lightbox.item)">前往该日期</button>
+        </div>
+      </div>
+    </Teleport>
 
     <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer" @mousemove="onViewerMouseMove" @mouseleave="viewer.toolbarHovered = false">
       <div
@@ -5765,6 +6344,7 @@ const tagFolderPreview = computed(() => {
       :state="mergeViewerDataModal"
       :is-busy="task.isRunning || task.isStopping"
       @update:open="closeMergeViewerDataModal"
+      @roots-changed="onLibraryRootsChanged"
       @success="onMergeViewerDataSuccess"
     />
 
@@ -5795,21 +6375,9 @@ const tagFolderPreview = computed(() => {
 .crawler-layout {
   grid-template-columns: 300px minmax(0, 1fr);
 }
-.crawler-layout.gallery-hidden {
-  /* 隐藏图库后只剩左栏一列：列宽固定为 300px（与有图库时一致），
-     不再扩展成 minmax(320,440px)，避免「点隐藏图库后整列突然变宽」、
-     头排按钮也跟着视觉变宽的违和感。justify-content: center 仍保留，
-     让单一列在整行里居中、两侧留白对称。 */
-  grid-template-columns: 300px;
-  justify-content: center;
-}
 @media (max-width: 1400px) {
   .crawler-layout {
     grid-template-columns: 270px minmax(0, 1fr);
-  }
-  .crawler-layout.gallery-hidden {
-    grid-template-columns: 270px;
-    justify-content: center;
   }
 }
 
@@ -6126,6 +6694,25 @@ const tagFolderPreview = computed(() => {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+.gallery-root-breakdown {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.gallery-root-pill {
+  max-width: 150px;
+  padding: 1px 6px;
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.08);
+  color: var(--accent-deep);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* 卡片边框颜色含义图例：与 image-card.is-favorited / .has-ai-badge 的 box-shadow 同色 */
@@ -7232,6 +7819,100 @@ const tagFolderPreview = computed(() => {
   outline-offset: 1px;
 }
 
+/* 断点恢复横幅：任务停止/完成后的两个一键动作（续跑 / 重试失败页）。
+   比 retry-pages-hint 醒目（动作型 UI），蓝边框；× 关闭后可经「检查断点」找回。 */
+.recovery-banner {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 9px 30px 9px 11px;
+  border: 1px solid rgba(96, 165, 250, 0.5);
+  border-radius: 9px;
+  background: rgba(96, 165, 250, 0.09);
+}
+.recovery-banner-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.recovery-line {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: rgba(226, 232, 240, 0.92);
+}
+.recovery-line-second {
+  margin-top: 2px;
+}
+.recovery-muted {
+  color: rgba(148, 163, 184, 0.95);
+  font-size: 11px;
+}
+.recovery-btn {
+  align-self: flex-start;
+  padding: 4px 11px;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 7px;
+  border: 1px solid rgba(96, 165, 250, 0.55);
+  background: rgba(96, 165, 250, 0.14);
+  color: #bfdbfe;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.recovery-btn:hover:not(:disabled) {
+  background: rgba(96, 165, 250, 0.26);
+  border-color: rgba(147, 197, 253, 0.8);
+}
+.recovery-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.recovery-btn-primary {
+  border-color: rgba(59, 130, 246, 0.75);
+  background: rgba(59, 130, 246, 0.32);
+  color: #dbeafe;
+}
+.recovery-btn-primary:hover:not(:disabled) {
+  background: rgba(59, 130, 246, 0.48);
+}
+.recovery-close {
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.10);
+  color: rgba(226, 232, 240, 0.85);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+}
+.recovery-close:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+.tq-add-btn-ghost {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-soft, rgba(226, 232, 240, 0.85));
+  font-weight: 500;
+}
+.tq-add-btn-ghost:hover {
+  border-color: rgba(96, 165, 250, 0.6);
+  color: #bfdbfe;
+}
+
 .progress-bar {
   position: relative;
   height: 8px;
@@ -7275,6 +7956,56 @@ const tagFolderPreview = computed(() => {
 .progress-fail-tail { color: #fca5a5; }
 .progress-skip-tail { color: #fcd34d; }
 .progress-success-tail { color: #86efac; }
+
+/* 刷新热度行：位于下载进度上方，复用暗色日志面板配色；进度段与页进度条同款天蓝 */
+.refresh-progress-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-size: 11.5px;
+  color: rgba(255, 255, 255, 0.85);
+}
+.rp-label {
+  flex: 0 0 auto;
+  font-weight: 600;
+  color: #7dd3fc;
+  white-space: nowrap;
+}
+.rp-bar {
+  flex: 1 1 auto;
+  height: 6px;
+}
+.rp-count {
+  flex: 0 0 auto;
+  min-width: 58px;
+  text-align: right;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.75);
+}
+.rp-stop {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 50%;
+  color: rgba(255, 255, 255, 0.75);
+  background: rgba(255, 255, 255, 0.12);
+  border: none;
+  box-shadow: none;
+}
+.rp-stop:hover:not(:disabled) {
+  filter: none;
+  box-shadow: none;
+  background: rgba(220, 38, 38, 0.55);
+  color: #fff;
+}
 
 .error-banner {
   margin-top: 10px;
@@ -7461,7 +8192,9 @@ const tagFolderPreview = computed(() => {
 }
 .display-menu {
   position: absolute;
-  top: calc(100% + 4px);
+  /* 必须与按钮重叠 1px 而不是留 4px 缝隙：菜单纯靠 wrapper :hover 显示，
+     鼠标下移穿过缝隙时离开了 hover 区，菜单会"有概率"在到达前收起。 */
+  top: calc(100% - 1px);
   right: 0;
   z-index: 200;
   min-width: 300px;
@@ -7678,7 +8411,8 @@ const tagFolderPreview = computed(() => {
 }
 .translate-menu {
   position: absolute;
-  top: calc(100% + 4px);
+  /* 与 .display-menu 同款：重叠 1px，杜绝 hover 缝隙导致菜单收起 */
+  top: calc(100% - 1px);
   right: 0;
   z-index: 200;
   min-width: 220px;
@@ -7727,7 +8461,8 @@ const tagFolderPreview = computed(() => {
 }
 .refresh-menu {
   position: absolute;
-  top: calc(100% + 4px);
+  /* 与 .display-menu 同款：重叠 1px，杜绝 hover 缝隙导致菜单收起 */
+  top: calc(100% - 1px);
   right: 0;
   z-index: 200;
   min-width: 200px;
@@ -8617,34 +9352,6 @@ const tagFolderPreview = computed(() => {
   border-radius: 9px;
   background: rgba(var(--accent-rgb), 0.02);
 }
-.tq-actions { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
-.tq-action-group { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
-.tq-action-label {
-  font-size: 11px;
-  color: var(--muted);
-  letter-spacing: 0.04em;
-  padding: 0 4px 0 2px;
-  border-left: 2px solid rgba(var(--accent-rgb), 0.35);
-  margin-right: 2px;
-  user-select: none;
-}
-.tq-actions button {
-  font-size: 12px;
-  padding: 5px 13px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-.tq-actions .tq-run {
-  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
-  border: none;
-  color: #fff;
-  font-weight: 600;
-  box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.28);
-}
-.tq-actions .tq-run:hover:not(:disabled) { filter: brightness(1.06); box-shadow: 0 3px 12px rgba(var(--accent-rgb), 0.38); }
-.tq-actions .tq-run:disabled { opacity: 0.5; box-shadow: none; }
-
 /* ---- 队列项入场 / 离场动画（TransitionGroup name="tq"）---- */
 .tq-enter-from { opacity: 0; transform: translateY(-8px) scale(0.97); }
 .tq-enter-to { opacity: 1; transform: translateY(0) scale(1); }
@@ -9094,9 +9801,6 @@ const tagFolderPreview = computed(() => {
   margin-top: 10px;
   border-radius: 10px;
 }
-.status-pills {
-  gap: 6px;
-}
 .action-row-label {
   display: inline-flex;
   align-items: center;
@@ -9414,4 +10118,506 @@ const tagFolderPreview = computed(() => {
     padding: 8px 0;
   }
 }
+
+/* ================= 紧凑左栏（cp-*）：常驻说明文字下线后的再布局 =================
+   设计取向：高频开关药丸化（SFW/代理）、并发小药丸常驻同一行、浏览工具收成
+   一排四等分连体分段按钮、动作/范围从分段按钮改成紧凑下拉框、页码两个小输入框
+   （历史值走原生 datalist）、队列默认折叠成一行并把传输控制图标化。 */
+
+/* ---- 头部：标题 + 教程/设置/图库 图标 ---- */
+.cp-head {
+  align-items: center;
+  flex-wrap: nowrap;
+}
+.cp-icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  border-radius: 8px;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  color: var(--accent-deep);
+  box-shadow: none;
+  flex: 0 0 auto;
+}
+.cp-icon-btn:hover:not(:disabled) {
+  filter: none;
+  background: var(--soft-violet);
+  box-shadow: none;
+}
+
+/* ---- 快捷行：SFW/代理药丸（配色沿用 safe-mode-btn/proxy-mode-btn）+ 并发 ---- */
+.cp-quick-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 6px;
+  margin: 0 0 8px;
+}
+.cp-quick-row .concurrency-field-inline { flex: 0 0 auto; margin-left: auto; }
+
+/* ---- 浏览工具：四等分连体分段条，任何分辨率都在同一行 ---- */
+.cp-tools {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  margin: 0 0 10px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-muted);
+}
+.cp-tool-btn {
+  min-width: 0;
+  padding: 6px 2px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  background: transparent;
+  color: var(--accent-deep);
+  border: none;
+  border-radius: 7px;
+  box-shadow: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cp-tool-btn + .cp-tool-btn { box-shadow: -1px 0 0 var(--line); }
+.cp-tool-btn:hover:not(:disabled) {
+  filter: none;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: -1px 0 0 var(--line);
+}
+.cp-tool-btn.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(var(--accent-rgb), 0.3);
+}
+.cp-tool-btn.active + .cp-tool-btn { box-shadow: none; }
+
+/* 抓图页只有 3 个模式芯片：覆盖全局的 4 列网格，让三粒等宽铺满整行 */
+.cp-head ~ .mode-selector {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* ---- 紧凑参数行：标签在左、控件紧跟；下拉替代分段按钮 ---- */
+.cp-rows {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  margin: 0 0 8px;
+}
+.cp-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
+}
+.cp-label {
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  flex: 0 0 auto;
+  user-select: none;
+}
+.cp-select {
+  width: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 5px 8px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+.cp-pages { gap: 5px; }
+.cp-num {
+  width: 52px;
+  flex: 0 0 auto;
+  padding: 4px;
+  font-size: 12px;
+  text-align: center;
+  border-radius: 8px;
+  -moz-appearance: textfield;
+}
+.cp-num::-webkit-outer-spin-button,
+.cp-num::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.cp-dash { color: var(--muted); font-size: 12px; }
+.cp-grow { flex: 1 1 auto; min-width: 0; }
+.cp-grow input { width: 100%; }
+.cp-folder-preview { margin: -2px 0 8px; font-size: 11.5px; }
+/* 日期 / 过滤标签这种整行字段：小标签固定在左，控件吃满剩余宽度 */
+.cp-field-date {
+  display: flex;
+  margin: 4px 0 8px;
+}
+.cp-field-date > .cp-label { min-width: 32px; }
+.cp-field-date input { flex: 1 1 auto; min-width: 0; }
+.cp-field-date .task-date-picker { flex: 1 1 auto; min-width: 0; }
+/* 日期范围：起/止 各占一整行，与单日「日期」行的日历外观完全一致（含 ‹ › 步进） */
+.cp-range-row {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+}
+.cp-range-row .cp-field { width: 100%; }
+.cp-range-row .cp-label { min-width: 32px; }
+/* by-ids 的策略下拉挂在 id-download-panel 里，底边距跟其他参数行齐 */
+.cp-field.id-download-panel { margin: 0 0 8px; }
+.control-scroll > .button-row { margin: 2px 0 4px; }
+/* 入队前的目标 folder 明示小药丸 */
+.cp-target-hint {
+  align-self: flex-start;
+  max-width: 100%;
+  margin: 4px 0 8px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(var(--accent-rgb), 0.08);
+  color: var(--accent-deep);
+  font-size: 11.5px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* ---- 顺序队列：默认折叠成一行标题，传输控制全部图标化 ---- */
+.cp-tq.collapsed {
+  padding: 6px 10px;
+  gap: 0;
+  max-height: none;
+}
+.cp-tq-header {
+  padding: 0;
+  gap: 6px;
+}
+.tq-caret {
+  width: 20px;
+  height: 22px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  border-radius: 5px;
+}
+.tq-caret:hover:not(:disabled) {
+  filter: none;
+  background: rgba(var(--accent-rgb), 0.1);
+  color: var(--accent-deep);
+  box-shadow: none;
+}
+.tq-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0;
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--accent-deep);
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  text-align: left;
+  cursor: pointer;
+}
+.tq-name:hover:not(:disabled) { filter: none; box-shadow: none; }
+.cp-tq-ops {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.tq-ico {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  border-radius: 7px;
+  background: rgba(var(--accent-rgb), 0.07);
+  border: 1px solid transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+.tq-ico:hover:not(:disabled) {
+  filter: none;
+  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--accent-deep);
+  box-shadow: none;
+}
+.tq-ico-run {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #fff;
+}
+.tq-ico-run:hover:not(:disabled) {
+  filter: brightness(1.06);
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  box-shadow: none;
+}
+.tq-ico-stop:hover:not(:disabled) {
+  color: #dc2626;
+  background: rgba(239, 68, 68, 0.12);
+}
+.cp-tq .tq-empty { margin: 0 2px; }
+
+/* ================= 跨日期本地搜索浮层 ================= */
+.search-entry-btn {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  border: none;
+  color: #fff;
+}
+.search-entry-btn:hover { filter: brightness(1.07); }
+
+.search-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10060;
+  background: rgba(15, 18, 38, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.search-modal {
+  width: min(1100px, 96vw);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface, #fffdf8);
+  border-radius: 14px;
+  box-shadow: 0 24px 70px rgba(10, 12, 30, 0.4);
+  overflow: hidden;
+}
+
+.search-modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.search-modal-head h3 { margin: 0; font-size: 15px; color: var(--ink); }
+.search-modal-close {
+  width: 28px; height: 28px;
+  /* 全局 button 带 padding:8px 12px，会把 × 字形挤偏；清零 + flex 双轴居中 */
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none; border-radius: 8px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+.search-modal-close:hover { background: rgba(220, 38, 38, 0.12); color: #dc2626; box-shadow: none; }
+
+.search-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px 6px;
+}
+.search-input {
+  flex: 1 1 260px;
+  min-width: 220px;
+  height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13px;
+}
+.search-input:focus { outline: 2px solid rgba(var(--accent-rgb), 0.35); border-color: var(--accent); }
+/* 跨日期搜索框外包了历史下拉的 wrap：接替原 input 的 flex 占位，内部 input 拉满 */
+.search-modal-input-wrap {
+  flex: 1 1 260px;
+  min-width: 220px;
+  display: flex;
+}
+.search-modal-input-wrap .search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+.search-kind-group { flex: 0 0 auto; }
+.search-date-row {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.search-date-row .task-date-picker { flex: 1 1 0; min-width: 160px; }
+.search-date-sep { color: var(--muted); font-size: 12px; }
+.search-run-btn {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 18px;
+  border-radius: 8px;
+  background: var(--accent-gradient);
+  color: #fff;
+  border: none;
+  font-size: 13px;
+  cursor: pointer;
+}
+.search-run-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.search-hint-text {
+  padding: 4px 16px;
+  font-size: 11.5px;
+  color: var(--muted);
+  word-break: break-all;
+}
+.search-hint-warn { color: #b45309; }
+
+.search-result-meta {
+  padding: 6px 16px 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.search-result-meta strong { color: var(--accent-deep); }
+
+.search-results-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 10px 16px;
+  min-height: 120px;
+}
+.search-results-grid { margin: 0; }
+.search-result-card { cursor: default; }
+
+.search-date-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  z-index: 4;
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: rgba(15, 18, 38, 0.72);
+  color: #fff;
+  font-size: 10.5px;
+  line-height: 1.5;
+  pointer-events: none;
+}
+.search-lib-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 4;
+  max-width: 48%;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(99, 102, 241, 0.82);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+.search-card-artist {
+  padding: 2px 4px 0;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.search-card-actions { margin-top: 2px; }
+.search-card-actions button { font-size: 11px; padding: 2px 6px; }
+
+.search-empty {
+  padding: 40px 0;
+  text-align: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.search-modal-foot {
+  display: flex;
+  justify-content: center;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--line);
+}
+.search-modal-foot .secondary { min-width: 220px; height: 30px; border-radius: 8px; }
+
+/* 搜索结果 lightbox */
+.search-lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10070;
+  background: rgba(8, 10, 24, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px 64px;
+}
+.search-lightbox-img,
+.search-lightbox-video {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 6px;
+}
+.search-lightbox-nopreview { color: #d8d5e2; font-size: 14px; }
+.search-lightbox-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  width: 34px; height: 34px;
+  /* 全局 button 带 padding:8px 12px，会把 × 字形挤偏；清零 + flex 双轴居中 */
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none; border-radius: 50%;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: none;
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.search-lightbox-close:hover { background: rgba(220, 38, 38, 0.7); box-shadow: none; }
+.search-lightbox-bar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-radius: 10px;
+  background: rgba(20, 22, 40, 0.82);
+  max-width: 94vw;
+}
+.search-lightbox-date { color: #7dd3fc; font-size: 12px; font-weight: 600; }
+.search-lightbox-artist { color: #d8d5e2; font-size: 12px; margin-right: 4px; }
+.search-lightbox-bar button { height: 26px; padding: 0 10px; font-size: 12px; border-radius: 7px; }
 </style>

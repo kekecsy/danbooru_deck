@@ -1,8 +1,6 @@
 import os
-from time import sleep
 
-from curl_cffi import requests
-
+import http_client
 import danbooru_api
 
 
@@ -100,15 +98,14 @@ def get_posts_by_tags(tags, page, limit=100, timeout=20):
         "pid": pid,
         "limit": max(1, min(100, _as_int(limit, 100))),
     }
-    r = requests.get(
-        BASE_URL,
-        params=params,
-        headers=HEADERS,
+    # Gelbooru 限制宽松：共享 session/重试，但不挂 Danbooru 的令牌桶。
+    r = http_client.request(
+        "GET", BASE_URL,
+        kind="json", retries=4, timeout=timeout,
+        params=params, headers=HEADERS,
         proxies=danbooru_api.PROXIES,
-        impersonate="chrome120",
-        timeout=timeout,
+        permanent=http_client.LIST_PERMANENT_STATUS,
     )
-    r.raise_for_status()
     data = r.json()
     if isinstance(data, list):
         return _normalize_posts(data)
@@ -128,34 +125,23 @@ def download_image(url, folder, custom_print=print, retries=3, delay=3, raise_on
         custom_print(f"文件已存在: {filename}")
         return filename
 
-    permanent = {403, 404, 410, 451}
-    attempt = 0
-    while attempt < retries:
-        attempt += 1
-        try:
-            custom_print(f"正在下载: {filename} ...")
-            r = requests.get(
-                url,
-                timeout=30,
-                proxies=danbooru_api.PROXIES,
-                headers=HEADERS,
-                impersonate="chrome120",
-            )
-            if r.status_code == 200:
-                with open(filepath, "wb") as f:
-                    f.write(r.content)
-                custom_print(f"下载完成: {filename}")
-                return filename
-            if r.status_code in permanent:
-                custom_print(f"下载失败(已删除/不可用 {r.status_code}): {url}")
-                return None
-            custom_print(f"下载失败(状态码 {r.status_code})，第 {attempt}/{retries} 次: {url}")
-        except Exception as e:
-            custom_print(f"下载出错(网络)，第 {attempt}/{retries} 次: {e}")
-        if attempt < retries:
-            sleep(delay)
-
-    if raise_on_transient:
-        raise TransientImageError(f"图片下载重试 {retries} 次仍失败: {filename}")
-    custom_print(f"下载失败(网络，重试 {retries} 次仍失败): {filename}")
-    return None
+    try:
+        custom_print(f"正在下载: {filename} ...")
+        r = http_client.request(
+            "GET", url,
+            kind="cdn", retries=retries, timeout=30,
+            headers=HEADERS, proxies=danbooru_api.PROXIES,
+            base_delay=delay,
+        )
+        with open(filepath, "wb") as f:
+            f.write(r.content)
+        custom_print(f"下载完成: {filename}")
+        return filename
+    except http_client.PermanentHTTPError as e:
+        custom_print(f"下载失败(已删除/不可用 {e.status_code}): {url}")
+        return None
+    except Exception as e:
+        custom_print(f"下载失败(网络，重试 {retries} 次仍失败): {e}")
+        if raise_on_transient:
+            raise TransientImageError(f"图片下载重试 {retries} 次仍失败: {filename}")
+        return None

@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import threading
 import time
 from requests.utils import get_environ_proxies
 
@@ -33,7 +34,9 @@ def _viewer_item_key(item):
 def dedup_viewer_data(items):
     """对 daily_viewer_data 列表去重，保留首次出现的条目。"""
     if not items:
-        return items if items is not None else []
+        # 必须返回新列表：旧写法直接返回入参空列表，调用方若之后 append
+        # （merge_daily_viewer_data 就是），会反向污染调用方手里的"原列表"
+        return []
     seen = set()
     deduped = []
     for item in items:
@@ -102,15 +105,79 @@ def tag_folder_display(folder_name: str) -> str:
     return body
 
 
-def save_global_data(log_data, artist_stats, log_path, stats_path):
-    temp_path = log_path + ".tmp"
-    with open(temp_path, 'w', encoding='utf-8') as f:
-        json.dump(log_data, f, ensure_ascii=False, indent=4)
-    os.replace(temp_path, log_path)
-    with open(stats_path, 'w', encoding='utf-8') as f:
-        json.dump(artist_stats, f, ensure_ascii=False, indent=4)
+# ---------------- 进程级 per-path 锁 + 统一原子写 ----------------
+# 所有模块（danbooru_data / main.py 的 LogStore、StatsStore、收藏保存等）共享同一张
+# 「按文件绝对路径分配的可重入锁」表，对同一个 JSON 的读 / 写在整个进程内串行。
+#
+# 解决的并发问题：
+#   1) 旧实现临时名固定为 "<path>.tmp"，两个写线程同时写同一个 .tmp 互相覆盖，
+#      第二个 os.replace 还可能因 .tmp 已被前一个消费而抛 FileNotFoundError；
+#   2) Windows 上当一个线程正打开该文件读时，另一个线程的 os.replace 会抛
+#      PermissionError([WinError 5] 拒绝访问)（杀软 / 索引器 / Electron 兜底读句柄）。
+# 后端是单进程 uvicorn（无 --workers），threading 锁即可，无需跨进程文件锁。
+_PATH_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS = {}
 
 
-def save_viewer_data(viewer_data, save_dir):
-    with open(os.path.join(save_dir, "viewer_data.json"), 'w', encoding='utf-8') as f:
-        json.dump(viewer_data, f, ensure_ascii=False, indent=4)
+def file_lock_for(path):
+    """返回某个文件路径对应的进程级可重入锁（同一路径恒返回同一把）。"""
+    key = os.path.abspath(path)
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[key] = lock
+        return lock
+
+
+def _atomic_replace(src, dst, attempts=5, base_delay=0.05):
+    """os.replace 在 Windows 上偶发 PermissionError（杀软 / 索引器 / 外部进程刚好持有句柄，
+    例如 Electron 兜底读取或 caption 元数据查询），短暂重试几次即可恢复；POSIX 下通常一次成功。"""
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(base_delay * (i + 1))
+
+
+def read_json_atomic(path, default=None):
+    """在 per-path 锁下读取 JSON；文件不存在或损坏时返回 default。
+    与 atomic_write_json 共用同一把锁，读期间不会有别的线程在做 os.replace。"""
+    if default is None:
+        default = {}
+    with file_lock_for(path):
+        if os.path.exists(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                return default
+        return default
+
+
+def atomic_write_json(path, data, indent=4):
+    """全进程统一的原子 JSON 写：per-path RLock 串行 + 唯一临时名 + fsync +
+    os.replace 原子替换 + Windows PermissionError 重试 + finally 清理残留临时文件。"""
+    with file_lock_for(path):
+        # 唯一临时名（带 pid + 线程号 + 单调计数）：即便将来有调用方绕过锁，
+        # 多个写也不会撞同一个 .tmp。
+        temp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.{next(_TMP_COUNTER)}.tmp"
+        try:
+            with open(temp_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=indent)
+                f.flush()
+                os.fsync(f.fileno())
+            _atomic_replace(temp_path, path)
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+
+# 同一线程内连续两次写也保证临时名不同（可重入锁下 tid 相同）。
+_TMP_COUNTER = iter(range(2 ** 31))

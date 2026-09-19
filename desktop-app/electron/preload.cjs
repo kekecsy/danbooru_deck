@@ -6,8 +6,14 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     getPaths: () => ipcRenderer.invoke('app:get-paths'),
     revealFolder: (key) => ipcRenderer.invoke('app:reveal-folder', key)
   },
+  libraryRoots: {
+    add: () => ipcRenderer.invoke('library-roots:add'),
+    remove: (id) => ipcRenderer.invoke('library-roots:remove', id),
+    list: () => ipcRenderer.invoke('library-roots:list')
+  },
   gallery: {
     getByDate: (date) => ipcRenderer.invoke('gallery:get-by-date', date),
+    searchEntries: (params) => ipcRenderer.invoke('gallery:search-entries', params),
     openLocalFile: (localPath) => ipcRenderer.invoke('gallery:open-local-file', localPath),
     revealLocalFile: (localPath) => ipcRenderer.invoke('gallery:reveal-local-file', localPath)
   },
@@ -18,6 +24,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     resume: () => ipcRenderer.invoke('crawler:resume'),
     stop: () => ipcRenderer.invoke('crawler:stop'),
     status: () => ipcRenderer.invoke('crawler:status'),
+    recoveryState: (params) => ipcRenderer.invoke('crawler:recovery-state', params),
     setSafeMode: (safe) => ipcRenderer.invoke('crawler:set-safe-mode', !!safe)
   },
   external: {

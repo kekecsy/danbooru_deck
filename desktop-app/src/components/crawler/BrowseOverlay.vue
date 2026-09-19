@@ -179,6 +179,7 @@ function submitJump() {
               @focus="showTagHistory = true"
               @blur="onTagHistoryBlur"
               @keyup.enter="emit('run-search', 1)"
+              @input="tagHistoryRef?.resetSelection?.()"
               @keydown="tagHistoryRef?.handleKeydown?.($event)"
             />
             <SearchHistoryDropdown

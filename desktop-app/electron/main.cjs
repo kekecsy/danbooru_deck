@@ -525,6 +525,62 @@ async function buildGalleryByDate(requestedDate) {
   return { selectedDate, availableDates, availableDateFolders: dateFolders, today, libraryRoots: loadLibraryRoots(), images };
 }
 
+function mapSearchItem(item) {
+  // 与 buildGalleryByDate 的卡片结构保持一致（camelCase），date 是每项各自的日期，
+  // 因为搜索结果跨多个日期文件夹。
+  return {
+    artist: item.artist || '未知',
+    filename: item.filename,
+    localPath: toAbsolutePath(item.local_path || ''),
+    postUrl: item.post_url || '',
+    characters: item.characters || '',
+    tags: item.tags || {},
+    score: item.score || 0,
+    favCount: item.fav_count || 0,
+    libraryId: item.library_id || 'default',
+    libraryLabel: item.library_label || '',
+    libraryRoot: item.library_root || '',
+    sourceDir: item.source_dir || '',
+    date: item.date || ''
+  };
+}
+
+async function searchGalleryEntries(params = {}) {
+  // 纯 deck.db 本地搜索，必须后端在跑；没有磁盘兜底（JSON 镜像跨日期扫描太贵）。
+  const qs = new URLSearchParams();
+  if (params.q) qs.set('q', params.q);
+  qs.set('kind', params.kind || 'auto');
+  if (params.start) qs.set('start', params.start);
+  if (params.end) qs.set('end', params.end);
+  qs.set('limit', String(Math.min(Number(params.limit) || 120, 500)));
+  qs.set('offset', String(Number(params.offset) || 0));
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  let data;
+  try {
+    const resp = await fetch(`${crawlerApiBase}/api/search_entries?${qs.toString()}`, {
+      signal: controller.signal
+    });
+    if (!resp.ok) throw new Error(`search_entries HTTP ${resp.status}`);
+    data = await resp.json();
+  } finally {
+    clearTimeout(timeout);
+  }
+  return {
+    ok: !!data.ok,
+    msg: data.msg || '',
+    images: (data.items || []).map(mapSearchItem),
+    total: data.total || 0,
+    returned: data.returned ?? 0,
+    limit: data.limit || 120,
+    offset: data.offset || 0,
+    kind: data.kind || params.kind || 'auto',
+    expandedTags: data.expanded_tags || [],
+    offlineLibraries: data.offline_libraries || []
+  };
+}
+
 function isWithin(baseDir, targetPath) {
   const base = path.resolve(baseDir);
   const target = path.resolve(targetPath);
@@ -568,10 +624,21 @@ function listPresetFiles() {
   return items;
 }
 
+// 项目内虚拟环境解释器的标准位置（uv venv / python -m venv 都是这个布局）。
+function venvPythonPath(venvDir) {
+  return process.platform === 'win32'
+    ? path.join(venvDir, 'Scripts', 'python.exe')
+    : path.join(venvDir, 'bin', 'python');
+}
+
 function getPythonCommand() {
   if (!isDev) {
-    return { command: path.join(resourceRoot, 'backend', 'crawler-backend.exe'), args: [] };
+    // PyInstaller 产物名：Windows 带 .exe 后缀，macOS / Linux 无后缀。
+    const backendName = process.platform === 'win32' ? 'crawler-backend.exe' : 'crawler-backend';
+    return { command: path.join(resourceRoot, 'backend', backendName), args: [] };
   }
+
+  // 1) env_config.json 显式指定（setup 脚本 / 用户本机覆盖，优先级最高）
   const configPath = path.join(repoRoot, 'env_config.json');
   try {
     if (fs.existsSync(configPath)) {
@@ -584,16 +651,22 @@ function getPythonCommand() {
     console.error('读取 env_config.json 失败:', err);
   }
 
+  // 2) 环境变量覆盖
   if (process.env.WEB_MOSAIC_PYTHON) {
     return { command: process.env.WEB_MOSAIC_PYTHON, args: [] };
   }
-  const candidates = [
-    { command: path.join('D:', 'Anaconda3', 'envs', 'pic_web', 'python.exe'), args: [] },
-    { command: path.join('D:', 'anaconda', 'python.exe'), args: [] },
-    { command: 'python', args: [] },
-    { command: 'py', args: ['-3'] }
-  ];
-  return candidates.find(item => fs.existsSync(item.command) || item.command === 'python' || item.command === 'py');
+
+  // 3) 项目根的 .venv（跨平台：Windows 是 Scripts\python.exe，POSIX 是 bin/python）
+  const localVenvPython = venvPythonPath(path.join(repoRoot, '.venv'));
+  if (fs.existsSync(localVenvPython)) {
+    return { command: localVenvPython, args: [] };
+  }
+
+  // 4) 退回 PATH 上的解释器。Windows 用 python / py 启动器；macOS / Linux 通常只有 python3。
+  //    这些命令是否存在要交给 spawn 时的 PATH 解析，existsSync 对裸命令名无能为力。
+  return process.platform === 'win32'
+    ? { command: 'python', args: [] }
+    : { command: 'python3', args: [] };
 }
 
 function getPythonSpawnArgs() {
@@ -620,7 +693,8 @@ async function apiFetchJson(endpoint, options = {}) {
   return response.json();
 }
 
-async function waitForCrawlerReady(retries = 40) {
+// 首次启用 deck.db 时后端要一次性导入 52 万行旧 JSON（20-60s），就绪窗口放宽到 90s（180×500ms）
+async function waitForCrawlerReady(retries = 180) {
   for (let i = 0; i < retries; i += 1) {
     try {
       await apiFetchJson('/api/status');
@@ -785,6 +859,7 @@ ipcMain.handle('app:get-context', async () => ({
 }));
 
 ipcMain.handle('gallery:get-by-date', async (_event, date) => buildGalleryByDate(date));
+ipcMain.handle('gallery:search-entries', async (_event, params) => searchGalleryEntries(params));
 
 ipcMain.handle('gallery:open-local-file', async (_event, localPath) => {
   const resolvedPath = toAbsolutePath(localPath);
@@ -1372,6 +1447,17 @@ ipcMain.handle('crawler:status', async () => {
     backendError: crawlerLastError
   };
 });
+ipcMain.handle('crawler:recovery-state', async (_event, params) => {
+  await ensureCrawlerService();
+  const qs = new URLSearchParams();
+  const p = params || {};
+  if (p.folder) qs.set('folder', p.folder);
+  if (p.tagQuery) qs.set('tag_query', p.tagQuery);
+  if (p.tagSource) qs.set('tag_source', p.tagSource);
+  if (p.mode) qs.set('mode', p.mode);
+  if (p.targetDate) qs.set('target_date', p.targetDate);
+  return apiFetchJson(`/api/recovery_state?${qs.toString()}`);
+});
 ipcMain.handle('crawler:set-safe-mode', async (_event, safe) => {
   await ensureCrawlerService();
   return apiFetchJson('/api/set_safe_mode', {
@@ -1456,10 +1542,12 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-// === crawler 进程清理：挂多个 lifecycle hook 防孤儿 ===
-// 旧版本只在 before-quit 里 .kill()，但 Task Manager 强杀 / Electron 崩溃 / 断电
-// 都不走 before-quit，留下 python 占着 8000。补 will-quit / quit / 进程信号，
-// Windows 上用 taskkill /F /T 杀整棵树（包括未来 uvicorn 起的 reloader 等子进程）。
+// === crawler 进程清理：优雅关闭 + 多 lifecycle hook 防孤儿 ===
+// 旧版本退出直接 taskkill /F /T：Python 的 finally 不执行，最后 ≤20 条已下载记录
+// （viewer_data / ids_data / log.json）可能没落盘。现在 before-quit 先 POST
+// /api/shutdown 让后端自己 finalize 落盘并退出，超时或失败再走硬杀兜底。
+// Task Manager 强杀 / Electron 崩溃 / 断电仍不走 before-quit，所以 will-quit /
+// quit / 进程信号 / process.exit 上的硬杀钩子全部保留作为防线。
 function killCrawlerTreeSync() {
   const proc = crawlerProcess;
   if (!proc || proc.killed) return;
@@ -1475,7 +1563,80 @@ function killCrawlerTreeSync() {
   // 兜底：也调用 Node 的 .kill() 走 TerminateProcess
   try { proc.kill(); } catch {}
 }
-for (const ev of ['before-quit', 'will-quit', 'quit']) {
+
+// 通知后端优雅关闭：POST /api/shutdown（2.5s 超时）→ 等子进程自行退出（最多 6s）
+// → 仍存活才硬杀。后端收到请求会同步 finalize 所有活跃任务后 1s os._exit(0)。
+async function gracefulShutdownCrawler() {
+  const proc = crawlerProcess;
+  if (!proc || proc.killed) return;
+
+  let notified = false;
+  const controller = new AbortController();
+  const fetchTimer = setTimeout(() => controller.abort(), 2500);
+  try {
+    const resp = await fetch(`${crawlerApiBase}/api/shutdown`, {
+      method: 'POST',
+      signal: controller.signal,
+    });
+    notified = resp.ok;
+  } catch {
+    notified = false;
+  } finally {
+    clearTimeout(fetchTimer);
+  }
+
+  // 后端根本没响应（没启动 / 已僵死）：没必要等，直接硬杀
+  if (!notified) {
+    killCrawlerTreeSync();
+    return;
+  }
+
+  const exited = new Promise(resolve => {
+    if (proc.exitCode !== null || proc.signalCode !== null) return resolve(true);
+    proc.once('exit', () => resolve(true));
+  });
+  const winner = await Promise.race([
+    exited.then(() => 'exited'),
+    delay(6000).then(() => 'timeout'),
+  ]);
+  if (winner !== 'exited') {
+    killCrawlerTreeSync();
+  }
+}
+
+let gracefulShutdownInProgress = false;
+let gracefulShutdownDone = false;
+
+app.on('before-quit', event => {
+  // 第二轮 app.quit()：优雅流程（或硬兜底）已结束，放行真正退出
+  if (gracefulShutdownDone) return;
+  // 优雅流程进行中又收到退出请求：继续拦住，等异步收尾自己重新 app.quit()
+  if (gracefulShutdownInProgress) {
+    event.preventDefault();
+    return;
+  }
+  gracefulShutdownInProgress = true;
+  event.preventDefault();
+
+  // 绝对兜底：任何意外卡住也不超过 10s，避免窗口关了进程却挂着
+  const hardTimer = setTimeout(() => {
+    try { killCrawlerTreeSync(); } catch {}
+    gracefulShutdownDone = true;
+    app.quit();
+  }, 10000);
+
+  gracefulShutdownCrawler()
+    .catch(() => { try { killCrawlerTreeSync(); } catch {} })
+    .finally(() => {
+      clearTimeout(hardTimer);
+      gracefulShutdownDone = true;
+      app.quit();
+    });
+});
+
+// will-quit / quit 上的同步硬杀保留：优雅流程已把进程送走时这里是 no-op，
+// 没走 before-quit 的退出路径（信号等）仍能防孤儿。
+for (const ev of ['will-quit', 'quit']) {
   app.on(ev, killCrawlerTreeSync);
 }
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {

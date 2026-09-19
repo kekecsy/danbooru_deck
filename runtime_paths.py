@@ -15,8 +15,13 @@ def _resource_dir() -> Path:
 
 RESOURCE_DIR = _resource_dir()
 DATA_DIR = Path(os.environ.get("DANBOORU_DECK_DATA_DIR", RESOURCE_DIR)).resolve()
+# main.py 历史上用 BASE_DIR 这个名字称呼数据根目录，统一在 runtime_paths 导出
+BASE_DIR = DATA_DIR
 HOT_PIC_DIR = DATA_DIR / "hot_pic"
 DRAWER_DIR = DATA_DIR / "drawer"
+# 图库根配置（可含外置盘路径）；SQLite 元数据库 deck.db 与它同级
+LIBRARY_ROOTS_JSON = DATA_DIR / "library_roots.json"
+DECK_DB_PATH = DATA_DIR / "deck.db"
 
 # 打码（马赛克编辑器）的预设贴图资源目录。
 # dev 模式（DATA_DIR == RESOURCE_DIR）沿用源码里的 pic_web/present，

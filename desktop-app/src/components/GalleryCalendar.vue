@@ -7,10 +7,12 @@ const props = defineProps({
   // Tag 文件夹列表，结构 [{folder, display}]；后端 /api/gallery_data 已返。
   availableTags: { type: Array, default: () => [] },
   selectedDate: { type: String, default: '' },
-  today: { type: String, default: '' }
+  today: { type: String, default: '' },
+  // 日期 tab 快捷栏显示「同步左」：把当前画廊日期 emit 给父组件，同步到左侧任务日历
+  syncable: { type: Boolean, default: false }
 });
 
-const emit = defineEmits(['select']);
+const emit = defineEmits(['select', 'sync-task-date']);
 
 const open = ref(false);
 const calendarRoot = ref(null);
@@ -465,6 +467,17 @@ function pickDate(date) {
   emit('select', date);
   open.value = false;
 }
+
+// 只有选中的是真实日期（不是 tag_xxx 文件夹）时才能同步给左侧任务日历
+const canSyncTaskDate = computed(() =>
+  props.syncable && !!props.selectedDate && !isTagFolder(props.selectedDate)
+);
+
+function syncTaskDate() {
+  if (!canSyncTaskDate.value) return;
+  emit('sync-task-date', props.selectedDate);
+  open.value = false;
+}
 function pickTag(folder) {
   if (!folder) return;
   pushRecent(folder);
@@ -531,11 +544,18 @@ function pickTag(folder) {
           <button class="small-square" title="下一月" :disabled="!canGoNextMonth" @click="nextMonth">›</button>
           <button class="small-square" title="下一年" :disabled="!canGoNextYear" @click="nextYear">»</button>
         </div>
-        <div class="date-quickbar">
+        <div class="date-quickbar" :class="{ 'with-sync': syncable }">
           <button class="date-quick" :disabled="!sortedAvailableDates.length" @click="jumpLatestDate">最新</button>
           <button class="date-quick" :disabled="!props.today" @click="jumpTodayMonth">今年今月</button>
           <button class="date-quick" @click="dateView = 'years'">选年份</button>
           <button class="date-quick" @click="dateView = 'months'">选月份</button>
+          <button
+            v-if="syncable"
+            class="date-quick date-quick-sync"
+            :disabled="!canSyncTaskDate"
+            :title="canSyncTaskDate ? `把左侧任务日期同步为 ${selectedDate}` : '当前是 tag 文件夹，无法同步到日期任务'"
+            @click="syncTaskDate"
+          >同步左</button>
         </div>
 
         <template v-if="dateView === 'days'">
@@ -736,6 +756,15 @@ function pickTag(folder) {
 .date-quick:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* 带「同步左」时 5 列：面板内宽 292px，11px 字号 + 紧 padding 才能容下「今年今月」 */
+.date-quickbar.with-sync {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+.date-quickbar.with-sync .date-quick {
+  padding: 0 2px;
+  font-size: 11px;
 }
 
 .day-cell {
@@ -1224,5 +1253,21 @@ function pickTag(folder) {
 @keyframes calendar-panel-in {
   from { opacity: 0; transform: translateY(-5px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* 「同步左」主动作：渐变填充；位于样式表末尾以压过上方 .date-quick 的 hover 覆盖 */
+.date-quick-sync,
+.date-quick-sync:hover:not(:disabled) {
+  border-color: transparent;
+  background: var(--accent-gradient);
+  color: #fff;
+  font-weight: 600;
+}
+.date-quick-sync:disabled {
+  border-color: rgba(30, 41, 82, 0.14);
+  background: rgba(255, 252, 246, 0.78);
+  color: var(--muted, #846a55);
+  font-weight: 400;
+  opacity: 0.45;
 }
 </style>

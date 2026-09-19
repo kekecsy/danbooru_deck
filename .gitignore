@@ -15,3 +15,12 @@ build/
 env_config.json
 logs/
 CLAUDE.md
+deck.db
+deck.db-shm
+deck.db-wal
+
+# 运行日志
+*.log
+
+# 本机个人配置（示例见 library_roots.example.json）
+library_roots.json

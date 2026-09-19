@@ -35,9 +35,11 @@ const emit = defineEmits([
   'close',  // () Esc / 选中后由组件通知
 ]);
 
-const activeIndex = ref(0);
+// An opened dropdown must not treat its first item as an explicit selection.
+// This prevents Enter from replacing text the user has just typed.
+const activeIndex = ref(-1);
 // items 变化（搜索/删除/清空）时把高亮重置到第一项
-watch(() => props.items, () => { activeIndex.value = 0; });
+watch([() => props.items, () => props.open], () => { activeIndex.value = -1; });
 
 function onPick(entry) {
   emit('pick', entry);
@@ -64,11 +66,15 @@ function handleKeydown(event) {
   switch (event.key) {
     case 'ArrowDown':
       event.preventDefault();
-      activeIndex.value = (activeIndex.value + 1) % props.items.length;
+      activeIndex.value = activeIndex.value < 0
+        ? 0
+        : (activeIndex.value + 1) % props.items.length;
       break;
     case 'ArrowUp':
       event.preventDefault();
-      activeIndex.value = (activeIndex.value - 1 + props.items.length) % props.items.length;
+      activeIndex.value = activeIndex.value < 0
+        ? props.items.length - 1
+        : (activeIndex.value - 1 + props.items.length) % props.items.length;
       break;
     case 'Enter': {
       // 注意：画廊的「Enter 提交搜索」逻辑是在父级 input 的 @keyup.enter 上独立处理的，
@@ -90,7 +96,11 @@ function handleKeydown(event) {
   }
 }
 
-defineExpose({ handleKeydown });
+function resetSelection() {
+  activeIndex.value = -1;
+}
+
+defineExpose({ handleKeydown, resetSelection });
 </script>
 
 <template>

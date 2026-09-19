@@ -1,49 +1,97 @@
 import os
 import json
-import time
 import datetime
-import threading
+from collections.abc import MutableMapping
 
-from my_utils import dedup_viewer_data
+import deck_db
+from library_config import library_id_for_path
+from my_utils import (
+    atomic_write_json,
+    dedup_viewer_data,
+    read_json_atomic,
+)
 from runtime_paths import DRAWER_DIR, HOT_PIC_DIR, ensure_user_directories
 
-# 进程级「按文件路径分配的可重入锁」表：所有 DanbooruData 实例共享同一张表，
-# 于是对同一个 JSON（尤其是 viewer_data.json）的「读 / 写」在整个进程内串行。
-#
-# 解决的并发 bug：刷新热度（/api/refresh_visible「本页/范围/全部」或后台 _run_refresh_scores）
-# 与点开图片触发的单图刷新（refreshSinglePost → 同 endpoint）会各自 new 一个 DanbooruData，
-# 彼此没有共享锁，于是在磁盘上撞车：
-#   1) 旧实现临时名固定为 "<path>.tmp"，两个写线程同时写同一个 .tmp 互相覆盖，
-#      第二个 os.replace 还可能因 .tmp 已被前一个消费而抛 FileNotFoundError；
-#   2) Windows 上当一个线程正打开该文件读时，另一个线程的 os.replace 会抛
-#      PermissionError([WinError 5] 拒绝访问)。
-# 后端是单进程 uvicorn（无 --workers），threading 锁即可，无需跨进程文件锁。
-_PATH_LOCKS_GUARD = threading.Lock()
-_PATH_LOCKS = {}
+# per-path 锁表与原子写已统一到 my_utils（收藏保存等小 JSON 仍共用同一张表）。
+# log.json / artist_stats.json 已迁入 deck.db，下面的 _DB*Mapping 是无状态视图，
+# 旧 CLI 脚本（db_data.log_data[pid]=url; save_global_data()）无需任何改动。
 
 
-def _lock_for(path):
-    """返回某个文件路径对应的进程级可重入锁（同一路径恒返回同一把）。"""
-    key = os.path.abspath(path)
-    with _PATH_LOCKS_GUARD:
-        lock = _PATH_LOCKS.get(key)
-        if lock is None:
-            lock = threading.RLock()
-            _PATH_LOCKS[key] = lock
-        return lock
+class _DBLogMapping(MutableMapping):
+    """post_log 表的 dict 视图：点查/点写即时落库，不做全量缓存。"""
+
+    def __getitem__(self, key):
+        value = deck_db.log_get(str(key), None)
+        if value is None:
+            raise KeyError(key)
+        return value
+
+    def __setitem__(self, key, value):
+        deck_db.log_record(str(key), value)
+
+    def __delitem__(self, key):
+        if not deck_db.log_delete(str(key)):
+            raise KeyError(key)
+
+    def __contains__(self, key):
+        return deck_db.log_has(str(key))
+
+    def __iter__(self):
+        return iter(deck_db.log_all_ids())
+
+    def __len__(self):
+        return deck_db.log_count()
+
+    def get(self, key, default=None):
+        # 覆盖默认实现，避免「存在但 cdn_url 为空串」与「行不存在」语义打架
+        return deck_db.log_get(str(key), default)
+
+    def update(self, other=(), **kwargs):
+        data = dict(other, **kwargs) if kwargs else dict(other)
+        if data:
+            deck_db.log_bulk_upsert({str(k): v for k, v in data.items()})
 
 
-def _atomic_replace(src, dst, attempts=5, base_delay=0.05):
-    """os.replace 在 Windows 上偶发 PermissionError（杀软 / 索引器 / 外部进程刚好持有句柄，
-    例如 Electron 兜底读取或 caption 元数据查询），短暂重试几次即可恢复；POSIX 下通常一次成功。"""
-    for i in range(attempts):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if i == attempts - 1:
-                raise
-            time.sleep(base_delay * (i + 1))
+class _DBStatsMapping(MutableMapping):
+    """artist_stats 表的 dict 视图。
+
+    stats[k]=stats.get(k,0)+n 这种旧 JSON 时代的读改写：get 时记下本进程看到的
+    基线，赋值时把「目标值-基线」的增量原子应用到 DB 最新值上，CLI 与服务端并发、
+    两个 CLI 互相并发都不会整盘互踩或丢自增（详见 deck_db.stats_apply_relative）。"""
+
+    def __init__(self):
+        self._baseline = {}
+
+    def __getitem__(self, key):
+        value = deck_db.stats_get(key, None)
+        if value is None:
+            raise KeyError(key)
+        self._baseline[key] = value
+        return value
+
+    def __setitem__(self, key, value):
+        baseline = self._baseline.pop(key, None)
+        deck_db.stats_apply_relative(key, int(value), baseline=baseline)
+
+    def __delitem__(self, key):
+        self._baseline.pop(key, None)
+        if not deck_db.stats_delete(key):
+            raise KeyError(key)
+
+    def __contains__(self, key):
+        return deck_db.stats_get(key, None) is not None
+
+    def __iter__(self):
+        return iter(deck_db.stats_snapshot())
+
+    def __len__(self):
+        return deck_db.stats_count()
+
+    def get(self, key, default=0):
+        value = deck_db.stats_get(key, default)
+        # get 是 CLI 读改写的「读」，无论键是否存在都记下基线（缺省=0）
+        self._baseline[key] = value
+        return value
 
 
 class DanbooruData:
@@ -64,22 +112,56 @@ class DanbooruData:
         self.need_update_path = os.path.join(self.drawer_dir, "need_update.json")
         
         self._init_directories()
-        
-        self.log_data = self._load_json(self.log_path, {})
-        self.artist_stats = self._load_json(self.stats_path, {})
-        
-        # Load drawer data
-        with open(self.txtdata_path, 'r', encoding='utf-8') as f:
-            self.txtdata1 = f.read().split('\n')
-        self.disk_drawer = self._load_json(self.disk_drawer_path, {"1": [], "2": []})
+
+        # log.json（~49MB）/ artist_stats.json（~2MB）已迁入 deck.db：
+        # 视图惰性构造（首次访问才连库，构造 DanbooruData 依旧零大 IO），
+        # 主进程 LogStore/StatsStore 与 CLI 脚本都打同一份 post_log/artist_stats。
+        self._log_data = None
+        self._artist_stats = None
+        # (library_id, folder) 惰性缓存：_make_job 构造后还可能覆写 save_dir/base_dir，
+        # 所以不能在 __init__ 算；一个实例不会中途切换 folder（switch_target 是换新实例）。
+        self._db_scope_cache = None
+
+        # Load drawer data —— txtdata / disk_drawer 是用户手工维护文件：
+        # 先按 mtime+size 指纹把外部改动吸收进 deck.db，再从 DB 读（DB 为权威缓存）。
+        deck_db.drawer_reconcile_static(self.drawer_dir)
+        self.txtdata1 = deck_db.drawer_txt_load()
+        self.disk_drawer = deck_db.drawer_disk_load()
         self.txtdata2 = self.disk_drawer.get("1", []) + self.disk_drawer.get("2", [])
         self.all_drawer = set(self.txtdata1 + self.txtdata2)
-        
+
         # Build folder_to_disk dictionary
         self.folder_to_disk = {}
         for k, v in self.disk_drawer.items():
             for folder in v:
                 self.folder_to_disk[folder] = k
+
+    @property
+    def log_data(self):
+        """post_log 的惰性 dict 视图：点查/点写即时落 SQLite。"""
+        if self._log_data is None:
+            self._log_data = _DBLogMapping()
+        return self._log_data
+
+    @log_data.setter
+    def log_data(self, value):
+        """兼容旧的整体赋值：按 upsert 合并，不删除未知键（防误清空）。"""
+        if self._log_data is None:
+            self._log_data = _DBLogMapping()
+        deck_db.log_bulk_upsert(value or {})
+
+    @property
+    def artist_stats(self):
+        """artist_stats 的惰性 dict 视图，语义同 log_data。"""
+        if self._artist_stats is None:
+            self._artist_stats = _DBStatsMapping()
+        return self._artist_stats
+
+    @artist_stats.setter
+    def artist_stats(self, value):
+        if self._artist_stats is None:
+            self._artist_stats = _DBStatsMapping()
+        deck_db.stats_merge_absolute(value or {})
 
     def _init_directories(self):
         os.makedirs(self.save_dir, exist_ok=True)
@@ -98,52 +180,81 @@ class DanbooruData:
     def _load_json(self, path, default=None):
         if default is None:
             default = {}
-        # 与 _save_json 共用同一把 per-path 锁：读期间不会有别的线程在做 os.replace，
-        # 既避免 Windows 上「替换正被打开读取的文件」抛 PermissionError，也读不到半截文件。
-        with _lock_for(path):
-            if os.path.exists(path):
-                try:
-                    with open(path, 'r', encoding='utf-8') as f:
-                        return json.load(f)
-                except json.JSONDecodeError:
-                    return default
-            return default
+        return read_json_atomic(path, default)
 
     def _save_json(self, path, data):
-        # 全程持有 per-path 锁：保证同一文件的写彼此串行、且不与读重叠。
-        with _lock_for(path):
-            # 唯一临时名（带 pid + 线程号）：即便将来有调用方绕过锁，多个写也不会撞同一个 .tmp。
-            temp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
-            try:
-                with open(temp_path, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, ensure_ascii=False, indent=4)
-                _atomic_replace(temp_path, path)
-            finally:
-                # 写失败（json 序列化异常 / 重试仍失败）时清掉残留临时文件，别污染目录。
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except OSError:
-                        pass
+        atomic_write_json(path, data)
 
     def save_global_data(self):
-        self._save_json(self.log_path, self.log_data)
-        self._save_json(self.stats_path, self.artist_stats)
+        # 历史职责：把 log.json / artist_stats.json 全量落盘。迁移 SQLite 后每次
+        # 赋值都已即时入库，JSON 不再常态导出（回滚用 `python deck_db.py --export-all-legacy-json`）。
+        # 保留空实现，让 danbooru_hot / collect_ids 等 CLI 的调用点零改动。
+        return
+
+    # ---------- viewer_data / ids_data：deck.db 为权威，JSON 为派生镜像 ----------
+    def _db_scope(self):
+        """(library_id, folder)：按 base_dir 反查图库根，folder = save_dir 末级目录名。"""
+        if self._db_scope_cache is None:
+            lib_id = library_id_for_path(self.base_dir)
+            folder = os.path.basename(os.path.normpath(self.save_dir))
+            self._db_scope_cache = (lib_id, folder)
+        return self._db_scope_cache
+
+    @property
+    def _viewer_mirror_path(self):
+        return os.path.join(self.save_dir, "viewer_data.json")
+
+    @property
+    def _ids_mirror_path(self):
+        return os.path.join(self.save_dir, "ids_data.json")
 
     def load_viewer_data(self):
-        items = self._load_json(os.path.join(self.save_dir, "viewer_data.json"), [])
-        if not isinstance(items, list):
-            return []
-        return dedup_viewer_data(items)
+        lib_id, folder = self._db_scope()
+        # 镜像可能被 CLI / 他机同步改过：先按 mtime+size 指纹吸收，再从 DB 重组
+        deck_db.reconcile_viewer(lib_id, folder, self._viewer_mirror_path)
+        return deck_db.viewer_load_entries(lib_id, folder)
 
     def save_viewer_data(self, data):
-        self._save_json(os.path.join(self.save_dir, "viewer_data.json"), dedup_viewer_data(data))
+        lib_id, folder = self._db_scope()
+        items = dedup_viewer_data(data)
+        deck_db.viewer_replace(lib_id, folder, items)
+        # DB commit 后再导出镜像：Electron 离线兜底 / 外置盘自包含读取不受影响
+        deck_db.export_viewer_mirror(lib_id, folder, self._viewer_mirror_path, items=items)
 
     def load_ids_data(self):
-        return self._load_json(os.path.join(self.save_dir, "ids_data.json"), [])
-        
+        lib_id, folder = self._db_scope()
+        deck_db.reconcile_ids(lib_id, folder, self._ids_mirror_path)
+        return deck_db.queue_load(lib_id, folder)
+
     def save_ids_data(self, data):
-        self._save_json(os.path.join(self.save_dir, "ids_data.json"), data)
+        lib_id, folder = self._db_scope()
+        ids = [str(x) for x in (data or [])]
+        # 旧 save_ids_data 是「pending 全集覆写」语义：failed 行保留（见 queue_replace）
+        deck_db.queue_replace(lib_id, folder, ids)
+        deck_db.export_ids_mirror(lib_id, folder, self._ids_mirror_path)
+
+    # ---- DownloadJob 用的队列点操作（入队即提交即镜像，崩溃安全）----
+    def queue_add_id(self, post_id):
+        lib_id, folder = self._db_scope()
+        deck_db.queue_add(lib_id, folder, str(post_id))
+        deck_db.export_ids_mirror(lib_id, folder, self._ids_mirror_path)
+
+    def queue_resolve_id(self, post_id):
+        """成功/永久失败：删 DB 行；镜像不立即写，沿用 P0 的 dirty 批量节奏。"""
+        lib_id, folder = self._db_scope()
+        deck_db.queue_remove(lib_id, folder, str(post_id))
+
+    def queue_mark_failed_id(self, post_id):
+        lib_id, folder = self._db_scope()
+        deck_db.queue_mark_status(lib_id, folder, str(post_id), deck_db.QUEUE_FAILED)
+
+    def queue_load_failed_ids(self):
+        lib_id, folder = self._db_scope()
+        return deck_db.queue_load(lib_id, folder, status=deck_db.QUEUE_FAILED)
+
+    def queue_export_mirror(self):
+        lib_id, folder = self._db_scope()
+        deck_db.export_ids_mirror(lib_id, folder, self._ids_mirror_path)
 
     def write_status(self, state, page=None):
         data = {
@@ -162,17 +273,25 @@ class DanbooruData:
         return self.folder_to_disk.get(f_name, default)
 
     def load_need_update(self):
-        temp_nu = self._load_json(self.need_update_path, {"1": [], "2": []})
-        return {"1": set(temp_nu.get("1", [])), "2": set(temp_nu.get("2", []))}
+        # 镜像被 danbooru_most_view 等外部脚本直改时，按指纹吸收后进 DB 权威读。
+        # 契约与旧 JSON 版逐字对齐：永远返回且只返回 "1"/"2" 两个 set 键
+        # （所有调用点直接 nu_sets[k].update(...)，缺键会 KeyError；未知 grp 丢弃）。
+        deck_db.drawer_need_update_reconcile(self.need_update_path)
+        groups = deck_db.drawer_need_update_load()
+        return {
+            "1": set(groups.get("1", [])),
+            "2": set(groups.get("2", [])),
+        }
 
     def save_need_update(self, nu_sets):
         final_nu = {k: sorted(list(v)) for k, v in nu_sets.items()}
-        self._save_json(self.need_update_path, final_nu)
-        
+        deck_db.drawer_need_update_replace(final_nu)
+        deck_db.export_need_update_mirror(self.need_update_path, final_nu)
+
     def load_hot_drawer(self):
-        with open(self.hot_drawer_path, 'r', encoding='utf-8') as f:
-            return f.read().split('\n')
-            
+        deck_db.drawer_hot_reconcile(self.hot_drawer_path)
+        return deck_db.drawer_hot_load()
+
     def save_hot_drawer(self, output_list):
-        with open(self.hot_drawer_path, 'w', encoding='utf-8') as f:
-            f.write('\n'.join(output_list))
+        deck_db.drawer_hot_replace(output_list)
+        deck_db.export_hot_drawer_mirror(self.hot_drawer_path, output_list)

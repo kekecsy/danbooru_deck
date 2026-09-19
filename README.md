@@ -89,7 +89,8 @@ Danbooru Deck Data/
 - `artist_favorites.json`
 - `character_favorites.json`
 - `image_favorites.json`
-- `library_roots.json` — 多图库根目录配置。每个 root 可加 `"lazy_scan": true` 让 app 启动时只枚举日期目录名，不数图（适合机械盘 / 外置盘 / NAS）。详见 `library_roots.example.json` 的注释。
+- `library_roots.json` — 多图库根目录配置（不含在仓库中，首次使用时可从 `library_roots.example.json` 复制）。每个 root 可加 `"lazy_scan": true` 让 app 启动时只枚举日期目录名，不数图（适合机械盘 / 外置盘 / NAS）。
+- `deck.db` — SQLite 主数据库，保存任务队列、运行日志、统计、收藏、看图数据与断点信息；旧版 JSON 仍作为镜像保留。
 - `custom_translation.json`
 - `character_chinese_search.json`
 - `character_supplement.json`
@@ -160,6 +161,15 @@ cd desktop-app
 npm run dev
 ```
 
+### 离线回归测试
+
+测试不依赖外网，所有数据写入 `tempfile` 临时目录，不会碰真实的 `hot_pic` / `deck.db`：
+
+```powershell
+.\.venv\Scripts\python.exe tests\test_p0_hardening.py
+.\.venv\Scripts\python.exe tests\test_deck_db.py
+```
+
 ### 构建 Python 后端
 
 在项目根目录执行：
@@ -198,12 +208,16 @@ npm run dist:portable
 ```text
 .
 ├── main.py                    # FastAPI 后端入口
+├── deck_db.py                 # SQLite 存储（deck.db：队列/日志/统计/收藏/断点）
+├── http_client.py             # 统一 HTTP 层（UA、重试、退避与超时）
+├── library_config.py          # 多图库根目录配置读取
 ├── runtime_paths.py           # 程序资源与用户数据路径管理
 ├── crawler-backend.spec       # PyInstaller 后端打包配置
 ├── translator.py              # 标签翻译核心
+├── tests/                     # 离线回归测试（无需外网）
 ├── requirements.txt           # Python 源码开发依赖
 ├── setup.bat / start.bat      # Windows 源码开发辅助脚本
-├── hot_pic/                   # 源码开发模式下的下载目录
+├── hot_pic/                   # 源码开发模式下的下载目录（不入库）
 └── desktop-app/
     ├── electron/main.cjs      # Electron 主进程
     ├── src/                   # Vue 3 前端源码
