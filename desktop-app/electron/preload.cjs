@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('desktopAPI', {
   gallery: {
     getByDate: (date) => ipcRenderer.invoke('gallery:get-by-date', date),
     searchEntries: (params) => ipcRenderer.invoke('gallery:search-entries', params),
+    exportSearchEntries: (payload) => ipcRenderer.invoke('gallery:export-search-entries', payload),
     openLocalFile: (localPath) => ipcRenderer.invoke('gallery:open-local-file', localPath),
     revealLocalFile: (localPath) => ipcRenderer.invoke('gallery:reveal-local-file', localPath)
   },
@@ -31,7 +32,8 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     open: (url) => ipcRenderer.invoke('external:open', url)
   },
   dialog: {
-    selectImage: () => ipcRenderer.invoke('dialog:select-image')
+    selectImage: () => ipcRenderer.invoke('dialog:select-image'),
+    selectFolder: () => ipcRenderer.invoke('dialog:select-folder')
   },
   file: {
     exists: (targetPath) => ipcRenderer.invoke('file:exists', targetPath),

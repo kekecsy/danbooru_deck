@@ -163,7 +163,7 @@ function translateTags(tagString) {
     const chinese_name = (entry && entry.has_chinese && entry.chinese_name) ? entry.chinese_name : tag;
     const hint = (entry && entry.source_hint) ? entry.source_hint : '';
     const alias = (hint && aliases[hint]) ? aliases[hint] : '';
-    
+
     let meta = chinese_name;
     if (hint) meta += ` [${hint}]`;
     if (alias) meta += ` [${alias}]`;
@@ -554,6 +554,7 @@ async function searchGalleryEntries(params = {}) {
   if (params.end) qs.set('end', params.end);
   qs.set('limit', String(Math.min(Number(params.limit) || 120, 500)));
   qs.set('offset', String(Number(params.offset) || 0));
+  qs.set('sort', ['date', 'score', 'fav_count'].includes(params.sort) ? params.sort : 'date');
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
@@ -860,6 +861,48 @@ ipcMain.handle('app:get-context', async () => ({
 
 ipcMain.handle('gallery:get-by-date', async (_event, date) => buildGalleryByDate(date));
 ipcMain.handle('gallery:search-entries', async (_event, params) => searchGalleryEntries(params));
+ipcMain.handle('gallery:export-search-entries', async (_event, payload = {}) => {
+  const destination = path.resolve(String(payload.destination || ''));
+  const localPaths = Array.isArray(payload.localPaths) ? payload.localPaths : [];
+  if (!destination || !fs.existsSync(destination) || !fs.statSync(destination).isDirectory()) {
+    return { ok: false, message: '目标文件夹不存在' };
+  }
+  const results = [];
+  for (const rawPath of localPaths.slice(0, 500)) {
+    const source = toAbsolutePath(rawPath);
+    if (!source || !isWithinLibraryRoots(source) || !fs.existsSync(source) || !fs.statSync(source).isFile()) {
+      results.push({ source: String(rawPath || ''), ok: false, message: '源文件无效或不在图库中' });
+      continue;
+    }
+    let target = path.join(destination, path.basename(source));
+    try {
+      if (path.resolve(target).toLowerCase() === path.resolve(source).toLowerCase()) {
+        results.push({ source, target, ok: false, message: '目标与源文件相同' });
+        continue;
+      }
+      if (fs.existsSync(target)) {
+        const ext = path.extname(target);
+        const stem = path.basename(target, ext);
+        let suffix = 2;
+        while (fs.existsSync(target)) {
+          target = path.join(destination, `${stem} (${suffix})${ext}`);
+          suffix += 1;
+        }
+      }
+      await fs.promises.copyFile(source, target);
+      results.push({ source, target, ok: true });
+    } catch (error) {
+      results.push({ source, target, ok: false, message: error.message || String(error) });
+    }
+  }
+  return {
+    ok: results.some(result => result.ok),
+    copied: results.filter(result => result.ok).length,
+    failed: results.filter(result => !result.ok).length,
+    results
+  };
+});
+
 
 ipcMain.handle('gallery:open-local-file', async (_event, localPath) => {
   const resolvedPath = toAbsolutePath(localPath);
@@ -910,6 +953,12 @@ ipcMain.handle('app:reveal-folder', async (_event, key) => {
   }
   const result = await shell.openPath(target);
   return { ok: result === '', message: result || '已尝试打开目录' };
+});
+
+ipcMain.handle('dialog:select-folder', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
+  if (result.canceled || !result.filePaths[0]) return null;
+  return result.filePaths[0];
 });
 
 ipcMain.handle('dialog:select-image', async () => {

@@ -765,7 +765,7 @@ def _escape_like_token(token: str) -> str:
 
 
 def viewer_search(token_groups, kinds, folder_start=None, folder_end=None,
-                  library_ids=None, limit=200, offset=0):
+                  library_ids=None, limit=200, offset=0, sort="date"):
     """跨日期的整词 tag 搜索。只查 deck.db，不碰磁盘/网络。
 
     token_groups: [[tag, ...], ...] —— 组间 AND、组内 OR（支持中文角色名展开成多个候选 tag）。
@@ -783,6 +783,11 @@ def viewer_search(token_groups, kinds, folder_start=None, folder_end=None,
         return 0, []
     limit = max(1, min(int(limit or 200), 500))
     offset = max(0, int(offset or 0))
+    order_by = {
+        "date": "folder DESC, id DESC",
+        "score": "score DESC, folder DESC, id DESC",
+        "fav_count": "fav_count DESC, folder DESC, id DESC",
+    }.get(sort, "folder DESC, id DESC")
 
     where = ["folder GLOB ?"]
     params = [_ISO_DATE_GLOB]
@@ -828,7 +833,7 @@ def viewer_search(token_groups, kinds, folder_start=None, folder_end=None,
         ).fetchone()[0]
         rows = conn.execute(
             f"SELECT * FROM viewer_entries WHERE {where_sql} "
-            f"ORDER BY folder DESC, id DESC LIMIT ? OFFSET ?",
+            f"ORDER BY {order_by} LIMIT ? OFFSET ?",
             [*params, limit, offset],
         ).fetchall()
     return total, rows

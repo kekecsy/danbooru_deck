@@ -678,7 +678,8 @@ const viewer = ref({
   zoom: 1,
   fitMode: habits.viewerFitMode === 'actual' ? 'actual' : 'fit',
   toolbarPinned: habits.viewerToolbarPinned === true,
-  toolbarHovered: false
+  toolbarHovered: false,
+  sourceItems: []
 });
 
 const viewerToolbarVisible = computed(() => viewer.value.toolbarPinned || viewer.value.toolbarHovered);
@@ -1026,7 +1027,7 @@ const pagedLocalImages = computed(() => {
 const activeItems = computed(() => pagedLocalImages.value);
 const activeCount = computed(() => filteredLocalImages.value.length);
 const activeTotalPages = computed(() => localTotalPages.value);
-const viewerItems = computed(() => filteredLocalImages.value);
+const viewerItems = computed(() => viewer.value.sourceItems?.length ? viewer.value.sourceItems : filteredLocalImages.value);
 // 稳定唯一键：同 grid 卡片的 :key。用它锁定「正在看的图」，避免下载时列表变动导致错位。
 function itemKey(item) {
   return item ? (item.localPath || item.filename || '') : '';
@@ -1789,7 +1790,7 @@ async function syncStatusOnce() {
   try {
     const status = await window.desktopAPI.crawler.status();
     const wasActive = task.value.isRunning || task.value.isStopping;
-    
+
     task.value.isRunning = !!status.is_running;
     task.value.isStopping = !!status.is_stopping;
     task.value.isPaused = !!status.is_paused;
@@ -3888,7 +3889,7 @@ function charMenuSearchCrossDate() {
   const kind = charContextMenu.value.kind === 'artist' ? 'artist' : 'character';
   closeCharContextMenu();
   if (!tag) return;
-  openSearchModal({ q: tag, kind, auto: true });
+  openSearchModal({ q: tag, kind });
 }
 
 // 多 tag：「复制 N 个 Tag」把所有选中 raw tag 空格分隔写剪贴板
@@ -4458,21 +4459,28 @@ const searchModal = ref({
   nextOffset: 0,
   expandedTags: [],
   offlineLibraries: [],
+  sort: 'date',
+  selectedKeys: [],
+  exportDestination: '',
+  exporting: false,
   lightbox: { open: false, url: '', item: null, isVideo: false }
 });
 
-// preset: { q, kind, start, end, auto } —— viewer 里右键「在范围日期内搜索」时
-// 用 raw tag + kind 预填；auto=true 立即搜一次（空范围=全部日期，再收窄重搜）。
+// viewer 右键只负责打开并预填搜索条件；是否搜索由用户明确点击按钮决定。
 function openSearchModal(preset = null) {
   const sm = searchModal.value;
   sm.open = true;
   sm.msg = '';
+  sm.searched = false;
+  sm.images = [];
+  sm.total = 0;
+  sm.nextOffset = 0;
+  sm.selectedKeys = [];
   if (preset) {
     sm.q = preset.q || '';
     if (preset.kind) sm.kind = preset.kind;
     if (preset.start != null) sm.start = preset.start;
     if (preset.end != null) sm.end = preset.end;
-    if (preset.auto && sm.q.trim()) runSearch();
   }
 }
 
@@ -4490,7 +4498,8 @@ async function requestSearch(offset, append) {
     start: sm.start || '',
     end: sm.end || '',
     limit: SEARCH_PAGE_SIZE,
-    offset
+    offset,
+    sort: sm.sort
   });
   if (!res) throw new Error('无响应（后端可能没启动）');
   if (!res.ok) {
@@ -4503,7 +4512,11 @@ async function requestSearch(offset, append) {
     sm.msg = res.msg || '没有找到结果';
     return;
   }
-  const incoming = res.images || [];
+  const incoming = (res.images || []).map(item => ({
+    ...item,
+    artistTokens: splitTags(item.artist),
+    characterTokens: Array.isArray(item.characters) ? item.characters : splitTags(item.characters)
+  }));
   if (append) {
     const known = new Set(sm.images.map(it => it.localPath || it.filename));
     for (const it of incoming) {
@@ -4515,6 +4528,7 @@ async function requestSearch(offset, append) {
     }
   } else {
     sm.images = incoming;
+    sm.selectedKeys = [];
   }
   sm.total = res.total || 0;
   sm.nextOffset = (res.offset || 0) + (res.limit || SEARCH_PAGE_SIZE);
@@ -4543,6 +4557,13 @@ async function runSearch() {
   }
 }
 
+async function runSearchAll() {
+  const sm = searchModal.value;
+  sm.start = '';
+  sm.end = '';
+  await runSearch();
+}
+
 async function loadMoreSearch() {
   const sm = searchModal.value;
   if (sm.loadingMore || sm.loading) return;
@@ -4557,6 +4578,89 @@ async function loadMoreSearch() {
 }
 
 const searchHasMore = computed(() => searchModal.value.nextOffset < searchModal.value.total);
+const searchSelectedCount = computed(() => searchModal.value.selectedKeys.length);
+const searchDisplayedKeys = computed(() => (searchModal.value.images || []).map(searchItemKey));
+const searchAllDisplayedSelected = computed(() => {
+  const keys = searchDisplayedKeys.value;
+  return keys.length > 0 && keys.every(key => searchModal.value.selectedKeys.includes(key));
+});
+const searchResultGroups = computed(() => {
+  const sm = searchModal.value;
+  const groups = [];
+  const field = sm.sort === 'score' ? 'score' : sm.sort === 'fav_count' ? 'favCount' : '';
+  for (const item of sm.images || []) {
+    const value = field ? Number(item[field] || 0) : (item.date || '未知日期');
+    const key = field ? `${field}:${value}` : `date:${value}`;
+    let group = groups[groups.length - 1];
+    if (!group || group.key !== key) {
+      group = {
+        key,
+        label: field === 'score' ? `点赞 ${value}` : field === 'favCount' ? `收藏 ${value}` : value,
+        items: []
+      };
+      groups.push(group);
+    }
+    group.items.push(item);
+  }
+  return groups;
+});
+function searchItemKey(item) {
+  return item?.localPath || `${item?.date || ''}/${item?.filename || ''}`;
+}
+function isSearchSelected(item) {
+  return searchModal.value.selectedKeys.includes(searchItemKey(item));
+}
+function toggleSearchSelection(item) {
+  const key = searchItemKey(item);
+  const selected = new Set(searchModal.value.selectedKeys);
+  if (selected.has(key)) selected.delete(key); else selected.add(key);
+  searchModal.value.selectedKeys = [...selected];
+}
+function toggleSearchSelectAll() {
+  const keys = searchDisplayedKeys.value;
+  searchModal.value.selectedKeys = searchAllDisplayedSelected.value
+    ? searchModal.value.selectedKeys.filter(key => !keys.includes(key))
+    : [...new Set([...searchModal.value.selectedKeys, ...keys])];
+}
+function toggleSearchGroupSelection(group) {
+  const keys = (group?.items || []).map(searchItemKey);
+  if (!keys.length) return;
+  const selected = new Set(searchModal.value.selectedKeys);
+  const allSelected = keys.every(key => selected.has(key));
+  for (const key of keys) {
+    if (allSelected) selected.delete(key); else selected.add(key);
+  }
+  searchModal.value.selectedKeys = [...selected];
+}
+function isSearchGroupSelected(group) {
+  const keys = (group?.items || []).map(searchItemKey);
+  return keys.length > 0 && keys.every(key => searchModal.value.selectedKeys.includes(key));
+}function clearSearchSelection() {
+  searchModal.value.selectedKeys = [];
+}
+async function chooseSearchExportFolder() {
+  const folder = await window.desktopAPI.dialog.selectFolder();
+  if (folder) searchModal.value.exportDestination = folder;
+}
+async function exportSelectedSearchImages() {
+  const sm = searchModal.value;
+  const selected = (sm.images || []).filter(isSearchSelected).map(item => item.localPath).filter(Boolean);
+  if (!selected.length) { showToast('请先选择要导出的图片', 'warning'); return; }
+  if (!sm.exportDestination) { await chooseSearchExportFolder(); if (!sm.exportDestination) return; }
+  sm.exporting = true;
+  try {
+    const result = await window.desktopAPI.gallery.exportSearchEntries({ destination: sm.exportDestination, localPaths: selected });
+    if (result?.ok) showToast(`已复制 ${result.copied} 张图片${result.failed ? `，${result.failed} 张失败` : ''}`, result.failed ? 'warning' : 'success');
+    else showToast(result?.message || '导出失败', 'error');
+  } catch (error) {
+    showToast(`导出失败：${error?.message || error}`, 'error');
+  } finally {
+    sm.exporting = false;
+  }
+}
+function onSearchSortChange() {
+  if (searchModal.value.searched) runSearch();
+}
 
 // 离线告警里三个 root 可能 label 完全相同（用户习惯都叫"机械盘"），重名时附上 id 区分
 const offlineLibraryNames = computed(() => {
@@ -4663,8 +4767,9 @@ function onTranslationFileSelected(event) {
   reader.readAsText(file);
 }
 
-async function openViewer(item) {
+async function openViewer(item, sourceItems = null) {
   viewer.value.open = true;
+  viewer.value.sourceItems = Array.isArray(sourceItems) ? sourceItems : [];
   viewer.value.key = itemKey(item);   // 用稳定唯一键锁定，而非索引
   viewer.value.zoom = 1;
   viewer.value.imageUrl = '';
@@ -4735,6 +4840,7 @@ function closeViewer() {
   viewer.value.open = false;
   viewer.value.imageUrl = '';
   viewer.value.zoom = 1;
+  viewer.value.sourceItems = [];
   clearTagMultiSelect();
 }
 
@@ -5990,9 +6096,22 @@ const downloadTargetHint = computed(() => {
                 :date-folders="gallery.availableDateFolders"
               />
             </div>
-            <button class="primary search-run-btn" :disabled="searchModal.loading || !searchModal.q.trim()" @click="runSearch">
-              {{ searchModal.loading ? '搜索中…' : '搜索' }}
-            </button>
+            <div class="search-sort-row">
+              <label class="search-sort-field">
+                <span>排序 / 分组</span>
+                <select v-model="searchModal.sort" class="search-sort-select" @change="onSearchSortChange">
+                  <option value="date">日期倒序</option>
+                  <option value="fav_count">收藏数倒序</option>
+                  <option value="score">点赞数倒序</option>
+                </select>
+              </label>
+              <button class="primary search-run-btn" :disabled="searchModal.loading || !searchModal.q.trim()" @click="runSearch">
+                {{ searchModal.loading ? '搜索中…' : '按当前范围搜索' }}
+              </button>
+              <button class="secondary search-all-btn" :disabled="searchModal.loading || !searchModal.q.trim()" @click="runSearchAll">
+                搜索全部日期
+              </button>
+            </div>
           </div>
 
           <div v-if="searchModal.expandedTags.length" class="search-hint-text" :title="searchModal.expandedTags.join(', ')">
@@ -6003,60 +6122,45 @@ const downloadTargetHint = computed(() => {
           </div>
           <div v-if="searchModal.msg" class="search-hint-text" :class="{ 'search-hint-warn': searchModal.searched }">{{ searchModal.msg }}</div>
 
-          <div class="search-result-meta" v-if="searchModal.images.length">
-            共匹配 <strong>{{ searchModal.total }}</strong> 条 · 当前显示 {{ searchModal.images.length }} 条（按日期倒序）
+          <div class="search-result-toolbar" v-if="searchModal.images.length">
+            <span>共匹配 <strong>{{ searchModal.total }}</strong> 条 · 当前载入 {{ searchModal.images.length }} 条</span>
+            <button class="secondary" @click="toggleSearchSelectAll">{{ searchAllDisplayedSelected ? '取消全选当前结果' : '全选当前结果' }}</button>
+            <button class="secondary" @click="clearSearchSelection" :disabled="!searchSelectedCount">清除选择</button>
+            <button class="primary" @click="exportSelectedSearchImages" :disabled="!searchSelectedCount || searchModal.exporting">
+              {{ searchModal.exporting ? '复制中…' : `复制导出 (${searchSelectedCount})` }}
+            </button>
           </div>
-
+          <div v-if="searchModal.exportDestination" class="search-export-path" :title="searchModal.exportDestination">
+            导出到：{{ searchModal.exportDestination }}
+            <button class="ghost" @click="chooseSearchExportFolder" title="更换导出文件夹">更换</button>
+          </div>
           <div class="search-results-scroll">
-            <div v-if="searchModal.images.length" class="gallery-grid search-results-grid" style="--card-min-w: 150px">
-              <article
-                v-for="item in searchModal.images"
-                :key="item.localPath || item.filename"
-                class="image-card search-result-card"
-                :title="`${item.date} · ${item.artist} · ${item.filename}`"
-              >
-                <div class="thumb-wrap">
-                  <img
-                    class="thumb clickable-thumb"
-                    :class="{ 'is-loaded': item.loaded }"
-                    :src="item.thumbUrl"
-                    :alt="item.filename"
-                    loading="lazy"
-                    decoding="async"
-                    @load="onThumbLoad(item)"
-                    @error="onThumbError(item)"
-                    @click="openSearchLightbox(item)"
-                  />
-                  <div class="thumb-skeleton" :class="{ 'is-hidden': item.loaded }" aria-hidden="true"></div>
-                  <span
-                    v-if="isAnimatedCard(item)"
-                    class="video-format-watermark"
-                    :class="`format-${cardFormatLabel(item)}`"
-                  >
-                    <svg v-if="isVideoItem(item)" class="format-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                      <path d="M8 5v14l11-7z"/>
-                    </svg>
-                    <span v-else class="format-text">GIF</span>
-                  </span>
-                  <span class="search-date-badge">{{ item.date }}</span>
-                  <span v-if="item.libraryLabel && item.libraryLabel !== 'hot_pic'" class="search-lib-badge" :title="item.libraryRoot">{{ item.libraryLabel }}</span>
+            <div v-if="searchModal.images.length" class="search-results-grid">
+              <template v-for="group in searchResultGroups" :key="group.key">
+                <div class="search-group-title"><span class="search-group-label">{{ group.label }} <em>{{ group.items.length }} 张</em></span><button class="secondary search-group-select" @click="toggleSearchGroupSelection(group)">{{ isSearchGroupSelected(group) ? '取消本组' : '全选本组' }}</button></div>
+                <div class="search-group-grid">
+                  <article v-for="item in group.items" :key="searchItemKey(item)" class="image-card search-result-card" :class="{ 'search-result-selected': isSearchSelected(item) }" :title="`${item.date} · ${item.artist} · ${item.filename}`">
+                    <div class="thumb-wrap">
+                      <img class="thumb clickable-thumb" :class="{ 'is-loaded': item.loaded }" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @load="onThumbLoad(item)" @error="onThumbError(item)" @click="openViewer(item, searchModal.images)" />
+                      <div class="thumb-skeleton" :class="{ 'is-hidden': item.loaded }" aria-hidden="true"></div>
+                      <span v-if="isAnimatedCard(item)" class="video-format-watermark" :class="`format-${cardFormatLabel(item)}`">
+                        <svg v-if="isVideoItem(item)" class="format-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+                        <span v-else class="format-text">GIF</span>
+                      </span>
+                      <button type="button" class="search-select-toggle" :class="{ active: isSearchSelected(item) }" @click.stop="toggleSearchSelection(item)" :title="isSearchSelected(item) ? '取消选择' : '选择图片'">{{ isSearchSelected(item) ? '✓' : '' }}</button>
+                    </div>
+                    <div class="search-card-meta">
+                      <span class="search-date-text">{{ item.date }}</span>
+                      <span v-if="item.libraryLabel && item.libraryLabel !== 'hot_pic'" class="search-library-text">{{ item.libraryLabel }}</span>
+                      <span class="search-score-text"><span v-if="(item.score || 0) > 0">★ {{ item.score || 0 }}</span><span v-if="(item.favCount || 0) > 0">♥ {{ item.favCount || 0 }}</span></span>
+                    </div>
+                    <div class="search-card-artist" :title="item.artist">{{ item.artist }}</div>
+                  </article>
                 </div>
-                <div v-if="(item.score || 0) > 0 || (item.favCount || 0) > 0" class="score-badge">
-                  <span><span class="score-star">★</span> {{ item.score || 0 }}</span>
-                  <span><span class="score-heart">♥</span> {{ item.favCount || 0 }}</span>
-                </div>
-                <div class="search-card-artist" :title="item.artist">{{ item.artist }}</div>
-                <div class="button-row compact card-actions search-card-actions">
-                  <button class="secondary" @click="openOriginal(item)" :disabled="!item.postUrl" title="打开 Danbooru 原帖">原帖</button>
-                  <button class="secondary" @click="openLocal(item)" :disabled="!item.localPath" title="打开本地文件 / 在文件夹中选中">本地</button>
-                  <button @click="editSearchItem(item)" title="编辑打码">编辑</button>
-                  <button class="secondary" @click="jumpToSearchDate(item)" :title="`画廊前往 ${item.date}`">前往</button>
-                </div>
-              </article>
+              </template>
             </div>
             <div v-else-if="!searchModal.loading && searchModal.searched && !searchModal.msg" class="search-empty">没有匹配的图片</div>
           </div>
-
           <div v-if="searchModal.images.length" class="search-modal-foot">
             <button class="secondary" :disabled="!searchHasMore || searchModal.loadingMore" @click="loadMoreSearch">
               {{ searchModal.loadingMore ? '加载中…' : (searchHasMore ? `加载更多（还有 ${searchModal.total - searchModal.images.length} 条左右）` : '没有更多了') }}
@@ -10574,6 +10678,45 @@ const downloadTargetHint = computed(() => {
 }
 .search-modal-foot .secondary { min-width: 220px; height: 30px; border-radius: 8px; }
 
+.viewer-overlay { z-index: 10080 !important; }
+/* 跨日期搜索结果：宽工作区、分组标题和底部元信息，避免角标覆盖缩略图 */
+.search-modal { width: min(1680px, 98vw); max-height: 94vh; }
+.search-form { align-items: flex-end; }
+.search-sort-row { flex: 1 1 100%; display: flex; align-items: flex-end; gap: 8px; }
+.search-sort-field { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+.search-sort-select { height: 32px; min-width: 130px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-muted); color: var(--ink); }
+.search-all-btn { height: 32px; white-space: nowrap; }
+.search-result-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 16px 4px; color: var(--muted); font-size: 12px; }
+.search-result-toolbar > span { margin-right: auto; }
+.search-result-toolbar button { height: 28px; padding: 3px 9px; font-size: 11px; }
+.search-export-path { display: flex; align-items: center; gap: 6px; padding: 2px 16px 5px; color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search-export-path button { flex: 0 0 auto; padding: 1px 5px; font-size: 11px; }
+.search-results-scroll { padding: 8px 16px 14px; }
+.search-results-grid { display: block; margin: 0; }
+.search-group-title { display: flex; align-items: center; gap: 8px; margin: 12px 0 7px; padding-bottom: 5px; border-bottom: 1px solid var(--line); color: var(--ink); font-size: 13px; font-weight: 700; }
+.search-group-title:first-child { margin-top: 0; }
+.search-group-label { color: var(--ink); font-size: 13px; font-weight: 700; }
+.search-group-label em { margin-left: 8px; color: var(--muted); font-size: 11px; font-style: normal; font-weight: 400; }
+.search-group-select { margin-left: auto; height: 24px; padding: 2px 8px; font-size: 11px; }
+.search-group-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+.search-result-card { min-width: 0; overflow: hidden; }
+.search-result-card.search-result-selected { outline: 2px solid var(--accent); outline-offset: 1px; }
+.search-select-toggle { position: absolute; top: 7px; left: 7px; z-index: 5; width: 24px; height: 24px; padding: 0; border: 1px solid rgba(255,255,255,.8); border-radius: 50%; background: rgba(15,18,38,.72); color: #fff; font-size: 14px; line-height: 22px; cursor: pointer; }
+.search-select-toggle.active { background: var(--accent); border-color: var(--accent); }
+.search-card-meta { display: flex; align-items: center; gap: 5px; min-height: 20px; padding: 4px 4px 0; color: var(--muted); font-size: 10.5px; }
+.search-date-text { color: var(--ink); font-weight: 600; }
+.search-library-text { max-width: 30%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.search-score-text { display: flex; gap: 6px; margin-left: auto; white-space: nowrap; }
+.search-score-text span:first-child { color: #b7791f; }
+.search-score-text span:last-child { color: #d24b55; }
+@media (max-width: 760px) {
+  .search-modal-overlay { padding: 10px; }
+  .search-modal { width: 100%; max-height: 96vh; border-radius: 10px; }
+  .search-group-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .search-sort-row { align-items: stretch; flex-wrap: wrap; }
+  .search-sort-field { flex: 1 1 100%; justify-content: space-between; }
+  .search-sort-select { flex: 1 1 auto; }
+}
 /* 搜索结果 lightbox */
 .search-lightbox-overlay {
   position: fixed;

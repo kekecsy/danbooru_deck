@@ -3399,7 +3399,8 @@ def get_gallery_data_by_date(date_str: str):
 
 @app.get("/api/search_entries")
 def api_search_entries(q: str = "", kind: str = "auto", start: str = "",
-                       end: str = "", limit: int = 120, offset: int = 0):
+                       end: str = "", limit: int = 120, offset: int = 0,
+                       sort: str = "date"):
     """跨日期本地搜索：在 deck.db 内按角色/作品系列/作者整词匹配，日期闭区间可选。
 
     character 维度同时匹配 tag_character 与 tag_copyright（作品/系列 tag，如 azur_lane；
@@ -3427,6 +3428,8 @@ def api_search_entries(q: str = "", kind: str = "auto", start: str = "",
                 return {**empty, "msg": "日期不是合法日历日期"}
     if start and end and start > end:
         start, end = end, start
+    if sort not in ("date", "score", "fav_count"):
+        sort = "date"
 
     token_groups, expanded_tags = _expand_search_tokens(q, kind)
     if not token_groups:
@@ -3443,7 +3446,7 @@ def api_search_entries(q: str = "", kind: str = "auto", start: str = "",
         token_groups, kinds,
         folder_start=start or None, folder_end=end or None,
         library_ids=[r["id"] for r in online_roots],
-        limit=limit, offset=offset,
+        limit=limit, offset=offset, sort=sort,
     )
     items = _search_rows_to_items(rows, roots_by_id)
     return {
@@ -3454,6 +3457,7 @@ def api_search_entries(q: str = "", kind: str = "auto", start: str = "",
         "limit": max(1, min(int(limit or 120), 500)),
         "offset": max(0, int(offset or 0)),
         "kind": kind,
+        "sort": sort,
         "matched_kinds": sorted(kinds),
         "tokens": token_groups,
         "expanded_tags": expanded_tags,

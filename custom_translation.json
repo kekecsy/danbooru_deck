@@ -11065,9 +11065,9 @@
   },
   "daiwa_scarlet_(peak_blue)_(umamusume)": {
     "has_chinese": true,
-    "chinese_name": "大和绯红",
+    "chinese_name": "大和赤骥（苍蓝巅峰）",
     "source_hint": "umamusume",
-    "translated_description_zh": "这是[[Umamusume]]中[[Daiwa Scarlet (Umamusume)|]]的赛马服装。由[[双排扣]]的[[层叠连衣裙]]（外层蓝色，内层白色），[[黑色领结]]，[[肩章]]，[[aiguillette]]，配有[[袜带]]的[[黑色过膝袜]]，[[白色靴子|白色]][[过膝靴]]和一顶[[tiara]]。外观：* !post #7607717：当前 * !post #3076078：草"
+    "translated_description_zh": "《赛马娘》大和赤骥的决胜服（比赛服装）。由双排扣层叠连衣裙（蓝色外裙与白色内裙）、黑色领结、肩章、饰绪、带有吊袜带的黑色过膝袜、白色长靴及头冠组成。"
   },
   "usopp": {
     "has_chinese": true,
@@ -77632,5 +77632,11 @@
     "chinese_name": "白龙（快刀乱肴）",
     "source_hint": "azur_lane",
     "translated_description_zh": "《碧蓝航线》中重樱阵营航空母舰白龙（鹫）的女仆主题官方换装皮肤。日文名为「快刀乱肴」，国服沿用该名称，皮肤台词为「可笑至极！这就给你见识一下我华丽的刀功！」。该皮肤突出了白龙角色设定中重视刀的性格特征，以女仆装束演绎其豪爽利落的一面。"
+  },
+  "ouse_furachi": {
+    "has_chinese": true,
+    "chinese_name": "逢瀬ふらち",
+    "source_hint": "",
+    "translated_description_zh": "一位说日语的虚拟YouTuber，隶属于Night Dreamin。主要进行ASMR和游戏直播，擅长低沉、抖S、病娇等多种情境。同时在niconico、Ci-en、RPLAY、Fantia等多个平台展开限定直播和内容提供。"
   }
 }

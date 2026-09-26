@@ -10438,5 +10438,17 @@
     "chinese_name": "金鹿号",
     "source_hint": "azur_lane",
     "translated_description_zh": "《碧蓝航线》中金鹿号（Golden Hind，旧称鹈鹕号）的拟人化角色，原型为英国私掠者弗朗西斯·德雷克指挥的盖伦帆船。她是碧蓝航线中第二艘风帆船，也是目前游戏中登场的最古老舰船。"
+  },
+  "daiwa_scarlet_(peak_blue)_(umamusume)": {
+    "has_chinese": true,
+    "chinese_name": "大和赤骥（苍蓝巅峰）",
+    "source_hint": "umamusume",
+    "translated_description_zh": "《赛马娘》大和赤骥的决胜服（比赛服装）。由双排扣层叠连衣裙（蓝色外裙与白色内裙）、黑色领结、肩章、饰绪、带有吊袜带的黑色过膝袜、白色长靴及头冠组成。"
+  },
+  "ouse_furachi": {
+    "has_chinese": true,
+    "chinese_name": "逢瀬ふらち",
+    "source_hint": "",
+    "translated_description_zh": "一位说日语的虚拟YouTuber，隶属于Night Dreamin。主要进行ASMR和游戏直播，擅长低沉、抖S、病娇等多种情境。同时在niconico、Ci-en、RPLAY、Fantia等多个平台展开限定直播和内容提供。"
   }
 }
