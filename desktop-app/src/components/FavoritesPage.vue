@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const emit = defineEmits(['edit-image']);
 
-const API_BASE = 'http://127.0.0.1:8000';
+const API_BASE = 'http://127.0.0.1:18765';
 const ALL_KEY = '__all__';
 
 // 'artist' | 'character'：两个 tab 各持一份 groups，共享同一套 UI
@@ -261,7 +261,7 @@ async function convertGif(item) {
   }
   showToast('正在转换为 GIF...', 'info');
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/convert_local_zip', {
+    const res = await fetch('http://127.0.0.1:18765/api/convert_local_zip', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ local_path: item.local_path }),

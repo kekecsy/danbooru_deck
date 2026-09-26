@@ -49,7 +49,7 @@ watch(() => props.state.roots, (next) => {
 async function refreshRootSummary() {
   if (!props.state.date) return;
   try {
-    const resp = await fetch(`http://127.0.0.1:8000/api/library_root_summary?date=${encodeURIComponent(props.state.date)}`);
+    const resp = await fetch(`http://127.0.0.1:18765/api/library_root_summary?date=${encodeURIComponent(props.state.date)}`);
     const data = await resp.json();
     rootSummary.value = data?.ok && Array.isArray(data.roots) ? data.roots : [];
   } catch {
@@ -120,7 +120,7 @@ watch([sourceIdx, targetIdx, moveFiles], async ([s, t]) => {
 async function runPreview() {
   previewing.value = true;
   try {
-    const resp = await fetch('http://127.0.0.1:8000/api/merge_viewer_data', {
+    const resp = await fetch('http://127.0.0.1:18765/api/merge_viewer_data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -151,7 +151,7 @@ async function runMerge() {
   )) return;
   executing.value = true;
   try {
-    const resp = await fetch('http://127.0.0.1:8000/api/merge_viewer_data', {
+    const resp = await fetch('http://127.0.0.1:18765/api/merge_viewer_data', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

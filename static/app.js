@@ -1,6 +1,6 @@
 (function() {
     const ITEMS_PER_PAGE = 30;
-    const DEFAULT_SERVER_BASE = 'http://127.0.0.1:8000';
+    const DEFAULT_SERVER_BASE = 'http://127.0.0.1:18765';
     const SERVER_BASE = window.location.protocol === 'file:' ? DEFAULT_SERVER_BASE : window.location.origin;
     const IMAGE_EXTENSIONS = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'avif']);
 
@@ -596,7 +596,7 @@
     async function loadInitialGalleryData() {
         await loadGalleryByDate('');
         if (window.location.protocol === 'file:') {
-            appendLog('当前像是直接打开了 html，请先运行 python main.py，然后访问 http://127.0.0.1:8000');
+            appendLog('当前像是直接打开了 html，请先运行 python main.py，然后访问 http://127.0.0.1:18765');
         }
     }
 

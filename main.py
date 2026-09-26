@@ -1128,7 +1128,7 @@ def _resolve_media_in_library(date_str: str, filename: str):
 async def api_library_media(date_str: str, filename: str):
     """跨 library root 的媒体文件服务（替代只挂 hot_pic 的 StaticFiles）。
 
-    前端大图/视频查看器对视频固定走 http://127.0.0.1:8000/images/<日期>/<文件>
+    前端大图/视频查看器对视频固定走 http://127.0.0.1:18765/images/<日期>/<文件>
     （要 byte-range seek，避开 local:// 的媒体限制），收藏页看图也走这里。
     FileResponse 原生支持 Range / 条件请求，行为与旧 StaticFiles 一致。
     同一 date+filename 按 roots 顺序命中第一个（default 优先），文件名是 md5 哈希，
@@ -4911,7 +4911,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,
         host="127.0.0.1",
-        port=8000,
+        port=18765,
         reload=False,
         access_log=False,
         log_level="warning",

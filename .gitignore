@@ -24,3 +24,7 @@ deck.db-wal
 
 # 本机个人配置（示例见 library_roots.example.json）
 library_roots.json
+# Electron app icon assets
+!desktop-app/build/
+!desktop-app/build/icon.ico
+!desktop-app/build/icon.png

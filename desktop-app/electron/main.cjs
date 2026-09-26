@@ -28,7 +28,7 @@ const presetDirs = isDev
       // 不再从 exe 同梱资源里读，用户增删的贴图会被保留。
       path.join(dataRoot, 'present')
     ];
-const crawlerApiBase = 'http://127.0.0.1:8000';
+const crawlerApiBase = 'http://127.0.0.1:18765';
 const DEFAULT_WINDOW_STATE = { width: 1540, height: 980, isMaximized: true };
 const MIN_WINDOW_WIDTH = 1240;
 const MIN_WINDOW_HEIGHT = 760;
@@ -678,7 +678,7 @@ function getPythonSpawnArgs() {
   return [
     '-u',
     '-c',
-    `import uvicorn, sys; sys._danbooru_deck_token='${token}'; uvicorn.run('main:app', host='127.0.0.1', port=8000, reload=False, access_log=False, log_level='warning')`
+    `import uvicorn, sys; sys._danbooru_deck_token='${token}'; uvicorn.run('main:app', host='127.0.0.1', port=18765, reload=False, access_log=False, log_level='warning')`
   ];
 }
 
@@ -756,7 +756,7 @@ async function spawnCrawlerProcess() {
     // bind 失败 → 识别是不是我们之前留下的孤儿，是则杀之再重试 1 次
     if (crawlerBindRetries < 1 && /address already in use|Errno\s*10048|\[Errno\s*\d+\]\s+error while attempting to bind/i.test(errText)) {
       crawlerBindRetries += 1;
-      const pids = await findPidsOnPort(8000);
+      const pids = await findPidsOnPort(18765);
       let killed = 0;
       for (const pid of pids) {
         const { ours } = await isOurOrphan(pid, crawlerSessionToken);
@@ -778,7 +778,7 @@ async function spawnCrawlerProcess() {
 
 async function ensureCrawlerService() {
   // 进程内 dedup：第一道关就检查，保证并发调用者都 await 同一个 in-flight 启动
-  // 流程（探测 → 扫孤儿 → spawn → ready 检查），避免两个调用各起一个 python 抢 8000。
+  // 流程（探测 → 扫孤儿 → spawn → ready 检查），避免两个调用各起一个 python 抢 18765。
   if (crawlerStartPromise) {
     await crawlerStartPromise;
     return { ok: true, alreadyRunning: false };
@@ -789,12 +789,12 @@ async function ensureCrawlerService() {
 
   // 整个启动流程包成一个 promise，外面只用一处 await + catch + finally。
   crawlerStartPromise = (async () => {
-    // 1) 探测：如果 8000 已经有监听者，先确认是不是「我们的」
+    // 1) 探测：如果 18765 已经有监听者，先确认是不是「我们的」
     let probeOk = false;
     try { await apiFetchJson('/api/status'); probeOk = true; } catch {}
 
     if (probeOk) {
-      const pids = await findPidsOnPort(8000);
+      const pids = await findPidsOnPort(18765);
       if (!pids.length) return { ok: true, alreadyRunning: true };  // 200 上了但 netstat 没拿到，理论不该发生
       let owned = false;
       for (const pid of pids) {
@@ -807,15 +807,15 @@ async function ensureCrawlerService() {
       const desc = infos.length
         ? infos.map((i, idx) => `${i.name || '?'} (PID ${pids[idx]})`).join('、')
         : `未知进程 (PID ${pids.join(', ')})`;
-      const msg = `端口 8000 被其他进程占用：${desc}。`
+      const msg = `端口 18765 被其他进程占用：${desc}。`
                 + '如需继续，请先关闭该进程（任务管理器 → 详细信息 → 结束进程，'
-                + '或 `netstat -ano | findstr :8000` 找到 PID 后 `taskkill /F /PID <pid>`）。';
+                + '或 `netstat -ano | findstr :18765` 找到 PID 后 `taskkill /F /PID <pid>`）。';
       crawlerLastError = msg;
       throw new Error(msg);
     }
 
     // 2) 端口空着，但万一上一轮留了「我们的孤儿」，防御性扫一次
-    const stragglers = await findPidsOnPort(8000);
+    const stragglers = await findPidsOnPort(18765);
     for (const pid of stragglers) {
       const { ours } = await isOurOrphan(pid, crawlerSessionToken);
       if (ours) {
@@ -1085,7 +1085,7 @@ function getBackendSpawnArgs(python) {
   return isDev ? [...python.args, ...getPythonSpawnArgs()] : python.args;
 }
 
-// === 端口 8000 孤儿探测 + 杀进程树 ===
+// === 端口 18765 孤儿探测 + 杀进程树 ===
 // 背景：crawlerProcess.kill() 在 Windows 上只 TerminateProcess 当前子节点，
 // 遇到 uvicorn 未来开 reload / 启子进程会漏；更糟的是 App 强杀（Task Manager / 断电）
 // 整个 before-quit 都不触发，留下的孤儿下一次 bind 直接 [Errno 10048]。
@@ -1125,7 +1125,7 @@ async function findPidsOnPort(port) {
     return [];
   }
   // netstat -ano 输出形如：
-  //   TCP    127.0.0.1:8000    0.0.0.0:0    LISTENING    1234
+  //   TCP    127.0.0.1:18765    0.0.0.0:0    LISTENING    1234
   const { stdout } = await runCommand('netstat', ['-ano', '-p', 'TCP'], { timeoutMs: 4000 });
   const pids = new Set();
   const re = new RegExp(`\\s127\\.0\\.0\\.1:${port}\\s+\\S+\\s+LISTENING\\s+(\\d+)`, 'i');
@@ -1169,11 +1169,13 @@ async function isOurOrphan(pid, token) {
   if (!info) return { ours: false, info: null };
   const name = (info.name || '').toLowerCase();
   const cmd = info.commandLine || '';
-  const isOurExe = name === 'python.exe' || name === 'python' || name === 'crawler-backend.exe';
-  // token 是本次会话注入到 -c 字符串里的 sys._danbooru_deck_token='xxxx'，
-  // 出现即代表「这是上一个 Danbooru Deck 启动的 uvicorn」。
+  const isPythonBackend = name === 'python.exe' || name === 'python';
+  const isPackagedBackend = name === 'crawler-backend.exe' || name === 'crawler-backend';
+  // dev 模式的 python 后端会在命令行里带本次会话 token；打包版是 PyInstaller exe，
+  // 没有 -c 命令行 token，但进程名是项目专用的 crawler-backend.exe。
   const hasToken = !!token && cmd.includes(`_danbooru_deck_token='${token}'`);
-  return { ours: isOurExe && hasToken, info };
+  const ours = (isPythonBackend && hasToken) || (!isDev && isPackagedBackend);
+  return { ours, info };
 }
 
 async function killCrawlerTree(pid) {
@@ -1188,7 +1190,7 @@ async function killCrawlerTree(pid) {
   }
   // 等端口真正空出来（最多 ~3s）
   for (let i = 0; i < 6; i += 1) {
-    const still = await findPidsOnPort(8000);
+    const still = await findPidsOnPort(18765);
     if (!still.length) return;
     await delay(500);
   }
@@ -1203,7 +1205,7 @@ function backendOutputLines(text) {
 }
 
 // uvicorn 启动失败的 bind 错误形如：
-//   [Errno 10048] error while attempting to bind on address ('127.0.0.1', 8000): only one usage of each socket address ...
+//   [Errno 10048] error while attempting to bind on address ('127.0.0.1', 18765): only one usage of each socket address ...
 // 它**不带** `ERROR:` / `CRITICAL:` 前缀，原正则直接漏掉，导致用户只看到「抓虫服务启动超时」而无任何线索。
 // 另：capture Traceback 时把紧随的多行（File "..." / line N / xxxError: ...）一并捞进 crawlerLastError。
 const BIND_ERROR_RE = /\[Errno\s*\d+\]\s+error while attempting to bind/i;
@@ -1544,11 +1546,11 @@ function migrateLegacyPortableData() {
   }
 }
 
-// === 单实例锁：避免两个 Electron 同时跑、各起一个 python 抢 8000 ===
-// dev + prod 并存也跑不起来（两者都抢 8000），所以这个锁是真无副作用。
+// === 单实例锁：避免两个 Electron 同时跑、各起一个 python 抢 18765 ===
+// dev + prod 并存也跑不起来（两者都抢 18765），所以这个锁是真无副作用。
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
-  // 另一个 Danbooru Deck 已在运行；本次启动立刻退出，避免两实例争抢 8000。
+  // 另一个 Danbooru Deck 已在运行；本次启动立刻退出，避免两实例争抢 18765。
   // 用 app.exit 而不是 app.quit：前者跳过 lifecycle hook，更适合「还没初始化就退」。
   app.exit(0);
 } else {
@@ -1567,7 +1569,7 @@ app.whenReady().then(() => {
   if (!gotSingleInstanceLock) return;  // 双保险：拿不到锁就不继续初始化
   migrateLegacyPortableData();
   fs.mkdirSync(hotPicDir, { recursive: true });
-  // 本次会话 token：用于「正向上匹配」8000 上的监听者是不是我们之前留下的孤儿。
+  // 本次会话 token：用于「正向上匹配」18765 上的监听者是不是我们之前留下的孤儿。
   // 8 位 hex = 32 bit 熵，碰撞概率 ~1/2^32，可接受（不是安全边界）。
   crawlerSessionToken = crypto.randomBytes(4).toString('hex');
   Menu.setApplicationMenu(null);

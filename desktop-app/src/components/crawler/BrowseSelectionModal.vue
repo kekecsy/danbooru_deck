@@ -40,7 +40,7 @@ function thumbUrl(post) {
   }
   if (!raw) return '';
   const q = `url=${encodeURIComponent(raw)}${useSize ? `&size=${useSize}` : ''}`;
-  return `http://127.0.0.1:8000/api/proxy_thumb?${q}`;
+  return `http://127.0.0.1:18765/api/proxy_thumb?${q}`;
 }
 function ratingBucket(post) {
   const r = (post?.rating || '').toLowerCase();

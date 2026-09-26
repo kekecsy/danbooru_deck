@@ -44,7 +44,7 @@ async function toggleSafeMode() {
 const useProxy = ref(true);
 async function loadProxyState() {
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/proxy_state');
+    const res = await fetch('http://127.0.0.1:18765/api/proxy_state');
     const data = await res.json();
     if (data && typeof data.use_proxy === 'boolean') useProxy.value = data.use_proxy;
   } catch (e) { /* 后端未就绪时静默，onMounted 在 ensureService 后再调一次 */ }
@@ -52,7 +52,7 @@ async function loadProxyState() {
 async function toggleProxy() {
   const next = !useProxy.value;
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/set_proxy', {
+    const res = await fetch('http://127.0.0.1:18765/api/set_proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ use_proxy: next })
@@ -1396,7 +1396,7 @@ async function hydrateThumbs(items) {
       const folder = item.date || gallery.value.selectedDate;
       const w = gallery.value.thumbSize || 400;
       if (folder) {
-        item.thumbUrl = `http://127.0.0.1:8000/thumb/${encodeURIComponent(folder)}/${encodeURIComponent(item.filename)}?w=${w}`;
+        item.thumbUrl = `http://127.0.0.1:18765/thumb/${encodeURIComponent(folder)}/${encodeURIComponent(item.filename)}?w=${w}`;
       } else {
         item.thumbUrl = generateFormatPlaceholder(ext);
       }
@@ -1413,7 +1413,7 @@ async function hydrateThumbs(items) {
         const w = gallery.value.thumbSize || 400;
         const gifFilename = gifPath.split(/[\\/]/).pop();
         if (folder) {
-          item.thumbUrl = `http://127.0.0.1:8000/thumb/${encodeURIComponent(folder)}/${encodeURIComponent(gifFilename)}?w=${w}`;
+          item.thumbUrl = `http://127.0.0.1:18765/thumb/${encodeURIComponent(folder)}/${encodeURIComponent(gifFilename)}?w=${w}`;
         } else {
           // 极端兜底：拿不到 folder 时回退到 local:// 直接读，但仍标 hasGifCompanion 让模板对齐
           item.thumbUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
@@ -1437,7 +1437,7 @@ async function hydrateThumbs(items) {
 
     const webUrl = item.web_url || item.webUrl;
     if (webUrl) {
-      item.thumbUrl = `http://127.0.0.1:8000${webUrl}`;
+      item.thumbUrl = `http://127.0.0.1:18765${webUrl}`;
       return;
     }
   }));
@@ -1546,7 +1546,7 @@ async function prewarmHeavyThumbs() {
 async function notifyPendingIds(date) {
   if (!date) return;
   try {
-    const res = await fetch(`http://127.0.0.1:8000/api/collected_ids?date=${encodeURIComponent(date)}`);
+    const res = await fetch(`http://127.0.0.1:18765/api/collected_ids?date=${encodeURIComponent(date)}`);
     if (!res.ok) return;
     const payload = await res.json();
     if (payload?.ok && payload.count > 0) {
@@ -1563,7 +1563,7 @@ async function clearThumbCache() {
   clearingThumbCache.value = true;
   showToast('正在清空缩略图缓存…', 'info');
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/thumb_cache', { method: 'DELETE' });
+    const res = await fetch('http://127.0.0.1:18765/api/thumb_cache', { method: 'DELETE' });
     const data = await res.json();
     if (data.ok) {
       const detail = data.by_dir || {};
@@ -1597,7 +1597,7 @@ async function convertAllZipsToGif() {
   convertingZips.value = true;
   showToast(`正在把 ${date} 的 .zip 批量转成 .gif…`, 'info');
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/convert_all_zips', {
+    const res = await fetch('http://127.0.0.1:18765/api/convert_all_zips', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ date, overwrite: false })
@@ -2253,7 +2253,7 @@ function enqueueItem(item, successMessage, insertIndex) {
 // —— 用户在 fetch 期间又切了日期时，丢弃当前结果让新日期的 watch 接管。
 function fetchCollectedIdsForDate(date, { onSuccess, onEmpty, onError } = {}) {
   const d = (date || '').trim();
-  fetch(`http://127.0.0.1:8000/api/collected_ids?date=${encodeURIComponent(d)}`)
+  fetch(`http://127.0.0.1:18765/api/collected_ids?date=${encodeURIComponent(d)}`)
     .then(r => r.json())
     .then(payload => {
       if (!payload?.ok || !payload.ids?.length) {
@@ -2645,7 +2645,7 @@ async function convertGif(item) {
   }
   showToast("正在转换为 GIF...", "info");
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/convert_local_zip', {
+    const res = await fetch('http://127.0.0.1:18765/api/convert_local_zip', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ local_path: item.localPath })
@@ -2695,7 +2695,7 @@ async function startRefreshScores() {
   showToast(`正在刷新当前页 ${localPaths.length} 张${rootsText ? `（${rootsText}）` : ''}`, 'info');
 
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/refresh_visible', {
+    const res = await fetch('http://127.0.0.1:18765/api/refresh_visible', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ date, local_paths: localPaths })
@@ -2838,7 +2838,7 @@ async function startRefreshScoresRange() {
   async function runBatch(b, label) {
     if (!b.localPaths.length) return;
     if (label) showToast(label, 'info');
-    const res = await fetch('http://127.0.0.1:8000/api/refresh_visible', {
+    const res = await fetch('http://127.0.0.1:18765/api/refresh_visible', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ date, local_paths: b.localPaths }),
@@ -2902,7 +2902,7 @@ async function stopRefreshScores() {
   // 现在使用同步的 /api/refresh_visible，没有后台线程可停 —— 保留按钮但只做兜底
   refresh.value.isRunning = false;
   try {
-    await fetch('http://127.0.0.1:8000/api/refresh_scores_stop', { method: 'POST' });
+    await fetch('http://127.0.0.1:18765/api/refresh_scores_stop', { method: 'POST' });
   } catch (_) { /* noop */ }
 }
 
@@ -2992,7 +2992,7 @@ async function refreshSinglePost(item) {
   const date = gallery.value.selectedDate || '';
   if (!date) return;
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/refresh_visible', {
+    const res = await fetch('http://127.0.0.1:18765/api/refresh_visible', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ date, local_paths: item.localPath ? [item.localPath] : [], filenames: [item.filename] })
@@ -3180,7 +3180,7 @@ async function loadCollectedIds(date, page = 1) {
   browse.value.collectedDate = date || todayString();
   browse.value.targetDate = browse.value.collectedDate;
   try {
-    const res = await fetch(`http://127.0.0.1:8000/api/collected_ids?date=${encodeURIComponent(browse.value.collectedDate)}`);
+    const res = await fetch(`http://127.0.0.1:18765/api/collected_ids?date=${encodeURIComponent(browse.value.collectedDate)}`);
     const data = await res.json();
     if (!data.ok) {
       browse.value.collectedIds = [];
@@ -3225,7 +3225,7 @@ async function loadCollectedPage(page = 1) {
   try {
     // Danbooru 支持 id:1,2,3 语法一次拉多个 post
     const q = 'id:' + slice.join(',');
-    const url = `http://127.0.0.1:8000/api/browse_tags?tags=${encodeURIComponent(q)}&page=1&limit=${limit}`;
+    const url = `http://127.0.0.1:18765/api/browse_tags?tags=${encodeURIComponent(q)}&page=1&limit=${limit}`;
     const res = await fetch(url);
     const data = await res.json();
     if (!data.ok) {
@@ -3262,7 +3262,7 @@ async function runBrowseSearch(page = 1) {
   browse.value.loading = true;
   browse.value.error = '';
   try {
-    const url = `http://127.0.0.1:8000/api/browse_tags?tags=${encodeURIComponent(q)}&page=${page}&limit=${browse.value.limit}`;
+    const url = `http://127.0.0.1:18765/api/browse_tags?tags=${encodeURIComponent(q)}&page=${page}&limit=${browse.value.limit}`;
     const res = await fetch(url);
     const data = await res.json();
     if (!data.ok) {
@@ -3294,7 +3294,7 @@ async function runRankSearch(page = 1) {
   browse.value.loading = true;
   browse.value.error = '';
   try {
-    const url = `http://127.0.0.1:8000/api/browse_rank?page=${page}&limit=${browse.value.limit}`;
+    const url = `http://127.0.0.1:18765/api/browse_rank?page=${page}&limit=${browse.value.limit}`;
     const res = await fetch(url);
     const data = await res.json();
     if (!data.ok) {
@@ -3532,7 +3532,7 @@ async function fetchBrowsePagePosts(page) {
     const slice = ids.slice((page - 1) * limit, page * limit);
     if (!slice.length) return [];
     const q = 'id:' + slice.join(',');
-    const url = `http://127.0.0.1:8000/api/browse_tags?tags=${encodeURIComponent(q)}&page=1&limit=${limit}`;
+    const url = `http://127.0.0.1:18765/api/browse_tags?tags=${encodeURIComponent(q)}&page=1&limit=${limit}`;
     const res = await fetch(url);
     const data = await res.json();
     if (!data.ok) throw new Error(data.msg || '获取预览失败');
@@ -3541,7 +3541,7 @@ async function fetchBrowsePagePosts(page) {
     return slice.map(id => byId.get(String(id))).filter(Boolean);
   }
   if (b.source === 'rank') {
-    const url = `http://127.0.0.1:8000/api/browse_rank?page=${page}&limit=${limit}`;
+    const url = `http://127.0.0.1:18765/api/browse_rank?page=${page}&limit=${limit}`;
     const res = await fetch(url);
     const data = await res.json();
     if (!data.ok) throw new Error(data.msg || '获取预览失败');
@@ -3549,7 +3549,7 @@ async function fetchBrowsePagePosts(page) {
   }
   const q = (b.query || '').trim();
   if (!q) throw new Error('没有 tag 查询串');
-  const url = `http://127.0.0.1:8000/api/browse_tags?tags=${encodeURIComponent(q)}&page=${page}&limit=${limit}`;
+  const url = `http://127.0.0.1:18765/api/browse_tags?tags=${encodeURIComponent(q)}&page=${page}&limit=${limit}`;
   const res = await fetch(url);
   const data = await res.json();
   if (!data.ok) throw new Error(data.msg || '获取预览失败');
@@ -3682,7 +3682,7 @@ async function openTranslationModal() {
   translationModal.value.loading = true;
   translationModal.value.search = '';
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/untranslated_characters');
+    const res = await fetch('http://127.0.0.1:18765/api/untranslated_characters');
     const data = await res.json();
     translationModal.value.list = data.tags || [];
   } catch (err) {
@@ -3707,7 +3707,7 @@ function rawArtistTag(item, index) {
 async function searchCharacterDictionary(query = translationModal.value.search) {
   translationModal.value.loading = true;
   try {
-    const res = await fetch(`http://127.0.0.1:8000/api/character_translations?q=${encodeURIComponent(query || '')}&limit=200`);
+    const res = await fetch(`http://127.0.0.1:18765/api/character_translations?q=${encodeURIComponent(query || '')}&limit=200`);
     const data = await res.json();
     translationModal.value.list = data.items || [];
   } catch (err) {
@@ -3962,7 +3962,7 @@ async function openTranslateDetail(item) {
   translateDetail.value.tag = item.tag;
   translateDetail.value.fallbackName = item.fallback_name || item.tag;
   try {
-    const res = await fetch(`http://127.0.0.1:8000/api/character_source/${encodeURIComponent(item.tag)}`);
+    const res = await fetch(`http://127.0.0.1:18765/api/character_source/${encodeURIComponent(item.tag)}`);
     const data = await res.json();
     translateDetail.value.source = {
       description: data.description || '',
@@ -3994,7 +3994,7 @@ async function fetchCharacterSource() {
   translateDetail.value.fetchBusy = true;
   translateDetail.value.fetchMsg = '';
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/fetch_character_source', {
+    const res = await fetch('http://127.0.0.1:18765/api/fetch_character_source', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ tag: translateDetail.value.tag }),
@@ -4031,7 +4031,7 @@ async function saveTranslation() {
   }
   translateDetail.value.saving = true;
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/save_character_translation', {
+    const res = await fetch('http://127.0.0.1:18765/api/save_character_translation', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -4063,7 +4063,7 @@ async function saveTranslation() {
 async function importTranslationDict() {
   translationModal.value.importing = true;
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/import_character_chinese_search', {
+    const res = await fetch('http://127.0.0.1:18765/api/import_character_chinese_search', {
       method: 'POST',
     });
     const data = await res.json();
@@ -4098,7 +4098,7 @@ async function openFavoriteDialog(artist) {
   favoriteDialog.value.loading = true;
   favoriteDialog.value.newGroupName = '';
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/artist_favorites');
+    const res = await fetch('http://127.0.0.1:18765/api/artist_favorites');
     const data = await res.json();
     favoriteDialog.value.groups = data.groups || {};
     // 默认勾上该 artist 已经在的分组（方便看到当前归属、也支持取消勾选移除）
@@ -4148,7 +4148,7 @@ async function saveFavoriteDialog() {
     else next[g] = arr;
   }
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/artist_favorites', {
+    const res = await fetch('http://127.0.0.1:18765/api/artist_favorites', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groups: next }),
@@ -4280,9 +4280,9 @@ function cardBadgeTitle(item) {
 async function loadFavSnapshot() {
   try {
     const [aRes, cRes, iRes] = await Promise.all([
-      fetch('http://127.0.0.1:8000/api/artist_favorites').then(r => r.json()),
-      fetch('http://127.0.0.1:8000/api/character_favorites').then(r => r.json()),
-      fetch('http://127.0.0.1:8000/api/image_favorites').then(r => r.json()),
+      fetch('http://127.0.0.1:18765/api/artist_favorites').then(r => r.json()),
+      fetch('http://127.0.0.1:18765/api/character_favorites').then(r => r.json()),
+      fetch('http://127.0.0.1:18765/api/image_favorites').then(r => r.json()),
     ]);
     favSnapshot.value.artists = aRes.groups || {};
     favSnapshot.value.characters = cRes.groups || {};
@@ -4308,7 +4308,7 @@ async function toggleImageFavorite(item) {
     library_id: item.libraryId || 'default',
   };
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/image_favorites/toggle', {
+    const res = await fetch('http://127.0.0.1:18765/api/image_favorites/toggle', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ item: payload }),
@@ -4351,7 +4351,7 @@ async function openCharacterFavoriteDialog(token) {
   charFavoriteDialog.value.loading = true;
   charFavoriteDialog.value.newGroupName = '';
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/character_favorites');
+    const res = await fetch('http://127.0.0.1:18765/api/character_favorites');
     const data = await res.json();
     charFavoriteDialog.value.groups = data.groups || {};
     // 已在的分组默认勾上
@@ -4412,7 +4412,7 @@ async function saveCharacterFavoriteDialog() {
     else next[g] = arr;
   }
   try {
-    const res = await fetch('http://127.0.0.1:8000/api/character_favorites', {
+    const res = await fetch('http://127.0.0.1:18765/api/character_favorites', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groups: next }),
@@ -4692,7 +4692,7 @@ async function openSearchLightbox(item) {
   lb.open = true;
   if (isVideoItem(item) && item.date) {
     lb.isVideo = true;
-    lb.url = `http://127.0.0.1:8000/images/${item.date}/${encodeURIComponent(item.filename)}`;
+    lb.url = `http://127.0.0.1:18765/images/${item.date}/${encodeURIComponent(item.filename)}`;
     return;
   }
   if (itemExtension(item) === 'zip') {
@@ -4745,7 +4745,7 @@ function onTranslationFileSelected(event) {
   reader.onload = async (e) => {
     try {
       const data = JSON.parse(e.target.result);
-      const res = await fetch('http://127.0.0.1:8000/api/import_translation', {
+      const res = await fetch('http://127.0.0.1:18765/api/import_translation', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ translations: data })
@@ -4782,7 +4782,7 @@ async function openViewer(item, sourceItems = null) {
   // folder 优先取 item.date：跨日期搜索结果不属于 gallery.selectedDate。
   const itemFolder = item.date || gallery.value.selectedDate;
   if (VIDEO_EXTS.includes(ext) && itemFolder && item.filename) {
-    viewer.value.imageUrl = `http://127.0.0.1:8000/images/${itemFolder}/${encodeURIComponent(item.filename)}`;
+    viewer.value.imageUrl = `http://127.0.0.1:18765/images/${itemFolder}/${encodeURIComponent(item.filename)}`;
     return;
   }
 
@@ -4800,7 +4800,7 @@ async function openViewer(item, sourceItems = null) {
 
   const webUrl = item?.web_url || item?.webUrl;
   if (webUrl) {
-    viewer.value.imageUrl = `http://127.0.0.1:8000${webUrl}`;
+    viewer.value.imageUrl = `http://127.0.0.1:18765${webUrl}`;
     return;
   }
 }
@@ -4813,7 +4813,7 @@ async function syncViewerImage() {
   const ext = (viewerItem.value.filename || '').split('.').pop().toLowerCase();
   const viewerFolder = viewerItem.value.date || gallery.value.selectedDate;
   if (VIDEO_EXTS.includes(ext) && viewerFolder && viewerItem.value.filename) {
-    viewer.value.imageUrl = `http://127.0.0.1:8000/images/${viewerFolder}/${encodeURIComponent(viewerItem.value.filename)}`;
+    viewer.value.imageUrl = `http://127.0.0.1:18765/images/${viewerFolder}/${encodeURIComponent(viewerItem.value.filename)}`;
     return;
   }
 
@@ -4831,7 +4831,7 @@ async function syncViewerImage() {
 
   const webUrl = viewerItem.value.web_url || viewerItem.value.webUrl;
   if (webUrl) {
-    viewer.value.imageUrl = `http://127.0.0.1:8000${webUrl}`;
+    viewer.value.imageUrl = `http://127.0.0.1:18765${webUrl}`;
     return;
   }
 }

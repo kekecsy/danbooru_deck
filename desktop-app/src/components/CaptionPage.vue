@@ -164,7 +164,7 @@ async function initFromSource(item) {
     try {
       const ctx = await window.desktopAPI.app.getContext();
       const dateDir = `${ctx.hotPicDir.replace(/\\/g, '/')}/${currentDate.value}`;
-      const url = `http://127.0.0.1:8000/api/gallery_data/${currentDate.value}`;
+      const url = `http://127.0.0.1:18765/api/gallery_data/${currentDate.value}`;
       try {
         const resp = await fetch(url);
         if (resp.ok) {
@@ -312,7 +312,7 @@ async function copyStagePrompt(stage) {
     let verifyJson = null;
     if (stage === 3 && manual.value.s2.parsed) verifyJson = JSON.stringify(manual.value.s2.parsed);
     const body = { image_path: imagePath.value, with_artist: false, stage, verify_json: verifyJson };
-    const resp = await fetch('http://127.0.0.1:8000/api/caption_prompt', {
+    const resp = await fetch('http://127.0.0.1:18765/api/caption_prompt', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     });
     if (!resp.ok) { message.value = `服务器错误: ${resp.status}`; return; }
