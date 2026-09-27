@@ -445,14 +445,15 @@ const task = ref({
 // collect 阶段如果后端给了 page_total，会顺带显示「N/M 页」。
 const runningPhaseText = computed(() => {
   if (!task.value.isRunning && !task.value.isPaused && !task.value.isStopping) return '';
-  if (task.value.isStopping) return '正在停止…';
-  if (task.value.isPaused) return '已暂停';
-  if (task.value.progress.total > 0) return '正在下载…';
+  const target = task.value.targetFolder ? ` · 目标 ${task.value.targetFolder}` : '';
+  if (task.value.isStopping) return `正在停止…${target}`;
+  if (task.value.isPaused) return `已暂停${target}`;
+  if (task.value.progress.total > 0) return `正在下载…${target}`;
   const pp = task.value.pageProgress;
   if (pp && pp.total > 0) {
-    return `正在抓取ID…（${pp.current}/${pp.total} 页）`;
+    return `正在抓取ID…（${pp.current}/${pp.total} 页）${target}`;
   }
-  return '正在抓取ID…';
+  return `正在抓取ID…${target}`;
 });
 // 实时失败计数：有失败时紧跟在阶段提示后面，拼成 "阶段 · ⚠ 失败 3 页 / 1 图" 形式。
 // 每次 failed_pages 增长都会自动更新（依赖 task.runningFailedPages/Ids），点击会聚焦失败横幅。
@@ -906,7 +907,10 @@ const refresh = ref({
   isRunning: false,
   done: 0,
   total: 0,
-  dateStr: ''
+  dateStr: '',
+  phase: '',
+  batchIndex: 0,
+  batchTotal: 0
 });
 
 // 按 score / 收藏数 排序时锁定排序的快照：
@@ -2691,6 +2695,9 @@ async function startRefreshScores() {
   refresh.value.dateStr = date;
   refresh.value.total = localPaths.length;
   refresh.value.done = 0;
+  refresh.value.phase = '正在处理当前页';
+  refresh.value.batchIndex = 0;
+  refresh.value.batchTotal = 1;
   const rootsText = rootBreakdownText(pageItems);
   showToast(`正在刷新当前页 ${localPaths.length} 张${rootsText ? `（${rootsText}）` : ''}`, 'info');
 
@@ -2725,6 +2732,9 @@ async function startRefreshScores() {
     showToast(`请求失败: ${err.message}`, 'error');
   } finally {
     refresh.value.isRunning = false;
+    refresh.value.phase = '';
+    refresh.value.batchIndex = 0;
+    refresh.value.batchTotal = 0;
   }
 }
 
@@ -2813,6 +2823,9 @@ async function startRefreshScoresRange() {
   refresh.value.dateStr = date;
   refresh.value.total = localPaths.length;
   refresh.value.done = 0;
+  refresh.value.phase = '准备刷新';
+  refresh.value.batchIndex = 0;
+  refresh.value.batchTotal = 0;
 
   // 页数超过 5 时，按每 4 页一批切片，批间休息 40s 防止 Danbooru 风控
   const THROTTLE_THRESHOLD = 5;
@@ -2835,9 +2848,14 @@ async function startRefreshScoresRange() {
   let okCount = 0;
   let failCount = 0;
 
-  async function runBatch(b, label) {
+  async function runBatch(b, label, batchIndex, batchTotal) {
+    refresh.value.batchIndex = batchIndex;
+    refresh.value.batchTotal = batchTotal;
+    refresh.value.phase = throttled
+      ? `正在处理第 ${batchIndex}/${batchTotal} 批（第 ${b.pStart}-${b.pEnd} 页）`
+      : '正在处理当前范围';
     if (!b.localPaths.length) return;
-    if (label) showToast(label, 'info');
+    if (label) showToast(`${label}，已完成 ${refresh.value.done}/${refresh.value.total}`, 'info');
     const res = await fetch('http://127.0.0.1:18765/api/refresh_visible', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2878,7 +2896,7 @@ async function startRefreshScoresRange() {
       const label = throttled
         ? `批次 ${bi + 1}/${batches.length} · 第 ${b.pStart}-${b.pEnd} 页（${b.localPaths.length} 张）`
         : '';
-      await runBatch(b, label);
+      await runBatch(b, label, bi + 1, batches.length);
       if (throttled && bi < batches.length - 1 && refresh.value.isRunning) {
         showToast(`已完成 ${okCount}/${refresh.value.total}，休息 ${REST_MS / 1000}s 防风控…`, 'info');
         await sleepCancellable(REST_MS);
@@ -2895,12 +2913,18 @@ async function startRefreshScoresRange() {
     showToast(`请求失败: ${err.message}`, 'error');
   } finally {
     refresh.value.isRunning = false;
+    refresh.value.phase = '';
+    refresh.value.batchIndex = 0;
+    refresh.value.batchTotal = 0;
   }
 }
 
 async function stopRefreshScores() {
   // 现在使用同步的 /api/refresh_visible，没有后台线程可停 —— 保留按钮但只做兜底
   refresh.value.isRunning = false;
+  refresh.value.phase = '';
+  refresh.value.batchIndex = 0;
+  refresh.value.batchTotal = 0;
   try {
     await fetch('http://127.0.0.1:18765/api/refresh_scores_stop', { method: 'POST' });
   } catch (_) { /* noop */ }
@@ -5455,7 +5479,7 @@ const downloadTargetHint = computed(() => {
           <!-- 刷新热度进度：独立于下载任务的前台批次刷新，放在下载进度的上面一行。
                与工具栏「刷新热度」按钮的 running 文案共享同一 refresh 状态；× 就地停止。 -->
           <div v-if="refresh.isRunning" class="refresh-progress-row">
-            <span class="rp-label">刷新热度</span>
+            <span class="rp-label">刷新热度 · {{ refresh.dateStr }}</span>
             <div class="progress-bar rp-bar" :title="`${refresh.dateStr}：${refresh.done} / ${refresh.total}`">
               <div
                 class="progress-seg progress-seg-page"
@@ -5463,6 +5487,7 @@ const downloadTargetHint = computed(() => {
               ></div>
             </div>
             <span class="rp-count">{{ refresh.done }}/{{ refresh.total }}</span>
+            <span v-if="refresh.phase" class="rp-phase">{{ refresh.phase }}</span>
             <button type="button" class="rp-stop" title="停止刷新热度" @click="stopRefreshScores">×</button>
           </div>
           <!-- 阶段提示：仅在任务运行/暂停/停止中显示，区分"抓取ID"与"下载" -->
@@ -8095,6 +8120,15 @@ const downloadTargetHint = computed(() => {
   font-family: 'JetBrains Mono', Consolas, monospace;
   font-size: 11px;
   color: rgba(255, 255, 255, 0.75);
+}
+.rp-phase {
+  flex: 1 0 100%;
+  min-width: 0;
+  margin-left: 2px;
+  color: rgba(255, 255, 255, 0.62);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .rp-stop {
   flex: 0 0 auto;

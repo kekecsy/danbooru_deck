@@ -12,6 +12,7 @@ import json
 import shutil
 import threading
 import concurrent.futures
+from contextlib import nullcontext
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
@@ -388,6 +389,19 @@ class DownloadJob:
 
     def flush_viewer_data(self):
         with self.viewer_lock:
+            # 刷新热度接口可能在下载任务运行期间更新同一 folder。写盘前先合并
+            # 数据库中的最新快照，避免旧的下载内存快照把热度或新条目覆盖掉。
+            latest = self.db.load_viewer_data()
+            current = dedup_viewer_data(self.viewer_data)
+            latest_keys = {_viewer_item_key(item) for item in latest if isinstance(item, dict)}
+            merged = list(latest)
+            merged.extend(item for item in current
+                          if _viewer_item_key(item) not in latest_keys)
+            self.viewer_data = dedup_viewer_data(merged)
+            self.viewer_keys = {
+                _viewer_item_key(item) for item in self.viewer_data
+                if isinstance(item, dict)
+            }
             self.db.save_viewer_data(self.viewer_data)
 
     def finalize_on_stop(self):
@@ -432,7 +446,7 @@ class DownloadJob:
         """popular_range 模式按日期迭代时用：先把当前 folder 落盘，再换到下一天。"""
         with self.viewer_lock:
             try:
-                self.db.save_viewer_data(self.viewer_data)
+                self.flush_viewer_data()
             except Exception as e:
                 self.append_log(f"切换目录前落盘失败 ({self.target_folder}): {e}")
             # 旧 folder 的 pending 移除增量也要先落盘，否则会残留在旧 ids_data.json
@@ -3847,6 +3861,18 @@ def _refresh_visible_by_paths(local_paths: list[str]):
     fetch_jobs = []
     updates = []
 
+    def _active_job_for_scope(image_path):
+        """只把同一日期、同一图库根目录的刷新合并进下载任务内存。"""
+        job = jobs.get_by_folder(image_path.parent.name)
+        if job is None:
+            return None
+        try:
+            if Path(job.save_dir).resolve() == image_path.parent.resolve():
+                return job
+        except OSError:
+            pass
+        return None
+
     def _load_scope(image_path):
         parent = image_path.parent
         key = str(parent / "viewer_data.json")
@@ -3854,20 +3880,27 @@ def _refresh_visible_by_paths(local_paths: list[str]):
         if scope is None:
             lib_id = library_id_for_path(str(parent))
             folder = parent.name
+            active_job = _active_job_for_scope(image_path)
             viewer_mirror = parent / "viewer_data.json"
-            try:
-                deck_db.reconcile_viewer(lib_id, folder, str(viewer_mirror))
-                data = deck_db.viewer_load_entries(lib_id, folder)
-            except Exception as e:
-                append_log(f"viewer DB 读取失败，回退 JSON {key}: {e}")
-                raw = load_json(key, []) if viewer_mirror.exists() else []
-                data = raw if isinstance(raw, list) else []
-            scope = (lib_id, folder, data)
+            if active_job is not None:
+                # 下载任务的内存数据是当前写入源，不能先从旧镜像 reconcile 回 DB。
+                with active_job.viewer_lock:
+                    data = active_job.viewer_data
+            else:
+                try:
+                    deck_db.reconcile_viewer(lib_id, folder, str(viewer_mirror))
+                    data = deck_db.viewer_load_entries(lib_id, folder)
+                except Exception as e:
+                    append_log(f"viewer DB 读取失败，回退 JSON {key}: {e}")
+                    raw = load_json(key, []) if viewer_mirror.exists() else []
+                    data = raw if isinstance(raw, list) else []
+            scope = {"lib_id": lib_id, "folder": folder, "data": data, "job": active_job}
             viewer_cache[key] = scope
         return scope
 
     for image_path in targets:
-        lib_id, folder, data = _load_scope(image_path)
+        scope = _load_scope(image_path)
+        lib_id, folder, data = scope["lib_id"], scope["folder"], scope["data"]
         post_id = None
         for item in data:
             if item.get("filename") == image_path.name:
@@ -3938,28 +3971,33 @@ def _refresh_visible_by_paths(local_paths: list[str]):
         viewer_path = image_path.parent / "viewer_data.json"
         key = str(viewer_path)
         # scope 在 _load_scope 阶段必然已建缓存（targets 都过了一遍）
-        lib_id, folder, data = viewer_cache[key]
-        item = None
-        for existing in data:
-            if existing.get("filename") == filename:
-                item = existing
-                break
-        if item is None:
-            item = {
-                "filename": filename,
-                "web_url": f"/images/{image_path.parent.name}/{filename}",
-            }
-            data.append(item)
+        scope = viewer_cache[key]
+        lib_id, folder, data = scope["lib_id"], scope["folder"], scope["data"]
+        active_job = scope["job"]
+        # 网络请求在锁外完成；真正修改任务内存时再持有同一把锁，
+        # 避免下载线程在“刷新结果已改内存、尚未写盘”的窗口读取旧快照。
+        with (active_job.viewer_lock if active_job is not None else nullcontext()):
+            item = None
+            for existing in data:
+                if existing.get("filename") == filename:
+                    item = existing
+                    break
+            if item is None:
+                item = {
+                    "filename": filename,
+                    "web_url": f"/images/{image_path.parent.name}/{filename}",
+                }
+                data.append(item)
 
-        item["artist"] = artist
-        item["local_path"] = str(image_path)
-        item["post_url"] = post_url
-        item["score"] = new_score
-        item["fav_count"] = new_fav
-        merged_tags = item.get("tags") or {}
-        merged_tags.update(tags_full)
-        item["tags"] = merged_tags
-        changed_viewers.add(key)
+            item["artist"] = artist
+            item["local_path"] = str(image_path)
+            item["post_url"] = post_url
+            item["score"] = new_score
+            item["fav_count"] = new_fav
+            merged_tags = item.get("tags") or {}
+            merged_tags.update(tags_full)
+            item["tags"] = merged_tags
+            changed_viewers.add(key)
 
         updates.append({
             "filename": filename,
@@ -3975,12 +4013,23 @@ def _refresh_visible_by_paths(local_paths: list[str]):
         })
 
     for key in changed_viewers:
-        lib_id, folder, data = viewer_cache[key]
-        cleaned = dedup_viewer_data(data)
-        # DB 为权威：整 folder 替换后再导出同名镜像（原子写，与下载线程互斥）。
-        # 这样直接按 path 刷新（跨任意 root/日期）也不会绕过 deck.db 造影子数据。
-        deck_db.viewer_replace(lib_id, folder, cleaned)
-        deck_db.export_viewer_mirror(lib_id, folder, key, items=cleaned)
+        scope = viewer_cache[key]
+        lib_id, folder, data = scope["lib_id"], scope["folder"], scope["data"]
+        active_job = scope["job"]
+        if active_job is not None:
+            # 与下载线程共用 viewer_lock；刷新完成后立即落盘，但不再绕过任务内存。
+            with active_job.viewer_lock:
+                cleaned = dedup_viewer_data(active_job.viewer_data)
+                active_job.viewer_data[:] = cleaned
+                active_job.viewer_keys = {
+                    _viewer_item_key(item) for item in cleaned if isinstance(item, dict)
+                }
+                active_job.db.save_viewer_data(active_job.viewer_data)
+        else:
+            cleaned = dedup_viewer_data(data)
+            # DB 为权威：整 folder 替换后再导出同名镜像（原子写）。
+            deck_db.viewer_replace(lib_id, folder, cleaned)
+            deck_db.export_viewer_mirror(lib_id, folder, key, items=cleaned)
 
     return {"ok": True, "updates": updates}
 
