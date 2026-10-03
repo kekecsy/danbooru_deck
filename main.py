@@ -2669,6 +2669,46 @@ def proxy_state_endpoint():
 # preview_file_url（直连）或经 /api/proxy_thumb 转发（走代理）。
 # ==========================================
 
+# 视频扩展名：这些帖子的 large_file_url **不是图片**。Danbooru 对没有 large 变体的
+# 帖子会把 large_file_url 退回 file_url 本体，视频就是 .../original/xx.mp4
+# （实测 33 个视频里 32 个如此，第 33 个是三个 url 全空的已删除帖）。
+# 前端拿它当缩略图 <img> 既渲染不出来，后端还会把整个视频当"缩略图"拉下来缓存 ——
+# 所以单独挑一张静态封面帧给它（见 _browse_video_cover_url）。
+_BROWSE_VIDEO_EXTS = {".mp4", ".webm", ".mov", ".mkv", ".avi"}
+# 封面帧变体优先级：360x360 长边正好匹配 Tag 浏览的缩略图档位（_THUMB_SIZE=360），
+# 退化时用 180x180。两者对视频都是 jpg。
+_BROWSE_COVER_VARIANT_TYPES = ("360x360", "180x180")
+
+
+def _browse_video_cover_url(post: dict) -> str:
+    """给视频挑一张静态封面图 URL。非视频、或挑不到时返回空串。
+
+    数据源是 media_asset.variants（Danbooru 为每个 post 预生成的派生文件）：
+    视频的 360x360 / 180x180 变体是 jpg 静态帧，而 720x720 / original 仍是 mp4，
+    所以按类型挑中之后还要再确认它不是视频扩展名。
+    老数据 / 缺 media_asset 时退回 preview_file_url（180x180 jpg），由调用方兜底。
+    """
+    ext = "." + (post.get("file_ext") or "").lower()
+    if ext not in _BROWSE_VIDEO_EXTS:
+        return ""
+    media = post.get("media_asset")
+    variants = (media or {}).get("variants") if isinstance(media, dict) else None
+    if not variants:
+        return ""
+    by_type = {}
+    for v in variants:
+        if isinstance(v, dict) and v.get("type") and v.get("url"):
+            by_type.setdefault(v["type"], v)
+    for t in _BROWSE_COVER_VARIANT_TYPES:
+        v = by_type.get(t)
+        if not v:
+            continue
+        # 只要图片变体：视频的 720x720 / original 也是 mp4，不能当封面
+        if "." + (v.get("file_ext") or "").lower() not in _BROWSE_VIDEO_EXTS:
+            return v["url"]
+    return ""
+
+
 def _slim_post_for_browse(post: dict) -> dict:
     """从 Danbooru posts.json 的单条 post 里挑出前端预览要用的字段。
     已删除 / 无预览图的帖子（file_url 全空）返回 None 由上层过滤。"""
@@ -2683,6 +2723,11 @@ def _slim_post_for_browse(post: dict) -> dict:
     # 三个 url 全空一般是被 ban / 需登录的帖子，预览不了也下不了，直接丢弃
     if not (preview or large or full):
         return None
+    # 视频的封面帧（非视频恒为空串）：前端 thumbUrl 优先用它，避开"mp4 当缩略图"。
+    # variants 里挑不到时退回 preview_file_url（180x180 jpg）—— 仍远好过 mp4 本体。
+    cover = ""
+    if "." + (post.get("file_ext") or "").lower() in _BROWSE_VIDEO_EXTS:
+        cover = _browse_video_cover_url(post) or preview
 
     artist = ""
     artist_str = post.get("tag_string_artist") or ""
@@ -2696,6 +2741,9 @@ def _slim_post_for_browse(post: dict) -> dict:
         "preview_file_url": preview,
         "large_file_url": large,
         "file_url": full,
+        # 视频专用静态封面帧（非视频为空串）。见 _browse_video_cover_url 的注释：
+        # 视频的 large_file_url 指向 mp4 本体，缩略图必须改用它。
+        "cover_file_url": cover,
         "image_width": post.get("image_width") or 0,
         "image_height": post.get("image_height") or 0,
         "rating": post.get("rating") or "",
@@ -2901,6 +2949,16 @@ def proxy_thumb(url: str = "", size: int = 0):
     host = (parsed.hostname or "").lower()
     if not any(host == h or host.endswith("." + h) for h in _PROXY_THUMB_ALLOWED_HOSTS):
         return PlainTextResponse("host not allowed", status_code=403)
+
+    # 视频本体（.mp4/.webm…）不允许进缩略图管线：Danbooru 对没有 large 变体的帖子会把
+    # large_file_url 退回 file_url 本体，前端若直接把它丢进来，这里会把整个视频（动辄
+    # 几十 MB）拉下来 —— Pillow 解不开、降级成原图透传，最后以 `.jpg` 名义写进
+    # .browse_thumb_cache，既白费带宽又留下"名为 jpg 实为 mp4"的脏缓存（命中后浏览器
+    # 解码失败 = 缩略图空白）。正确做法是前端改用 cover_file_url（见 _browse_video_cover_url）。
+    # 这里 415 掉，让问题在日志里显形，而不是静默地持续恶化。
+    if os.path.splitext(parsed.path)[1].lower() in _BROWSE_VIDEO_EXTS:
+        print(f"[browse_thumb] 拒绝视频本体当缩略图: {url}")
+        return PlainTextResponse("video is not a thumbnail", status_code=415)
 
     try:
         size = int(size or 0)

@@ -4,6 +4,7 @@
 // 本组件纯呈现 + 事件分发；纯展示/格式化逻辑（缩略图 URL、rating 分桶、原帖链接）放在这里。
 import { computed, ref, watch } from 'vue';
 import SearchHistoryDropdown from '../SearchHistoryDropdown.vue';
+import { browseThumbUrl } from '../../utils/browseThumb.js';
 
 const props = defineProps({
   state: { type: Object, required: true },
@@ -80,23 +81,9 @@ function addCurrentAsSavedTag() {
   emit('add-saved-tag', cur);
 }
 
-// 缩略图 URL：统一走后端 /api/proxy_thumb（落盘缓存 + 防盗链转发）。
-// 走 large_file_url（Danbooru 720px）+ ?size=360，让后端用 Pillow 缩到长边 360px 落盘：
-// 比 preview(150) 清晰，比直接用 large(720) 省缓存；展示 cell ~200px 浏览器再轻微 downscale。
-// 没有 large 时退回 preview/file_url，透传不缩。
-const _THUMB_SIZE = 360;
-function thumbUrl(post) {
-  let raw = post.large_file_url;
-  let useSize = _THUMB_SIZE;
-  if (!raw) {
-    // 没有 large_file_url 时退回 preview/file_url，不缩放（避免 150→360 upscale 反而更糊）
-    raw = post.preview_file_url || post.file_url || '';
-    useSize = 0;
-  }
-  if (!raw) return '';
-  const q = `url=${encodeURIComponent(raw)}${useSize ? `&size=${useSize}` : ''}`;
-  return `http://127.0.0.1:18765/api/proxy_thumb?${q}`;
-}
+// 缩略图 URL 的构造已抽到 ../../utils/browseThumb.js（Tag 浏览 / 排行榜浏览 / 已选清单
+// 三处规则一致，模板里直接用 browseThumbUrl）。要点：视频的 large_file_url 指向 mp4
+// 本体，必须改用 cover_file_url 提供的静态封面帧 —— 详见那个文件里的长注释。
 
 // rating 首字母：Danbooru 返回 g/s/q/e，g(general) 归入 s 档
 function ratingBucket(post) {
@@ -349,7 +336,7 @@ function submitJump() {
             @click="emit('toggle-select', post)"
           >
             <img
-              :src="thumbUrl(post)"
+              :src="browseThumbUrl(post)"
               class="browse-thumb"
               loading="lazy"
               referrerpolicy="no-referrer"

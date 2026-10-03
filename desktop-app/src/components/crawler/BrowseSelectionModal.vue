@@ -9,6 +9,7 @@
 //   - onPage = true  表示这条勾选正好落在当前页（用户能在主网格里看到）
 //   - onPage = false 表示这条勾选来自其他页/其他搜索（主网格看不到，全靠这里管理）
 import { computed } from 'vue';
+import { browseThumbUrl } from '../../utils/browseThumb.js';
 
 const props = defineProps({
   modelValue: { type: Boolean, required: true },
@@ -27,21 +28,9 @@ const open = computed({
 });
 function close() { open.value = false; }
 
-// 缩略图：和 BrowseOverlay 用同样的后端 /api/proxy_thumb 缓存策略。
-// 没有 large_file_url 时退回 preview/file_url，不缩放（避免 upscale 反而更糊）。
-const _THUMB_SIZE = 360;
-function thumbUrl(post) {
-  if (!post) return '';
-  let raw = post.large_file_url;
-  let useSize = _THUMB_SIZE;
-  if (!raw) {
-    raw = post.preview_file_url || post.file_url || '';
-    useSize = 0;
-  }
-  if (!raw) return '';
-  const q = `url=${encodeURIComponent(raw)}${useSize ? `&size=${useSize}` : ''}`;
-  return `http://127.0.0.1:18765/api/proxy_thumb?${q}`;
-}
+// 缩略图：和 BrowseOverlay 共用同一个后端 /api/proxy_thumb 缓存策略 —— 构造逻辑抽在
+// ../../utils/browseThumb.js。要点：视频的 large_file_url 指向 mp4 本体，那里会改用它
+// 的静态封面帧（cover_file_url）。
 function ratingBucket(post) {
   const r = (post?.rating || '').toLowerCase();
   if (r === 'e') return 'e';
@@ -85,7 +74,7 @@ function ratingBucket(post) {
             >
               <img
                 class="bsl-thumb"
-                :src="thumbUrl(entry.post)"
+                :src="browseThumbUrl(entry.post)"
                 :alt="entry.id"
                 loading="lazy"
                 referrerpolicy="no-referrer"
@@ -119,7 +108,7 @@ function ratingBucket(post) {
             >
               <img
                 class="bsl-thumb"
-                :src="thumbUrl(entry.post)"
+                :src="browseThumbUrl(entry.post)"
                 :alt="entry.id"
                 loading="lazy"
                 referrerpolicy="no-referrer"
