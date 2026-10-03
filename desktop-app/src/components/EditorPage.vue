@@ -12,6 +12,12 @@ const wrapRef = ref(null);
 const presets = ref([]);
 const isDragOver = ref(false);
 const copyStatus = ref('');
+// 有序多图复制（split 模式）的进度：null = 未开始；否则 { total, done, index }
+// 「复制全部」会逐张写入剪贴板，每张之间等用户确认（跳转下一张按钮），
+// 因为系统剪贴板一次只装得下一张图。
+const copyProgress = ref(null);
+// 「按份数等分」输入框的临时值（不落盘，避免污染 editorHabits）
+const splitPartInput = ref(3);
 
 const STORAGE_KEY_EDITOR_HABITS = 'editorHabits';
 const editorHabits = (() => {
@@ -42,7 +48,7 @@ const editor = reactive({
   start: null,
   current: null,
   draft: null,
-  fillMode: ['mosaic', 'stripe', 'reveal', 'solid', 'image'].includes(editorHabits.fillMode) ? editorHabits.fillMode : 'mosaic',
+  fillMode: ['mosaic', 'stripe', 'reveal', 'solid', 'image', 'split'].includes(editorHabits.fillMode) ? editorHabits.fillMode : 'mosaic',
   opacity: Number.isFinite(editorHabits.opacity) ? Math.max(0, Math.min(1, editorHabits.opacity)) : 1,
   mosaicBlockSize: Number.isFinite(editorHabits.mosaicBlockSize) ? editorHabits.mosaicBlockSize : 18,
   stripeText: '该信息已被管理员撤回',
@@ -66,7 +72,13 @@ const editor = reactive({
     artist: '',
     characters: '',
     postUrl: ''
-  }
+  },
+  // ── 切分图片（split 模式）────────────────────────────────────────────
+  // 打码方式选 split 时，画横线不再生成码块，而是往 splitLines 里塞一条水平切线。
+  // 线段以「图片坐标系的 y 值」记录（与 zoom 无关），渲染时再乘 zoom。
+  splitLines: [],        // 归一化的切线 y 值数组（升序维护），单位=图片像素
+  draggingLineIndex: -1, // 正在拖动的切线下标（-1 = 无）
+  hoverLineIndex: -1     // 鼠标悬停的切线（用于加粗高亮，便于抓取）
 });
 
 watch(() => editor.outputMaxEdge, (v) => {
@@ -78,7 +90,7 @@ watch(() => editor.outputMaxEdge, (v) => {
 });
 
 watch(() => [editor.fillMode, editor.opacity, editor.stripeFontSize, editor.stripeFontFamily, editor.stripeOrientation, editor.stripeAutoFit, editor.mosaicBlockSize, editor.solidColor, editor.revealColor, editor.revealOpacity, editor.revealBlur], ([fillMode, opacity, size, family, orientation, autoFit, mosaicBlockSize, solidColor, revealColor, revealOpacity, revealBlur]) => {
-  if (['mosaic', 'stripe', 'reveal', 'solid', 'image'].includes(fillMode)) editorHabits.fillMode = fillMode;
+  if (['mosaic', 'stripe', 'reveal', 'solid', 'image', 'split'].includes(fillMode)) editorHabits.fillMode = fillMode;
   if (Number.isFinite(opacity)) editorHabits.opacity = Math.max(0, Math.min(1, opacity));
   if (Number.isFinite(size) && size > 0) editorHabits.stripeFontSize = Math.round(size);
   if (typeof family === 'string' && family) editorHabits.stripeFontFamily = family;
@@ -95,6 +107,125 @@ watch(() => [editor.fillMode, editor.opacity, editor.stripeFontSize, editor.stri
 
 function selectedLayer() {
   return editor.layers.find(item => item.id === editor.selectedId) || null;
+}
+
+// ── 切分图片：水平切线（split 模式）──────────────────────────────────────
+// 不变量：editor.splitLines 始终是「已排序 + 去重 + 夹在 (0, height) 内」的 y 值数组。
+// 排序保证导出的分段天然按从上到下的顺序（用户要求「顺序的多张图片」）。
+const SPLIT_MIN_GAP = 4; // 两条切线至少间隔 4px，避免产生 0 高度的碎段
+
+function sortSplitLines() {
+  const h = editor.image?.height || 0;
+  editor.splitLines = editor.splitLines
+    .map(y => Math.round(y))
+    .filter(y => y > 0 && y < h)
+    .sort((a, b) => a - b)
+    // 去重/推开过近的线：保留先出现的，后一条至少比前一条大 SPLIT_MIN_GAP
+    .reduce((acc, y) => {
+      const prev = acc[acc.length - 1];
+      if (prev == null || y - prev >= SPLIT_MIN_GAP) acc.push(y);
+      return acc;
+    }, []);
+}
+
+// 在当前 split 布局上再加一条线：切在「最宽的那一段」的中点，避免新线挤在一起
+function addSplitLine() {
+  if (!editor.image) return;
+  const h = editor.image.height;
+  const bounds = [0, ...editor.splitLines, h];
+  let bestStart = 0;
+  let bestGap = -1;
+  for (let i = 0; i < bounds.length - 1; i += 1) {
+    const gap = bounds[i + 1] - bounds[i];
+    if (gap > bestGap) { bestGap = gap; bestStart = bounds[i]; }
+  }
+  if (bestGap < SPLIT_MIN_GAP * 2) return; // 已经切得太碎，不再加
+  const y = Math.round((bestStart + (bestStart + bestGap)) / 2);
+  editor.splitLines.push(y);
+  sortSplitLines();
+  render();
+}
+
+function removeSplitLine(index) {
+  if (index < 0 || index >= editor.splitLines.length) return;
+  editor.splitLines.splice(index, 1);
+  render();
+}
+
+function clearSplitLines() {
+  editor.splitLines = [];
+  render();
+}
+
+// 等比切 N 份（含 0 与 height 的等分点，去掉两端）
+function splitIntoEqualParts(count) {
+  if (!editor.image) return;
+  const n = Math.max(2, Math.min(30, Math.round(count) || 2));
+  const h = editor.image.height;
+  const lines = [];
+  for (let i = 1; i < n; i += 1) lines.push(Math.round((h * i) / n));
+  editor.splitLines = lines;
+  sortSplitLines();
+  render();
+}
+
+// 按当前切线把图片切成 segments（y 区间列表），天然有序
+const splitSegments = computed(() => {
+  const h = editor.image?.height || 0;
+  if (!h) return [];
+  const bounds = [0, ...editor.splitLines, h];
+  const out = [];
+  for (let i = 0; i < bounds.length - 1; i += 1) {
+    const top = bounds[i];
+    const bottom = bounds[i + 1];
+    if (bottom - top > 0) out.push({ index: out.length, y: top, height: bottom - top, bottom });
+  }
+  return out;
+});
+
+const splitSegmentCount = computed(() => splitSegments.value.length);
+
+// 分段缩略图（data URL）。canvas 非响应式，所以单独缓存成 data URL 供面板渲染。
+// 依赖 imageSrc / splitLines / layers / 各类打码参数，任一变化即重算。
+const splitThumbs = ref([]);
+let splitThumbToken = 0;
+
+async function refreshSplitThumbs() {
+  if (!editor.image || editor.fillMode !== 'split') {
+    splitThumbs.value = [];
+    return;
+  }
+  const token = ++splitThumbToken;
+  const segs = splitSegments.value;
+  if (!segs.length) { splitThumbs.value = []; return; }
+  const full = await exportPng();
+  if (token !== splitThumbToken) return; // 期间又变了，丢弃这次结果
+  const scale = full.width / editor.image.width;
+  const out = segs.map(seg => {
+    const h = Math.max(1, Math.round(seg.height * scale));
+    const c = document.createElement('canvas');
+    c.width = full.width;
+    c.height = h;
+    c.getContext('2d').drawImage(full, 0, Math.round(seg.y * scale), full.width, h, 0, 0, full.width, h);
+    return {
+      index: seg.index,
+      y: seg.y,
+      height: seg.height,
+      dataUrl: c.toDataURL('image/png')
+    };
+  });
+  splitThumbs.value = out;
+}
+
+// 点到某条切线的命中判定（屏幕坐标），返回下标；容差随 zoom 放大便于抓取
+function findSplitLineAt(point) {
+  if (!editor.image || !editor.splitLines.length) return -1;
+  const tolerance = Math.max(4, 7 / editor.zoom + 3);
+  const y = point.y / editor.zoom;
+  for (let i = 0; i < editor.splitLines.length; i += 1) {
+    if (Math.abs(editor.splitLines[i] - y) <= tolerance) return i;
+  }
+  return -1;
 }
 
 function normalizeCharacters(value) {
@@ -115,7 +246,8 @@ function normalizeLayer(layer) {
 }
 
 function applyControlsToLayer(layer) {
-  layer.fillMode = editor.fillMode;
+  // split 不是可写在图层上的填充方式；万一带到图层，回落到马赛克保证能画出东西
+  layer.fillMode = editor.fillMode === 'split' ? 'mosaic' : editor.fillMode;
   layer.opacity = editor.opacity;
   layer.mosaicBlockSize = editor.mosaicBlockSize;
   layer.stripeText = editor.stripeText;
@@ -212,7 +344,9 @@ function topLayerAt(point) {
 
 function syncFromLayer(layer) {
   if (!layer) return;
-  editor.fillMode = layer.fillMode;
+  // 'split' 是「切割方式」而非码块填充方式，绝不能从图层回写，
+  // 否则选中一个码块会把面板悄悄切回 split 模式。
+  if (layer.fillMode && layer.fillMode !== 'split') editor.fillMode = layer.fillMode;
   editor.opacity = layer.opacity;
   editor.mosaicBlockSize = layer.mosaicBlockSize || 18;
   editor.stripeText = layer.stripeText;
@@ -515,6 +649,51 @@ function drawRevealMask(ctx, layers, scale, globalColor, globalOpacity, globalBl
   ctx.drawImage(maskCanvas, 0, 0);
 }
 
+// split 模式叠加层：交替明暗带区分分段 + 实线切线 + 左上角段序号
+// 纯视觉辅助，不参与导出（导出走 exportSplitSegment，直接按 y 区间裁剪原图）
+function drawSplitOverlay(ctx, scale) {
+  if (!editor.image) return;
+  const w = editor.image.width * scale;
+  const segs = splitSegments.value;
+  if (!segs.length) return;
+
+  ctx.save();
+  // 1) 交替明暗带：奇数段压一层淡蓝，让每一段的范围一目了然
+  segs.forEach(seg => {
+    if (seg.index % 2 === 1) {
+      ctx.fillStyle = 'rgba(29, 126, 243, 0.10)';
+      ctx.fillRect(0, seg.y * scale, w, seg.height * scale);
+    }
+  });
+  // 2) 切线：悬停/拖动的线加粗高亮
+  editor.splitLines.forEach((y, i) => {
+    const active = i === editor.draggingLineIndex || i === editor.hoverLineIndex;
+    ctx.strokeStyle = active ? '#ff8a3d' : '#1d7ef3';
+    ctx.lineWidth = active ? 3 : 2;
+    ctx.setLineDash(active ? [] : [10, 6]);
+    ctx.beginPath();
+    ctx.moveTo(0, y * scale + 0.5);
+    ctx.lineTo(w, y * scale + 0.5);
+    ctx.stroke();
+  });
+  ctx.setLineDash([]);
+  // 3) 每段左上角标序号
+  const fontSize = Math.max(11, Math.min(18, 12 / scale));
+  ctx.font = `700 ${fontSize}px "Microsoft YaHei", sans-serif`;
+  ctx.textBaseline = 'top';
+  segs.forEach(seg => {
+    const label = `${seg.index + 1}/${segs.length}`;
+    const padX = 6;
+    const boxH = fontSize * 1.5;
+    const boxW = ctx.measureText(label).width + padX * 2;
+    ctx.fillStyle = 'rgba(15, 20, 32, 0.72)';
+    ctx.fillRect(6, seg.y * scale + 6, boxW, boxH);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(label, 6 + padX, seg.y * scale + 6 + (boxH - fontSize) / 2);
+  });
+  ctx.restore();
+}
+
 async function render() {
   if (!canvasRef.value || !editor.image) return;
   const canvas = canvasRef.value;
@@ -534,6 +713,9 @@ async function render() {
   }
 
   drawRevealMask(ctx, editor.layers, editor.zoom, editor.revealColor, editor.revealOpacity, editor.revealBlur);
+
+  // split 模式：在图片之上叠加「分段明暗带 + 切线 + 序号」
+  if (editor.fillMode === 'split') drawSplitOverlay(ctx, editor.zoom);
 
   if (editor.fillMode === 'reveal' && editor.mode === 'draw' && editor.start && editor.current) {
     const dx = editor.current.x - editor.start.x;
@@ -678,10 +860,14 @@ function clearImage() {
   editor.layers = [];
   editor.selectedId = null;
   editor.nextId = 1;
+  editor.splitLines = [];
+  editor.draggingLineIndex = -1;
+  editor.hoverLineIndex = -1;
   editor.sourceMeta.artist = '';
   editor.sourceMeta.characters = '';
   editor.sourceMeta.postUrl = '';
   copyStatus.value = '';
+  copyProgress.value = null;
 }
 
 async function createImage(source) {
@@ -727,6 +913,9 @@ async function loadImageFromDataUrl(dataUrl, meta = {}) {
   editor.layers = [];
   editor.selectedId = null;
   editor.nextId = 1;
+  editor.splitLines = [];
+  editor.draggingLineIndex = -1;
+  editor.hoverLineIndex = -1;
   if (editor.sourceMeta.artist) editor.stripeText = editor.sourceMeta.artist;
   await nextTick();
   fitToWindow();
@@ -832,6 +1021,11 @@ async function exportPng({ maxEdgeOverride } = {}) {
 
 async function copyToClipboard({ original = false } = {}) {
   if (!editor.image) return;
+  // split 模式：走「有序多图」流程（系统剪贴板一次只能放一张）
+  if (!original && editor.fillMode === 'split') {
+    await startSplitCopySequence();
+    return;
+  }
   copyStatus.value = '';
   const canvas = await exportPng(original ? { maxEdgeOverride: 0 } : {});
   const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
@@ -861,6 +1055,134 @@ async function copyToClipboard({ original = false } = {}) {
 
 function copyOriginalToClipboard() { return copyToClipboard({ original: true }); }
 
+// ── 切分图片：导出与有序复制 ─────────────────────────────────────────────
+// 把「打了码的整图」按 splitSegments 的 y 区间裁成多张。顺序 = 从上到下。
+// 不走 exportPng（那条会按 outputMaxEdge 整体缩放），改为逐段裁剪后再统一缩放。
+async function exportSplitCanvases({ maxEdgeOverride } = {}) {
+  if (!editor.image) return [];
+  const segs = splitSegments.value;
+  if (!segs.length) return [];
+  const full = await exportPng({ maxEdgeOverride }); // 复用整套绘制逻辑，拿到打完码的整图
+  const scale = full.width / editor.image.width;    // 若触发了尺寸上限，这里是缩放比
+  return segs.map(seg => {
+    const canvas = document.createElement('canvas');
+    const sx = 0;
+    const sy = Math.round(seg.y * scale);
+    const sh = Math.max(1, Math.round(seg.height * scale));
+    canvas.width = full.width;
+    canvas.height = sh;
+    canvas.getContext('2d').drawImage(full, sx, sy, full.width, sh, 0, 0, full.width, sh);
+    return canvas;
+  });
+}
+
+async function canvasToBlob(canvas) {
+  return new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+}
+
+// 复用 copyToClipboard 的「写单张到系统剪贴板」能力
+async function writeCanvasToClipboard(canvas) {
+  const blob = await canvasToBlob(canvas);
+  if (!blob) return { ok: false, error: '转码失败' };
+  try {
+    if (navigator.clipboard && window.ClipboardItem) {
+      if (!document.hasFocus()) window.focus();
+      if (!document.hasFocus()) throw new Error('窗口未聚焦');
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+      return { ok: true };
+    }
+  } catch {
+    // 落到 Electron 主进程兜底
+  }
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  const result = await window.desktopAPI.file.copyPng(bytes);
+  return result?.ok ? { ok: true } : { ok: false, error: result?.error || '未知错误' };
+}
+
+// 进入「有序复制」流程：先复制第 1 张，其余由图库面板上的「复制下一张」推进。
+// 系统剪贴板一次只装一张，所以必须一张一张来 —— 中间留出用户粘贴的时间。
+async function startSplitCopySequence() {
+  if (!editor.image) return;
+  const canvases = await exportSplitCanvases();
+  if (!canvases.length) {
+    copyStatus.value = '没有可复制的分段，请先添加切分线';
+    return;
+  }
+  copyStatus.value = '';
+  const first = canvases[0];
+  const result = await writeCanvasToClipboard(first);
+  if (!result.ok) {
+    copyStatus.value = `复制失败：${result.error}`;
+    copyProgress.value = null;
+    return;
+  }
+  copyProgress.value = { total: canvases.length, done: 1, index: 0 };
+  copyStatus.value = `已复制第 1/${canvases.length} 张（${first.width}×${first.height}），粘贴后点「复制下一张」`;
+}
+
+async function copyNextSplitSegment() {
+  const progress = copyProgress.value;
+  if (!progress || !editor.image) return;
+  const nextIndex = progress.index + 1;
+  if (nextIndex >= progress.total) {
+    copyProgress.value = null;
+    copyStatus.value = `全部 ${progress.total} 张已依次复制完成`;
+    return;
+  }
+  const canvases = await exportSplitCanvases();
+  const canvas = canvases[nextIndex];
+  if (!canvas) {
+    copyProgress.value = null;
+    copyStatus.value = '复制中断：分段已变化，请重新开始';
+    return;
+  }
+  const result = await writeCanvasToClipboard(canvas);
+  if (!result.ok) {
+    copyStatus.value = `复制失败：${result.error}`;
+    return;
+  }
+  copyProgress.value = { total: progress.total, done: nextIndex + 1, index: nextIndex };
+  copyStatus.value = `已复制第 ${nextIndex + 1}/${progress.total} 张（${canvas.width}×${canvas.height}）`;
+}
+
+function cancelSplitCopySequence() {
+  copyProgress.value = null;
+  copyStatus.value = '已取消有序复制';
+}
+
+// 从当前进度重来
+async function restartSplitCopySequence() {
+  copyProgress.value = null;
+  await startSplitCopySequence();
+}
+
+// 一次性导出为多个文件（用「选择图片」同一套 dialog 不合适，走目录选择）
+async function exportSplitToFiles() {
+  if (!editor.image) return;
+  const canvases = await exportSplitCanvases({ maxEdgeOverride: 0 });
+  if (!canvases.length) {
+    copyStatus.value = '没有可导出的分段，请先添加切分线';
+    return;
+  }
+  const dir = await window.desktopAPI.dialog.selectFolder();
+  if (!dir) return;
+  const baseName = String(editor.imageName || 'image').replace(/\.[^./\\]+$/, '') || 'image';
+  let okCount = 0;
+  const failures = [];
+  for (let i = 0; i < canvases.length; i += 1) {
+    const blob = await canvasToBlob(canvases[i]);
+    if (!blob) { failures.push(i + 1); continue; }
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const filename = `${baseName}_${String(i + 1).padStart(2, '0')}.png`;
+    const result = await window.desktopAPI.file.saveBytesToDir({ dir, filename, bytes });
+    if (result?.ok) okCount += 1;
+    else failures.push(i + 1);
+  }
+  copyStatus.value = failures.length
+    ? `导出 ${okCount}/${canvases.length} 张，失败：第 ${failures.join('、')} 张`
+    : `已导出 ${okCount} 张到 ${dir}`;
+}
+
 async function openSourceLink(event) {
   event.preventDefault();
   if (!editor.sourceMeta.postUrl) return;
@@ -886,6 +1208,26 @@ function usePostUrlText() {
 function onMouseDown(event) {
   if (!editor.image) return;
   const point = canvasPoint(event);
+
+  // 0. split 模式：命中已有切线 → 拖动该线；点空白 → 新建一条线
+  //    必须排在码块判定之前，因为 split 模式不产生码块，画布上只有切线。
+  if (editor.fillMode === 'split') {
+    const lineIndex = findSplitLineAt(point);
+    if (lineIndex >= 0) {
+      editor.draggingLineIndex = lineIndex;
+      editor.mode = 'split-drag';
+      if (canvasRef.value) canvasRef.value.style.cursor = 'grabbing';
+      render();
+      return;
+    }
+    const y = Math.round(Math.max(1, Math.min(editor.image.height - 1, point.y / editor.zoom)));
+    editor.splitLines.push(y);
+    sortSplitLines();
+    editor.draggingLineIndex = editor.splitLines.indexOf(y);
+    editor.mode = 'split-drag';
+    render();
+    return;
+  }
 
   // 1. Check if user clicked a handle of the currently selected layer
   const active = selectedLayer();
@@ -938,6 +1280,26 @@ function onMouseDown(event) {
 function onMouseMove(event) {
   if (!editor.image) return;
   const point = imagePoint(canvasPoint(event));
+  // split 模式：拖动切线 / 悬停高亮（都不涉及码块逻辑，直接返回）
+  if (editor.fillMode === 'split') {
+    if (editor.mode === 'split-drag' && editor.draggingLineIndex >= 0) {
+      const idx = editor.draggingLineIndex;
+      const y = Math.max(1, Math.min(editor.image.height - 1, point.y));
+      editor.splitLines[idx] = Math.round(y);
+      sortSplitLines();
+      // 排序后线序可能变化，重新定位被拖动的这条（按 y 值匹配）
+      editor.draggingLineIndex = editor.splitLines.indexOf(Math.round(y));
+      render();
+      return;
+    }
+    const hover = findSplitLineAt(canvasPoint(event));
+    if (hover !== editor.hoverLineIndex) {
+      editor.hoverLineIndex = hover;
+      if (canvasRef.value) canvasRef.value.style.cursor = hover >= 0 ? 'row-resize' : 'crosshair';
+      render();
+    }
+    return;
+  }
   // pendingMove 激活：mousedown 命中码块后，鼠标移动超过 3px 才正式进入 move 模式
   if (editor.pendingMove && !editor.mode) {
     const dx = point.x - editor.moveStart.x;
@@ -1050,7 +1412,10 @@ function onMouseUp(event) {
   editor.moveStart = null;
   editor.startAngle = 0;
   editor.startRotation = 0;
-  if (canvasRef.value) canvasRef.value.style.cursor = 'default';
+  editor.draggingLineIndex = -1;
+  if (canvasRef.value) {
+    canvasRef.value.style.cursor = editor.fillMode === 'split' ? 'crosshair' : 'default';
+  }
   render();
 }
 
@@ -1065,8 +1430,15 @@ watch(() => editor.fillMode, (newVal, oldVal) => {
   if (newVal === oldVal) return;
   if (editor.selectedId != null) {
     editor.selectedId = null;
-    render();
   }
+  editor.draggingLineIndex = -1;
+  editor.hoverLineIndex = -1;
+  if (canvasRef.value) {
+    canvasRef.value.style.cursor = newVal === 'split' ? 'crosshair' : 'default';
+  }
+  render();
+  if (newVal === 'split') scheduleSplitThumbRefresh();
+  else { splitThumbs.value = []; copyProgress.value = null; }
 });
 
 watch(() => [
@@ -1085,6 +1457,26 @@ watch(() => [
   const layer = selectedLayer();
   if (layer) applyControlsToLayer(layer);
   render();
+  scheduleSplitThumbRefresh();
+});
+
+// split 面板的分段缩略图需要重算的场景：切线变化 / 图片变化 / 打码参数变化 / 图层变化
+// 用 120ms 防抖，避免拖动切线时每帧都重算整图。
+let splitThumbTimer = null;
+function scheduleSplitThumbRefresh() {
+  if (splitThumbTimer) clearTimeout(splitThumbTimer);
+  splitThumbTimer = setTimeout(() => {
+    splitThumbTimer = null;
+    refreshSplitThumbs();
+  }, 120);
+}
+
+watch(() => editor.splitLines.slice(), () => {
+  if (editor.fillMode === 'split') scheduleSplitThumbRefresh();
+});
+
+watch(() => [editor.imageSrc, editor.layers.length], () => {
+  if (editor.fillMode === 'split') scheduleSplitThumbRefresh();
 });
 
 async function onResize() {
@@ -1201,10 +1593,11 @@ onBeforeUnmount(() => {
           <option value="image">贴图填充</option>
           <option value="solid">纯色条（黑/白条）</option>
           <option value="reveal">显示遮罩</option>
+          <option value="split">切分图片（画横线分割）</option>
         </select>
       </label>
 
-      <label class="field-full">
+      <label v-if="editor.fillMode !== 'split'" class="field-full">
         <span>透明度 {{ Math.round(editor.opacity * 100) }}%</span>
         <input v-model.number="editor.opacity" type="range" min="0" max="1" step="0.05" />
       </label>
@@ -1274,6 +1667,51 @@ onBeforeUnmount(() => {
         </div>
       </template>
 
+      <template v-if="editor.fillMode === 'split'">
+        <div class="editor-workflow-hint split-hint">
+          <strong>画横线切分图片</strong>
+          <span>在图片上点一下即新增一条水平切线；拖动切线可调整位置；点住已有切线拖动。当前共 {{ splitSegmentCount }} 段，将按从上到下的顺序输出。</span>
+        </div>
+
+        <div class="button-row compact">
+          <button class="secondary" @click="addSplitLine" :disabled="!editor.image">添加切线</button>
+          <button class="ghost" @click="clearSplitLines" :disabled="!editor.splitLines.length">清空切线</button>
+        </div>
+
+        <div class="field-grid">
+          <label>
+            <span>等分份数</span>
+            <input v-model.number="splitPartInput" type="number" min="2" max="30" step="1" />
+          </label>
+          <label class="split-apply-label">
+            <span>&nbsp;</span>
+            <button class="secondary" @click="splitIntoEqualParts(splitPartInput)" :disabled="!editor.image">按份数等分</button>
+          </label>
+        </div>
+
+        <div class="split-line-list" v-if="editor.splitLines.length">
+          <div v-for="(y, i) in editor.splitLines" :key="`${i}-${y}`" class="split-line-row">
+            <span class="split-line-idx">#{{ i + 1 }}</span>
+            <span class="split-line-pos">y = {{ y }} px</span>
+            <button class="ghost split-line-del" @click="removeSplitLine(i)" :title="`删除第 ${i + 1} 条切线`">删除</button>
+          </div>
+        </div>
+        <p v-else class="inline-note">还没有切线，图片目前是完整一张。</p>
+
+        <div class="split-preview-head">
+          <span>切分预览（{{ splitThumbs.length }} 张）</span>
+        </div>
+        <div class="split-thumb-grid">
+          <figure v-for="seg in splitThumbs" :key="seg.index" class="split-thumb">
+            <div class="split-thumb-imgwrap">
+              <img :src="seg.dataUrl" :alt="`第 ${seg.index + 1} 段`" />
+              <span class="split-thumb-badge">{{ seg.index + 1 }}</span>
+            </div>
+            <figcaption>{{ editor.image?.width || 0 }}×{{ seg.height }}px</figcaption>
+          </figure>
+        </div>
+      </template>
+
       <template v-if="editor.fillMode === 'reveal'">
         <label class="field-full">
           <span>遮罩颜色</span>
@@ -1310,7 +1748,11 @@ onBeforeUnmount(() => {
       </label>
 
       <div class="button-row compact">
-        <button @click="copyToClipboard()" :disabled="!editor.image" style="flex: 1;">复制到剪贴板</button>
+        <button
+          @click="copyToClipboard()"
+          :disabled="!editor.image || (editor.fillMode === 'split' && !splitSegmentCount)"
+          style="flex: 1;"
+        >{{ editor.fillMode === 'split' ? '有序复制全部分段' : '复制到剪贴板' }}</button>
         <button
           class="secondary"
           @click="copyOriginalToClipboard"
@@ -1318,6 +1760,28 @@ onBeforeUnmount(() => {
           title="忽略尺寸上限，按原图分辨率复制"
         >复制原图</button>
       </div>
+
+      <template v-if="editor.fillMode === 'split'">
+        <div class="button-row compact">
+          <button class="secondary" @click="exportSplitToFiles" :disabled="!editor.image || !splitSegmentCount">导出为多张文件</button>
+        </div>
+        <div v-if="copyProgress" class="split-copy-progress">
+          <div class="split-copy-bar">
+            <span class="split-copy-text">有序复制进度 {{ copyProgress.done }} / {{ copyProgress.total }}</span>
+            <button
+              v-if="copyProgress.done < copyProgress.total"
+              class="split-copy-next"
+              @click="copyNextSplitSegment"
+            >复制下一张 ›</button>
+            <button v-else class="split-copy-done" @click="cancelSplitCopySequence">完成</button>
+          </div>
+          <div class="split-copy-actions">
+            <button class="ghost" @click="restartSplitCopySequence">重头再来</button>
+            <button class="ghost" @click="cancelSplitCopySequence">结束</button>
+          </div>
+        </div>
+      </template>
+
       <p v-if="copyStatus" class="inline-note">{{ copyStatus }}</p>
     </aside>
 

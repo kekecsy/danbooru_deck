@@ -45,6 +45,11 @@ contextBridge.exposeInMainWorld('desktopAPI', {
       suggestedName,
       bytes: Array.from(uint8Array || [])
     }),
+    saveBytesToDir: ({ dir, filename, bytes }) => ipcRenderer.invoke('file:save-bytes-to-dir', {
+      dir,
+      filename,
+      bytes: Array.from(bytes || [])
+    }),
     copyPng: (uint8Array) => ipcRenderer.invoke('file:copy-png', {
       bytes: Array.from(uint8Array || [])
     })

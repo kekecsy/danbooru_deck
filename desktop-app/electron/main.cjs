@@ -1055,6 +1055,29 @@ ipcMain.handle('file:save-png', async (_event, payload) => {
   return { ok: true, canceled: false, filePath: result.filePath };
 });
 
+// 批量落盘（切分图片导出用）：调用方已选好目录，这里只负责按 filename 写入。
+// 只接受纯文件名（拒绝任何路径分隔符），避免渲染层越权写到目录外。
+ipcMain.handle('file:save-bytes-to-dir', async (_event, payload) => {
+  try {
+    const { dir, filename, bytes } = payload || {};
+    if (!dir || !filename || !bytes) return { ok: false, error: '参数不完整' };
+    const safeName = path.basename(String(filename));
+    if (safeName !== String(filename) || safeName.includes('..')) {
+      return { ok: false, error: '非法文件名' };
+    }
+    const resolvedDir = path.resolve(String(dir));
+    const target = path.join(resolvedDir, safeName);
+    if (!path.resolve(target).startsWith(resolvedDir + path.sep)) {
+      return { ok: false, error: '目标路径越界' };
+    }
+    fs.mkdirSync(resolvedDir, { recursive: true });
+    fs.writeFileSync(target, Buffer.from(bytes));
+    return { ok: true, filePath: target };
+  } catch (error) {
+    return { ok: false, error: error.message };
+  }
+});
+
 ipcMain.handle('file:copy-png', async (_event, payload) => {
   try {
     const { bytes } = payload || {};
