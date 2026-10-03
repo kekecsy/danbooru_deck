@@ -965,6 +965,12 @@ function jumpToSelected(id) {
 const refresh = ref({
   isRunning: false,
   done: 0,
+  // ⚠ total 已下线（保留字段只为兼容旧引用，不再赋值、不再显示）。原因：
+  //   批量刷新按「批」发请求，一批的响应要等整批都返回才处理，所以 done 是阶梯式跳
+  //   （每批 60 张就是 0 → 60 → 120…），而 total 是全量总数（1522 张这种量级）。
+  //   两者一起显示会同时误导：起点长期停在「0/1522」像卡死；后面的「60/1522」
+  //   也分不清「已处理完的」和「还剩一大批」。现在只报「已刷新 N 张」+
+  //   （分批时）「第 i/n 批 · 第 x-y 页」，不显示百分比。
   total: 0,
   dateStr: '',
   phase: '',
@@ -2756,7 +2762,6 @@ async function startRefreshScores() {
 
   refresh.value.isRunning = true;
   refresh.value.dateStr = date;
-  refresh.value.total = localPaths.length;
   refresh.value.done = 0;
   refresh.value.phase = '正在处理当前页';
   refresh.value.batchIndex = 0;
@@ -2884,7 +2889,6 @@ async function startRefreshScoresRange() {
   closeRangeRefreshDialog();
   refresh.value.isRunning = true;
   refresh.value.dateStr = date;
-  refresh.value.total = localPaths.length;
   refresh.value.done = 0;
   refresh.value.phase = '准备刷新';
   refresh.value.batchIndex = 0;
@@ -2911,14 +2915,21 @@ async function startRefreshScoresRange() {
   let okCount = 0;
   let failCount = 0;
 
+  // 阶段文案：分批时同时给出「第几批」和「第几页」，避免只写「第 2/11 批」这种
+  // 看不出还剩多少的表述。页码是用户真正在画廊里能看到的东西。
+  function phaseTextFor(b, batchIndex, batchTotal) {
+    if (!throttled) return '正在处理当前范围';
+    return `第 ${batchIndex}/${batchTotal} 批 · 第 ${b.pStart}-${b.pEnd} 页`;
+  }
+
   async function runBatch(b, label, batchIndex, batchTotal) {
+    // 批次号必须在「还没开始处理这一批」时就更新，且紧跟着更新阶段文案：
+    // done 要等整批响应回来才跳，这段等待里批次号是唯一的进度信息。
     refresh.value.batchIndex = batchIndex;
     refresh.value.batchTotal = batchTotal;
-    refresh.value.phase = throttled
-      ? `正在处理第 ${batchIndex}/${batchTotal} 批（第 ${b.pStart}-${b.pEnd} 页）`
-      : '正在处理当前范围';
+    refresh.value.phase = phaseTextFor(b, batchIndex, batchTotal);
     if (!b.localPaths.length) return;
-    if (label) showToast(`${label}，已完成 ${refresh.value.done}/${refresh.value.total}`, 'info');
+    if (label) showToast(`${label}，已刷新 ${refresh.value.done} 张`, 'info');
     const res = await fetch('http://127.0.0.1:18765/api/refresh_visible', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -2961,7 +2972,7 @@ async function startRefreshScoresRange() {
         : '';
       await runBatch(b, label, bi + 1, batches.length);
       if (throttled && bi < batches.length - 1 && refresh.value.isRunning) {
-        showToast(`已完成 ${okCount}/${refresh.value.total}，休息 ${REST_MS / 1000}s 防风控…`, 'info');
+        showToast(`已刷新 ${okCount} 张，休息 ${REST_MS / 1000}s 防风控…`, 'info');
         await sleepCancellable(REST_MS);
       }
     }
@@ -5684,16 +5695,13 @@ const downloadTargetHint = computed(() => {
         </div>
         <div class="progress-panel">
           <!-- 刷新热度进度：独立于下载任务的前台批次刷新，放在下载进度的上面一行。
-               与工具栏「刷新热度」按钮的 running 文案共享同一 refresh 状态；× 就地停止。 -->
+               与工具栏「刷新热度」按钮的 running 文案共享同一 refresh 状态；× 就地停止。
+               ⚠ 这里**不放进度条、也不显示 total**：批量刷新按批发请求，批处理完才更新
+                 done（阶梯式跳），配上 1522 这种总量会变成「一直显示 0/1522，像卡死」。
+                 只报「已刷新 N 张」+（分批时）「第 i/n 批 · 第 x-y 页」。 -->
           <div v-if="refresh.isRunning" class="refresh-progress-row">
             <span class="rp-label">刷新热度 · {{ refresh.dateStr }}</span>
-            <div class="progress-bar rp-bar" :title="`${refresh.dateStr}：${refresh.done} / ${refresh.total}`">
-              <div
-                class="progress-seg progress-seg-page"
-                :style="{ width: pct(refresh.done, refresh.total) + '%' }"
-              ></div>
-            </div>
-            <span class="rp-count">{{ refresh.done }}/{{ refresh.total }}</span>
+            <span class="rp-count">已刷新 {{ refresh.done }} 张</span>
             <span v-if="refresh.phase" class="rp-phase">{{ refresh.phase }}</span>
             <button type="button" class="rp-stop" title="停止刷新热度" @click="stopRefreshScores">×</button>
           </div>
@@ -5986,7 +5994,9 @@ const downloadTargetHint = computed(() => {
               :title="refresh.isRunning ? '点击停止刷新' : '选择刷新范围（本页 / 指定范围 / 全部），或切换『看图刷新热度』'"
             >
               <span v-if="!refresh.isRunning">刷新热度 ▾</span>
-              <span v-else>{{ refresh.done }}/{{ refresh.total }}</span>
+              <!-- 运行中：只报「已刷新 N 张」+（分批时）批次/页码。不显示 N/total ——
+                   批处理下 done 是阶梯跳，配合 1522 这种总量会长期停在 0/x，像卡死。 -->
+              <span v-else>已刷新 {{ refresh.done }} 张<template v-if="refresh.batchTotal > 1"> · {{ refresh.batchIndex }}/{{ refresh.batchTotal }} 批</template></span>
             </button>
             <div v-if="!refresh.isRunning" class="refresh-menu" @click.stop>
               <button class="refresh-menu-item" @click="onRefreshChoice('page')">
@@ -8361,10 +8371,13 @@ const downloadTargetHint = computed(() => {
 .progress-skip-tail { color: #fcd34d; }
 .progress-success-tail { color: #86efac; }
 
-/* 刷新热度行：位于下载进度上方，复用暗色日志面板配色；进度段与页进度条同款天蓝 */
+/* 刷新热度行：位于下载进度上方，复用暗色日志面板配色。
+   已去掉进度条与 N/total 计数（批处理下 done 是阶梯跳、总量又很大，那个计数只会误导）。
+   现在只有「刷新热度 · 日期」+「已刷新 N 张」+ 阶段文案 + 停止按钮。 */
 .refresh-progress-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;   /* 窄时让阶段文案整段折到下一行，而不是被裁掉半句 */
   gap: 8px;
   margin-bottom: 8px;
   font-size: 11.5px;
@@ -8376,26 +8389,24 @@ const downloadTargetHint = computed(() => {
   color: #7dd3fc;
   white-space: nowrap;
 }
-.rp-bar {
-  flex: 1 1 auto;
-  height: 6px;
-}
+/* .rp-count 从「定宽右对齐的计数器」改成普通文本：内容是「已刷新 N 张」，
+   不再需要 min-width/等宽字体去对齐小数点。 */
 .rp-count {
   flex: 0 0 auto;
-  min-width: 58px;
-  text-align: right;
-  font-family: 'JetBrains Mono', Consolas, monospace;
-  font-size: 11px;
+  white-space: nowrap;
+  font-size: 11.5px;
   color: rgba(255, 255, 255, 0.75);
 }
 .rp-phase {
-  flex: 1 0 100%;
+  /* ⚠ 不能 flex: 1 0 100% —— 那会独占一整行、把已经处理完的图挤成 0 像素宽；
+     而且父容器宽度只有 ~270px 时 nowrap 会被裁掉（用户只看到「第 1/2 批 · 第 1-4」）。
+     折行显示：窄的时候占满剩余空间换行，宽的时候跟在计数后面。 */
+  flex: 1 1 auto;
   min-width: 0;
   margin-left: 2px;
   color: rgba(255, 255, 255, 0.62);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .rp-stop {
   flex: 0 0 auto;
