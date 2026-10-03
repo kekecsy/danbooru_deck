@@ -199,7 +199,7 @@ function summaryFor(root) {
 <template>
   <div
     v-if="state.open"
-    class="viewer-overlay"
+    class="overlay-shell"
     @click.self="close"
     style="z-index: 10020; display: flex; justify-content: center; align-items: center; padding: 24px;"
   >

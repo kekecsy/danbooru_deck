@@ -175,7 +175,18 @@ function openCaptionWithImage(item) {
 
     <main class="content">
       <div class="content-frame">
-        <CrawlerPage v-show="activePage === 'crawler'" @edit-image="openEditorWithImage" @caption-image="openCaptionWithImage" />
+        <!-- v-show 常驻（不是 v-if）：保住画廊的日期 / 翻页 / 筛选 / 搜索状态。
+             ⚠ 但常驻的代价是「它的浮层不会自动消失」——CrawlerPage 里所有可能浮在
+               预览之上的浮层都 Teleport 到了 body，不在它的 DOM 子树里，
+               v-show 的 display:none 管不到。所以必须把 active 传下去，
+               让它在失活时主动收掉那些浮层（否则「预览里点编辑图片」会变成
+               打码页被预览整个盖住，点什么都没反应）。 -->
+        <CrawlerPage
+          v-show="activePage === 'crawler'"
+          :active="activePage === 'crawler'"
+          @edit-image="openEditorWithImage"
+          @caption-image="openCaptionWithImage"
+        />
         <EditorPage v-if="activePage === 'editor'" :source-item="editorSource" @back="activePage = 'crawler'" />
         <FavoritesPage v-if="activePage === 'favorites'" @edit-image="openEditorWithImage" />
         <CaptionPage v-if="activePage === 'caption'" :source-item="captionSource" @back="activePage = 'crawler'" />
@@ -183,10 +194,15 @@ function openCaptionWithImage(item) {
       </div>
     </main>
 
-    <!-- 全局右键复制成功轻提示：固定底部、pointer-events: none，不抢交互 -->
-    <Transition name="copy-toast">
-      <div v-if="copyToast.show" class="copy-toast-pill">{{ copyToast.text }}</div>
-    </Transition>
+    <!-- 全局右键复制成功轻提示：固定底部、pointer-events: none，不抢交互。
+         ⚠ 必须 Teleport 到 body：.shell.shell-compact 有 isolation: isolate，自成层叠上下文，
+           留在里面的浮层无论 z-index 写多少都会被整个 .shell 压住；而大图预览是 body 级
+           兄弟节点，于是「预览开着时复制」的提示会被预览盖住、完全看不见。 -->
+    <Teleport to="body">
+      <Transition name="copy-toast">
+        <div v-if="copyToast.show" class="copy-toast-pill">{{ copyToast.text }}</div>
+      </Transition>
+    </Teleport>
 
     <!-- 全局搜索框 / 文本框右键菜单：粘贴 / 复制 / 剪切 / 全选 / 清空 -->
     <InputContextMenu :state="inputCtxMenu" @close="closeInputCtxMenu" />

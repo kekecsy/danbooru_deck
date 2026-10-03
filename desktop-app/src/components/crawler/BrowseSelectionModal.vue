@@ -53,9 +53,9 @@ function ratingBucket(post) {
 <template>
   <div
     v-if="open"
-    class="viewer-overlay"
+    class="overlay-shell"
     @click.self="close"
-    style="z-index: 10000; display: flex; justify-content: center; align-items: center; padding: 24px;"
+    style="z-index: 10065; display: flex; justify-content: center; align-items: center; padding: 24px;"
   >
     <div class="bsl-card">
       <div class="bsl-head">

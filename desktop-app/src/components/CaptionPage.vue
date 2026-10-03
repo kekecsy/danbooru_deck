@@ -156,9 +156,16 @@ async function initFromSource(item) {
     s2: { pasted: '', parsed: null, parseError: '' },
     s3: { pasted: '', parsed: null, parseError: '' } };
 
-  const parts = imagePath.value.replace(/\\/g, '/').split('/');
-  const hotIdx = parts.lastIndexOf('hot_pic');
-  if (hotIdx >= 0 && parts.length > hotIdx + 2) currentDate.value = parts[hotIdx + 1];
+  // 日期优先取 item.date：跨日期搜索结果来自别的日期、甚至外置库根（D:\hot_danbooru\…），
+  // 路径里没有 "hot_pic" 段，靠下面那段推断会拿到上一个日期（上一次打开的日期），
+  // 结果 caption 被写进错误的日期文件夹。画廊内点进来的 item 不带 date 才回退到路径推断。
+  if (item.date) {
+    currentDate.value = item.date;
+  } else {
+    const parts = imagePath.value.replace(/\\/g, '/').split('/');
+    const hotIdx = parts.lastIndexOf('hot_pic');
+    if (hotIdx >= 0 && parts.length > hotIdx + 2) currentDate.value = parts[hotIdx + 1];
+  }
 
   if (imagePath.value && window.desktopAPI) {
     try {

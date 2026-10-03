@@ -16,6 +16,14 @@ import CryptoToolModal from './crawler/CryptoToolModal.vue';
 import MergeViewerDataModal from './crawler/MergeViewerDataModal.vue';
 import { parsePastedIds } from '../utils/idCodec.js';
 
+const props = defineProps({
+  // 本组件是否仍是「台前」的那一页。App.vue 用 v-show 常驻它（保住画廊 / 搜索 /
+  // 筛选状态不丢），于是切到打码 / 描述 / 收藏 / 姿态页时组件并没有被卸载。
+  // 但本组件里所有「可能浮在预览之上」的浮层都 Teleport 到了 body ——
+  // 它们不在本组件的 DOM 子树里，v-show 的 display:none 管不到它们，
+  // 失活时必须主动收掉（见 dismissFloatingLayers）。详见 style.css 的层叠契约注释。
+  active: { type: Boolean, default: true },
+});
 const emit = defineEmits(['edit-image', 'caption-image']);
 
 const savedHabitsStr = localStorage.getItem('crawlerHabits') || '{}';
@@ -680,11 +688,49 @@ const viewer = ref({
   fitMode: habits.viewerFitMode === 'actual' ? 'actual' : 'fit',
   toolbarPinned: habits.viewerToolbarPinned === true,
   toolbarHovered: false,
-  sourceItems: []
+  sourceItems: [],
+  // 预览来源：'gallery' 画廊（可翻页，有「第 N/M 张」计数）
+  //           'search'  跨日期搜索结果（单张，跨日期无连续索引，隐藏翻页与计数）
+  // 两者的工具栏 / 角标 / 快捷键完全共用，只有翻页相关 UI 按来源切换。
+  source: 'gallery',
 });
 
 const viewerToolbarVisible = computed(() => viewer.value.toolbarPinned || viewer.value.toolbarHovered);
 const viewerToolbarRef = ref(null);
+
+// ── 画廊 viewer 的动态层级 ─────────────────────────────────────────────
+// 大图预览（.crawler-viewer-overlay）默认 z-index 10080，靠一层半透明遮罩压住画廊。
+// 但在预览里右键角色/画师 → 打开 BrowseOverlay(10060) / 跨日期搜索浮层(10060) 时，
+// 这两个「后开的对话框」反而被 10080 的预览盖住 → 用户看不到自己刚打开的界面。
+//
+// 解法：只要对话框还开着，就把预览降级到 10050（低于对话框的 10060，仍高于 caption-panel 的 10025）。
+//
+// ⚠ 关键：层级必须由「当前真实的 open 状态」派生，不能用 open/close 函数里手动记账。
+// 曾经用 raiseDialogAboveViewer/restoreViewerZ 手动配对，结果：
+//   按 Esc 关搜索浮层时，onKeyDown 先把 z-index 恢复成 10080，而搜索浮层要等下一个
+//   tick 才随 v-if 销毁 —— 中间这一瞬间预览又盖回搜索浮层上面，用户看到「Esc 之后
+//   界面反被预览吃掉」。派生式写法天然没有这个时间窗：状态变 → 层级跟着变。
+const VIEWER_Z_DEFAULT = 10080;
+// 10050：低于 BrowseOverlay / search-modal-overlay 的 10060，高于 caption-panel 的 10025。
+// 取 10050 而非 10060 是有意的：两者相等时只能靠 DOM 顺序决胜，预览恰好排在前面就会
+// 压住对话框，必须留出明确的差值让对话框稳定胜出。
+const VIEWER_Z_BEHIND_DIALOG = 10050;
+
+// 会盖在预览之上、且比预览「更该被看见」的对话框。
+//
+// ⚠ 搜索结果预览（viewer.source === 'search'）必须排除在外：它正是从搜索浮层里
+//   点缩略图打开的，此刻 searchModal.open 恒为 true。若照常降级到 10050，预览会反被
+//   自己所属的搜索浮层(10060)盖住 —— 表现为「点了缩略图什么也看不见」。
+//   搜索预览是搜索浮层的延续，理应盖在它之上（与画廊预览同层 10080）。
+const viewerDialogOpen = computed(() =>
+  viewer.value.source !== 'search' && (searchModal.value.open || browse.value.open)
+);
+const viewerOverlayZ = computed(() => (viewerDialogOpen.value ? VIEWER_Z_BEHIND_DIALOG : VIEWER_Z_DEFAULT));
+// 只下发 CSS 变量：层级数值仍集中在样式表里的 .crawler-viewer-overlay 一处定义，
+// 避免内联 z-index 与样式表打架（历史上那条 !important 就是这么把 JS 顶掉的）。
+const viewerOverlayStyle = computed(() => ({ '--viewer-overlay-z': String(viewerOverlayZ.value) }));
+// 工具栏紧跟预览 +1，保证永远浮在图片之上，同时低于右键菜单(10090)与 toast(10100)
+const viewerToolbarStyle = computed(() => ({ zIndex: viewerOverlayZ.value + 1 }));
 // viewer 主图淡入：src 变化时立刻置 false，@load 后置 true 触发 .is-loaded。
 // 配合 CSS opacity 0→1 过渡，避免上一张切下一张时"啪"地一下换图。
 const viewerImageLoaded = ref(false);
@@ -709,6 +755,19 @@ function onViewerMouseMove(event) {
   if (viewer.value.toolbarPinned) return;
   const toolbarBottom = viewerToolbarRef.value?.getBoundingClientRect?.().bottom || 160;
   viewer.value.toolbarHovered = event.clientY <= Math.max(160, toolbarBottom + 18);
+}
+
+// 工具栏已 Teleport 到 body，不再是 .crawler-viewer-overlay 的子元素，于是它上面发生的
+// mousemove / mouseleave 不会冒泡到 overlay：
+//   - 鼠标移进工具栏 → overlay 收不到 mousemove，若此刻已滑过阈值，工具栏会在够到之前消失；
+//   - 鼠标移出工具栏 → overlay 收不到 mouseleave，toolbarHovered 卡在 true，工具栏不收起。
+// 这两个 handler 直接挂在工具栏自身，把它当作 overlay 的延伸来对待。
+function onViewerToolbarEnter() {
+  viewer.value.toolbarHovered = true;
+}
+function onViewerToolbarLeave() {
+  if (viewer.value.toolbarPinned) return;
+  viewer.value.toolbarHovered = false;
 }
 
 // ---------------- 多选/分享 ----------------
@@ -1032,6 +1091,10 @@ const activeItems = computed(() => pagedLocalImages.value);
 const activeCount = computed(() => filteredLocalImages.value.length);
 const activeTotalPages = computed(() => localTotalPages.value);
 const viewerItems = computed(() => viewer.value.sourceItems?.length ? viewer.value.sourceItems : filteredLocalImages.value);
+// 搜索结果预览：单张、无跨日期连续索引 → 隐藏翻页箭头与「第 N/M 张」计数。
+const viewerIsSearch = computed(() => viewer.value.source === 'search');
+// 画师/角色 chip 的右键菜单要按来源走不同的「搜索 tag」入口（画廊内搜 / 跨日期搜）。
+const viewerTagContext = computed(() => (viewerIsSearch.value ? 'search' : 'gallery'));
 // 稳定唯一键：同 grid 卡片的 :key。用它锁定「正在看的图」，避免下载时列表变动导致错位。
 function itemKey(item) {
   return item ? (item.localPath || item.filename || '') : '';
@@ -3749,9 +3812,10 @@ async function openCharacterDictionary(rawTag = '') {
   translationModal.value.targetTag = tag;
   // 去掉皮肤/作品括号后搜索，可一次看到同名角色和多皮肤条目。
   translationModal.value.search = tag ? tag.replace(/_\([^)]*\)/g, '').replace(/_+$/, '') : '';
-  // 不要关 viewer：translationModal 跟 viewer 都用 .viewer-overlay，z-index 同为 10000，
-  // 但 modal 在模板里后渲染，会自然盖在 viewer 上面。保存后用户关掉 modal 就能直接看到
-  // 翻译刷新过的 chip，不必再点一次缩略图重开。
+  // 不要关 viewer：translationModal 的层级(10085)高于 viewer 默认态(10080)，
+  // 弹窗稳定盖在预览上面。保存后用户关掉弹窗就能直接看到翻译刷新过的 chip，
+  // 不必再点一次缩略图重开。
+  // （早前这里靠「modal 后渲染 + 同为 .viewer-overlay」的巧合，现已显式指定层级。）
   await searchCharacterDictionary();
 }
 
@@ -3773,13 +3837,10 @@ const tagMultiSelect = ref(new Set());
 const TAG_MULTISELECT_MAX_BROWSE = 2;  // tag 浏览一般只支持 2 个 tag，超出时取前 2 + 警告 toast
 
 function onCharacterContextMenu(event, item, index) {
-  // 调试：先确认 handler 有没有真的跑到
-  console.debug('[char-ctx] onCharacterContextMenu fired', { hasItem: !!item, index, hasTags: !!item?.tags, hasTagsChar: !!item?.tags?.tag_string_character });
   event.preventDefault();
   event.stopPropagation();
   const rawTag = rawCharacterTag(item, index);
   if (!rawTag) {
-    console.debug('[char-ctx] rawTag empty, will toast');
     showToast('找不到该角色对应的原始 tag', 'warning');
     return;
   }
@@ -3793,7 +3854,6 @@ function onCharacterContextMenu(event, item, index) {
   if (x < MARGIN) x = MARGIN;
   if (y < MARGIN) y = MARGIN;
   charContextMenu.value = { open: true, x, y, rawTag, kind: 'character', isInMultiSelect: tagMultiSelect.value.has(rawTag), multiSelectCount: tagMultiSelect.value.size };
-  console.debug('[char-ctx] menu opened', { x, y, rawTag, kind: 'character' });
 }
 
 function onArtistContextMenu(event, item, index) {
@@ -3947,13 +4007,10 @@ function charMenuSearchMultipleTags() {
 
 // 任意点击 / 滚动 / Esc 都关菜单；只挂一次，组件卸载自动解绑
 function onCharMenuDismiss(event) {
-  // 调试：看看到底什么时候会被叫、target 是什么
-  console.debug('[char-ctx] dismiss fired', { type: event?.type, open: charContextMenu.value.open, target: event?.target?.tagName, targetClass: event?.target?.className });
   if (!charContextMenu.value.open) return;
   // 点击发生在菜单内部时由菜单 stopPropagation，这里再判一次：点菜单里按钮不关（按钮自己会关）
   if (event?.target && typeof event.target.closest === 'function' && event.target.closest('.char-ctx-menu')) return;
   closeCharContextMenu();
-  console.debug('[char-ctx] menu closed by dismiss');
 }
 function onCharMenuKey(event) { if (event.key === 'Escape') closeCharContextMenu(); }
 
@@ -4315,12 +4372,16 @@ async function loadFavSnapshot() {
 }
 
 async function toggleImageFavorite(item) {
-  if (!item?.filename || !gallery.value.selectedDate) {
+  // 日期取 item.date 优先：跨日期搜索结果 / lightbox 里的图不属于 gallery.selectedDate，
+  // 用画廊日期会把收藏写到错误的那天，且写回的 key 与 imageFavKey()（按 item.date 算）
+  // 对不上，按钮状态永远不翻。
+  const favDate = item?.date || gallery.value.selectedDate;
+  if (!item?.filename || !favDate) {
     showToast('缺少日期或文件名，无法收藏', 'error');
     return;
   }
   const payload = {
-    date: gallery.value.selectedDate,
+    date: favDate,
     filename: item.filename,
     artist: item.artist || '',
     characters: Array.isArray(item.characters) ? item.characters : [],
@@ -4487,7 +4548,7 @@ const searchModal = ref({
   selectedKeys: [],
   exportDestination: '',
   exporting: false,
-  lightbox: { open: false, url: '', item: null, isVideo: false }
+  lightbox: { open: false, item: null }
 });
 
 // viewer 右键只负责打开并预填搜索条件；是否搜索由用户明确点击按钮决定。
@@ -4708,36 +4769,109 @@ function onPickModalSearchHistory(entry) {
   runSearch();
 }
 
+// 跨日期搜索结果的预览：**直接复用主 viewer**（openViewer(item, [item], 'search')），
+// 不再维护一套平行的 lightbox UI/状态。
+//
+// 历史：这里曾有个独立的轻量 lightbox（底部信息条 + 左上角适应窗口按钮），
+// 操作按钮靠 withLightboxAsViewerItem() 临时挪用 viewer 的 key/sourceItems 再还原。
+// 结果是两套界面对不上（工具栏位置/角标/快捷键都不同），用户反馈「和画廊预览有差别、
+// 快捷键不能复制」。现在统一到 viewer，界面与快捷键天然一致，只剩「单张不翻页」的差异，
+// 由 viewer.value.source === 'search' 控制翻页 UI 的显隐。
+// 「该日期已生成 caption」的集合。// 不复用 captionedSet：那个是画廊当前日期的，且带 requestedDate === selectedDate 的
+// 回写守卫（防止日期切换后过期响应覆盖），塞进跨日期数据会污染画廊的角标。
+const searchLightboxCaptioned = ref(new Set());
+
+async function loadSearchLightboxCaptions(date) {
+  if (!date || !window.desktopAPI?.caption?.listForDate) {
+    searchLightboxCaptioned.value = new Set();
+    return;
+  }
+  try {
+    const entries = await window.desktopAPI.caption.listForDate(date);
+    const set = new Set();
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (typeof entry === 'string') set.add(`name:${entry}`);
+      else if (entry?.localPath) {
+        set.add(`path:${entry.localPath}`);
+        if (entry.filename) set.add(`name:${entry.filename}`);
+      }
+    }
+    searchLightboxCaptioned.value = set;
+  } catch {
+    searchLightboxCaptioned.value = new Set();
+  }
+}
+
+// 「当前预览的图是否已生成 Caption」。
+// 两个来源判断依据不同，必须分开：
+//   - 画廊预览：走 hasCaption()（读画廊当前日期的 captionedSet）
+//   - 搜索预览：搜索结果常来自别的日期甚至别的库，画廊的 captionedSet 根本不覆盖，
+//     要用本文件单独拉的 searchLightboxCaptioned（按 date 取的 caption 清单）。
+const viewerHasCaption = computed(() => {
+  if (!viewerIsSearch.value) return hasCaption(viewerItem.value);
+  const item = viewerItem.value;
+  if (!item) return false;
+  if (item.localPath && searchLightboxCaptioned.value.has(`path:${item.localPath}`)) return true;
+  return !!item.filename && searchLightboxCaptioned.value.has(`name:${item.filename}`);
+});
+// 转 GIF：搜索来源的图不在画廊当前日期，convertGif 内部只 reload 画廊当前日期，
+// 而 hydrateThumbs 对已有 thumbUrl 的 item 直接 return —— 所以搜索来源要额外
+// 清掉 thumbUrl 再补一次，否则搜索结果里的缩略图仍显示旧的首帧。
+async function convertViewerGif() {
+  const item = viewerItem.value;
+  if (!item) return;
+  await convertGif(item);
+  if (viewerIsSearch.value) {
+    item.thumbUrl = '';
+    item.hasGifCompanion = true;
+    await hydrateThumbs([item]);
+  }
+}
+
+function captionSearchLightboxItem() {
+  const item = viewerItem.value;
+  if (!item) return;
+  closeSearchLightbox();
+  emit('caption-image', item);
+}
+
+// 搜索结果预览里的 tag chip：左键把该画师/角色回填进「跨日期搜索」并立即重搜。
+// 注意不能走 applySearch()——那个只过滤画廊、不动跨日期搜索，点完会让用户
+// 莫名其妙退回画廊视图。这里关掉预览、保留搜索浮层，改条件后重跑一次。
+// 右键沿用主 viewer 的上下文菜单（打开/复制/加入收藏等）。
+function onSearchLightboxTagClick(item, index, kind) {
+  const tag = kind === 'artist' ? rawArtistTag(item, index) : rawCharacterTag(item, index);
+  if (!tag) return;
+  const sm = searchModal.value;
+  closeSearchLightbox();
+  if (!sm.open) return;              // 浮层已被关掉就别再发一次请求
+  if (sm.q.trim() === tag) return;   // 同一个 tag，不必重搜
+  sm.q = tag;
+  // 该 tag 来自这张图的画师/角色，直接锁定类型比 auto 更准（auto 会去猜中英文）
+  sm.kind = kind;
+  runSearch();
+}
+
+// 打开搜索结果预览：直接复用主 viewer（单张、source='search'）。
+// 图片 URL 的解析（视频走 FastAPI / zip 取伴生 gif / localPath / webUrl）全在
+// openViewer 里，这里不再重复一份。
 async function openSearchLightbox(item) {
+  if (!item) return;
   const lb = searchModal.value.lightbox;
   lb.item = item;
-  lb.url = '';
-  lb.isVideo = false;
   lb.open = true;
-  if (isVideoItem(item) && item.date) {
-    lb.isVideo = true;
-    lb.url = `http://127.0.0.1:18765/images/${item.date}/${encodeURIComponent(item.filename)}`;
-    return;
-  }
-  if (itemExtension(item) === 'zip') {
-    const gifPath = item.localPath.replace(/\.zip$/i, '.gif');
-    if (item.localPath && await window.desktopAPI.file.exists(gifPath)) {
-      lb.url = await window.desktopAPI.file.toLocalUrl(gifPath);
-    }
-    // 无伴生 gif 的 zip 无法在浮层预览，用按钮走「本地」在外部打开
-    return;
-  }
-  if (item.localPath) {
-    lb.url = await window.desktopAPI.file.toLocalUrl(item.localPath);
-  }
+  // captionedSet 只装 gallery.selectedDate 那天的 caption，搜索结果常来自别的日期
+  // （甚至外置库）。不单独拉一次的话「Caption ✓」角标会漏判成「未生成」。
+  loadSearchLightboxCaptions(item?.date);
+  await openViewer(item, [item], 'search');
 }
 
 function closeSearchLightbox() {
   const lb = searchModal.value.lightbox;
   lb.open = false;
-  lb.url = '';
   lb.item = null;
-  lb.isVideo = false;
+  searchLightboxCaptioned.value = new Set();   // 免得上一张的 caption 命中下一张
+  if (viewer.value.open && viewer.value.source === 'search') closeViewer();
 }
 
 async function jumpToSearchDate(item) {
@@ -4791,8 +4925,9 @@ function onTranslationFileSelected(event) {
   reader.readAsText(file);
 }
 
-async function openViewer(item, sourceItems = null) {
+async function openViewer(item, sourceItems = null, source = 'gallery') {
   viewer.value.open = true;
+  viewer.value.source = source;
   viewer.value.sourceItems = Array.isArray(sourceItems) ? sourceItems : [];
   viewer.value.key = itemKey(item);   // 用稳定唯一键锁定，而非索引
   viewer.value.zoom = 1;
@@ -4865,6 +5000,7 @@ function closeViewer() {
   viewer.value.imageUrl = '';
   viewer.value.zoom = 1;
   viewer.value.sourceItems = [];
+  viewer.value.source = 'gallery';
   clearTagMultiSelect();
 }
 
@@ -4994,27 +5130,70 @@ function onViewerWheel(event) {
 }
 
 async function onKeyDown(event) {
-  // viewer 打开时，Esc 优先清多选态（不清 viewer，避免用户误按 Esc 丢失上下文）
-  if (viewer.value.open && tagMultiSelect.value.size > 0 && event.key === 'Escape') {
+  // 本组件常驻（v-show），但键监听挂在 window 上 —— 切到打码 / 描述 / 收藏 / 姿态页
+  // 时这里仍然在跑：方向键会去挪看不见的画廊焦点、PageUp/PageDown 会偷偷翻一页、
+  // Enter 会打开一个谁也看不见的预览。不是台前页就直接让路，交给当前页自己处理。
+  if (!props.active) return;
+
+  // 搜索结果预览现在与画廊预览共用同一个 viewer（viewer.source === 'search'）。
+  // 唯一的语义差别是「单张、不翻页」，所以下面凡是翻页相关的分支都要先排除搜索来源。
+  const viewerSearch = viewer.value.open && viewer.value.source === 'search';
+
+  // ⚠ Esc 必须严格「谁在最上面就先关谁」——判据是实际层叠关系，不是「谁先被打开」。
+  //
+  // · Tag 浏览（browse）：层叠 10060 > 预览让位态 10050，且它是从预览里开出来的，
+  //   关掉它预览还在（不调 closeViewer）。所以 Esc 先关 browse。
+  // · 跨日期搜索（searchModal）：浮层本身 10060，但搜索结果预览（source==='search'）
+  //   刻意不降级、仍留在 10080 盖着它（见 viewerDialogOpen 的排除逻辑）。
+  //   所以搜索流程里「预览在上」，Esc 应当先关预览、保留搜索浮层，
+  //   这正好落到下面 viewer 分支的 closeSearchLightbox()。
+  //
+  // 曾经这里把「viewer 打开 → 先关 viewer」无条件写在最前面：Browse 修好后就暴露出
+  // 「按 Esc 关掉的是下面的预览、上面刚打开的 Browse 还留着」。
+  if (event.key === 'Escape' && browse.value.open && !viewerSearch) {
     event.preventDefault();
-    clearTagMultiSelect();
+    closeBrowse();
     return;
   }
+  if (event.key === 'Escape' && searchModal.value.open && !viewerSearch) {
+    event.preventDefault();
+    closeSearchModal();
+    return;
+  }
+
+  // viewer 打开时 Esc 关它（搜索预览与画廊预览一致）。
   if (viewer.value.open && event.key === 'Escape') {
-    closeViewer();
+    // viewer 打开时，Esc 优先清多选态（不清 viewer，避免用户误按 Esc 丢失上下文）
+    if (tagMultiSelect.value.size > 0) {
+      event.preventDefault();
+      clearTagMultiSelect();
+      return;
+    }
+    event.preventDefault();
+    if (viewerSearch) closeSearchLightbox();
+    else closeViewer();
+    return;
+  }
+
+  // 预览打开时 Ctrl+C = 复制当前图片。
+  // ⚠ 必须放在「焦点在 input/textarea 就返回」之前：
+  //   搜索结果预览是从搜索浮层点开的，焦点此时仍停在搜索输入框里，
+  //   若先按输入框放行，Ctrl+C 会被当成「复制输入框文字」而被整个跳过，
+  //   表现为快捷键复制图片无效。预览打开时用户的意图显然是复制图片。
+  if (viewer.value.open && (event.ctrlKey || event.metaKey) && (event.key === 'c' || event.key === 'C')) {
+    event.preventDefault();
+    await copyViewerImage();
     return;
   }
 
   const tag = event.target?.tagName?.toLowerCase();
   if (['input', 'textarea', 'select', 'video'].includes(tag)) return;
 
+  // 预览打开时的其余快捷键（方向键翻页；搜索结果单张，忽略）。
   if (viewer.value.open) {
-    if ((event.ctrlKey || event.metaKey) && (event.key === 'c' || event.key === 'C')) {
-      event.preventDefault();
-      await copyViewerImage();
-    } else if (event.key === 'ArrowLeft') {
+    if (!viewerSearch && event.key === 'ArrowLeft') {
       await stepViewer(-1);
-    } else if (event.key === 'ArrowRight') {
+    } else if (!viewerSearch && event.key === 'ArrowRight') {
       await stepViewer(1);
     }
     return;
@@ -5101,6 +5280,35 @@ watch(() => gallery.value.thumbSize, () => {
   hydrateThumbs(pagedLocalImages.value);
 });
 
+// ── 切页时统一收掉「停在 body 上的浮层」───────────────────────────────
+// 本组件用 v-show 常驻（App.vue），而下面这些浮层全都 Teleport 到了 body：
+//   viewer（+ 它的工具栏）/ searchModal（含搜索结果预览）/ browse /
+//   四个收藏·词条弹窗 / 已选清单 / 角色右键菜单 / 页码面板 / toast 堆栈
+// Teleport 出去的元素不是本组件的 DOM 后代，切页时 v-show 的 display:none
+// 完全管不到它们 —— 于是「预览里点编辑图片」会变成「打码页被预览整个盖住」，
+// 新页面上什么都点不到。**判据：Teleport 到 body 的浮层，宿主失活时必须显式关闭。**
+// （留在 .shell 内的弹窗——刷新范围 / 合并 / 教程 / 已选列表 / 加密工具——不需要，
+//  它们会随 v-show 一起隐藏。）
+function dismissFloatingLayers() {
+  // 先关预览：它是「最上面」的那层，且搜索预览被关时不会连带关掉搜索浮层
+  if (viewer.value.open) closeViewer();
+  if (searchModal.value.open) closeSearchModal();
+  else if (searchModal.value.lightbox.open) closeSearchLightbox();
+  if (browse.value.open) closeBrowse();
+  if (translationModal.value.open) closeTranslationModal();
+  if (translateDetail.value.open) closeTranslateDetail();
+  if (favoriteDialog.value.open) closeFavoriteDialog();
+  if (charFavoriteDialog.value.open) closeCharacterFavoriteDialog();
+  if (browseSelectionListOpen.value) closeBrowseSelectionList();
+  if (charContextMenu.value.open) closeCharContextMenu();
+  if (pagePicker.value.open) pagePicker.value.open = false;
+  if (toasts.value.length) toasts.value = [];
+}
+
+watch(() => props.active, (isActive) => {
+  if (!isActive) dismissFloatingLayers();
+});
+
 onMounted(async () => {
   await loadGallery();
   await ensureService();
@@ -5119,7 +5327,6 @@ onMounted(async () => {
   document.addEventListener('click', onDocClickForDisplayMenu);
   document.addEventListener('click', onDocClickForPagePicker);
   // 角色 chip 右键菜单的全局 dismiss 监听
-  console.debug('[char-ctx] register dismiss listeners');
   document.addEventListener('mousedown', onCharMenuDismiss, true);
   document.addEventListener('scroll', onCharMenuDismiss, true);
   window.addEventListener('blur', onCharMenuDismiss);
@@ -5154,7 +5361,7 @@ const tagFolderPreview = computed(() => {
   const SPACE_MARK = '__';
   const COLON_MARK = '__c__';
   let s = q.replace(/:/g, COLON_MARK);
-  s = s.replace(/[<>"/\\|?* -]/g, '');
+  s = s.replace(/[<>"/\\|?*\x00-\x1f]/g, '');
   s = s.replace(/\s+/g, SPACE_MARK);
   s = s.replace(/^[. ]+|[. ]+$/g, '');
   if (!s) return '';
@@ -6166,7 +6373,7 @@ const downloadTargetHint = computed(() => {
                 <div class="search-group-grid">
                   <article v-for="item in group.items" :key="searchItemKey(item)" class="image-card search-result-card" :class="{ 'search-result-selected': isSearchSelected(item) }" :title="`${item.date} · ${item.artist} · ${item.filename}`">
                     <div class="thumb-wrap">
-                      <img class="thumb clickable-thumb" :class="{ 'is-loaded': item.loaded }" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @load="onThumbLoad(item)" @error="onThumbError(item)" @click="openViewer(item, searchModal.images)" />
+                      <img class="thumb clickable-thumb" :class="{ 'is-loaded': item.loaded }" :src="item.thumbUrl" :alt="item.filename" loading="lazy" decoding="async" @load="onThumbLoad(item)" @error="onThumbError(item)" @click="openSearchLightbox(item)" />
                       <div class="thumb-skeleton" :class="{ 'is-hidden': item.loaded }" aria-hidden="true"></div>
                       <span v-if="isAnimatedCard(item)" class="video-format-watermark" :class="`format-${cardFormatLabel(item)}`">
                         <svg v-if="isVideoItem(item)" class="format-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
@@ -6195,33 +6402,137 @@ const downloadTargetHint = computed(() => {
       </div>
     </Teleport>
 
-    <!-- 搜索结果大图预览（轻量 lightbox，不接入主 viewer 的跨日期索引） -->
+
+    <!-- 大图预览必须 Teleport 到 body：跨日期搜索浮层（.search-modal-overlay, z-index 10060）
+         是 position:fixed + z-index，会自建层叠上下文。如果 viewer 留在搜索浮层里，
+         它那 10080 的 z-index 只在该上下文内部生效，永远盖不过搜索浮层本身，
+         于是点搜索结果缩略图「打开了预览却看不见」。挂到 body 才和搜索浮层同级比 z-index。 -->
     <Teleport to="body">
-      <div v-if="searchModal.lightbox.open" class="search-lightbox-overlay" @click.self="closeSearchLightbox">
-        <button class="search-lightbox-close" @click="closeSearchLightbox" title="关闭">×</button>
-        <video v-if="searchModal.lightbox.isVideo && searchModal.lightbox.url" :src="searchModal.lightbox.url" controls autoplay class="search-lightbox-video"></video>
-        <img v-else-if="searchModal.lightbox.url" :src="searchModal.lightbox.url" class="search-lightbox-img" />
-        <div v-else class="search-lightbox-nopreview">该 ZIP 动图没有伴生 GIF，无法在此预览，请点「本地」打开</div>
-        <div v-if="searchModal.lightbox.item" class="search-lightbox-bar" @click.stop>
-          <span class="search-lightbox-date">{{ searchModal.lightbox.item.date }}</span>
-          <span class="search-lightbox-artist">{{ searchModal.lightbox.item.artist }}</span>
-          <button class="secondary" @click="openOriginal(searchModal.lightbox.item)" :disabled="!searchModal.lightbox.item.postUrl">原帖</button>
-          <button class="secondary" @click="openLocal(searchModal.lightbox.item)" :disabled="!searchModal.lightbox.item.localPath">本地</button>
-          <button @click="editSearchItem(searchModal.lightbox.item)">编辑</button>
-          <button class="secondary" @click="jumpToSearchDate(searchModal.lightbox.item)">前往该日期</button>
+    <div v-if="viewer.open" class="overlay-shell crawler-viewer-overlay" :style="viewerOverlayStyle" @click.self="closeViewer" @mousemove="onViewerMouseMove" @mouseleave="viewer.toolbarHovered = false">
+      <!-- 顶部工具栏已 Teleport 到 body（见下方），这里只留等高空位 -->
+      <div class="viewer-toolbar-placeholder" aria-hidden="true"></div>
+
+      <!-- 始终显示的右上角信息小栏：计数 / 适应窗口 / 固定信息栏。
+           独立于顶部置顶 toolbar，不随 viewerToolbarVisible 收起 -->
+      <div class="viewer-corner-info">
+        <button class="viewer-corner-row viewer-corner-btn viewer-corner-close" @click="closeViewer" title="关闭大图（Esc）">× 关闭</button>
+        <!-- 搜索结果预览没有跨日期连续索引（结果可能跨盘、跨日期），
+             用「日期 + 库标签」替代「第 N/M 张」计数与跳转输入框。 -->
+        <div v-if="viewerIsSearch" class="viewer-corner-row viewer-corner-counter viewer-corner-meta">
+          <span v-if="viewerItem?.date" class="viewer-corner-date">{{ viewerItem.date }}</span>
+          <span v-if="viewerItem?.libraryLabel && viewerItem.libraryLabel !== 'hot_pic'" class="viewer-corner-lib">{{ viewerItem.libraryLabel }}</span>
+          <span v-if="(viewerItem?.score || 0) > 0" class="viewer-score">★ {{ viewerItem.score }}</span>
+          <span v-if="(viewerItem?.favCount || 0) > 0" class="viewer-fav">♥ {{ viewerItem.favCount }}</span>
+        </div>
+        <div v-else class="viewer-corner-row viewer-corner-counter">
+          <span class="viewer-corner-counter-label">第</span>
+          <input
+            class="viewer-jump-input viewer-corner-jump"
+            type="number"
+            min="1"
+            :max="viewerItems.length"
+            :value="viewerIndex + 1"
+            @keyup.enter="onViewerJump($event)"
+            @change="onViewerJump($event)"
+            title="输入并回车跳转到指定张数"
+          />
+          <span class="viewer-corner-counter-label">/ {{ viewerItems.length }} 张</span>
+          <span v-if="(viewerItem?.score || 0) > 0" class="viewer-score">★ {{ viewerItem.score }}</span>
+          <span v-if="(viewerItem?.favCount || 0) > 0" class="viewer-fav">♥ {{ viewerItem.favCount }}</span>
+        </div>
+        <button
+          class="viewer-corner-row viewer-corner-btn"
+          @click="toggleViewerFitMode"
+          :title="viewer.fitMode === 'fit' ? '当前：适应窗口，点击切换为原始大小' : '当前：原始大小，点击切换为适应窗口'"
+        >{{ viewer.fitMode === 'fit' ? '原始大小' : '适应窗口' }}</button>
+        <button
+          class="viewer-corner-row viewer-corner-btn"
+          :class="{ 'is-active': viewer.toolbarPinned }"
+          @click="toggleViewerToolbarPin"
+          :title="viewer.toolbarPinned ? '已固定信息栏，点击取消固定（恢复鼠标悬浮显示）' : '固定信息栏（默认悬浮显示）'"
+        >{{ viewer.toolbarPinned ? '已固定' : '固定' }}</button>
+      </div>
+
+      <!-- 左右切换箭头：默认半透明，悬浮变明显；在边界自动隐藏。
+           搜索结果预览是单张，无翻页语义，整体不渲染。 -->
+      <button
+        v-show="!viewerIsSearch && viewerIndex > 0"
+        class="viewer-nav-arrow viewer-nav-prev"
+        @click.stop="stepViewer(-1)"
+        title="上一张 (←)"
+        aria-label="上一张"
+      >
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6"></polyline>
+        </svg>
+      </button>
+      <button
+        v-show="!viewerIsSearch && viewerIndex < viewerItems.length - 1"
+        class="viewer-nav-arrow viewer-nav-next"
+        @click.stop="stepViewer(1)"
+        title="下一张 (→)"
+        aria-label="下一张"
+      >
+        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 18 15 12 9 6"></polyline>
+        </svg>
+      </button>
+
+      <div class="viewer-stage" :class="{ 'is-fit': viewer.fitMode === 'fit' }" @wheel="onViewerWheel" @click.self="closeViewer">
+        <div
+          v-if="viewer.imageUrl"
+          :key="viewer.key"
+          class="viewer-image-wrap"
+          :class="{ 'is-fit': viewer.fitMode === 'fit' }"
+          :style="{ zoom: viewer.zoom }"
+        >
+          <video
+            v-if="viewerIsVideo"
+            class="viewer-image"
+            :class="{ 'is-loaded': viewerImageLoaded }"
+            :src="viewer.imageUrl"
+            controls
+            autoplay
+            preload="metadata"
+            @loadeddata="viewerImageLoaded = true"
+          />
+          <img
+            v-else
+            class="viewer-image"
+            :class="{ 'is-loaded': viewerImageLoaded }"
+            :src="viewer.imageUrl"
+            :alt="viewerItem?.filename || 'preview'"
+            @load="viewerImageLoaded = true"
+          />
         </div>
       </div>
+    </div>
     </Teleport>
 
-    <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer" @mousemove="onViewerMouseMove" @mouseleave="viewer.toolbarHovered = false">
+    <!-- 大图预览的顶部工具栏（画师/角色 chip + 操作按钮行）。
+         刻意 Teleport 到 body 并 position:fixed 贴在视口顶部，工作栏浮在图片上方。
+         之前留在 overlay 里时，工具栏作为 overlay 的子元素，永远被后开的
+         BrowseOverlay 压住 —— 明明在看预览，工具栏却沉在下面。
+         层级用 viewerOverlayZ + 1，保证紧贴预览之上、但仍低于右键菜单(10090)与 toast(10100)。
+         画廊预览与搜索结果预览共用这一套工具栏，仅按 viewerIsSearch 切换少量按钮。 -->
+    <Teleport to="body">
       <div
+        v-if="viewer.open"
         ref="viewerToolbarRef"
         class="viewer-toolbar"
         :class="{ 'is-hidden': !viewerToolbarVisible }"
-        @mouseenter="viewer.toolbarHovered = true"
-        @mouseleave="viewer.toolbarHovered = false"
+        :style="viewerToolbarStyle"
+        @mouseenter="onViewerToolbarEnter"
+        @mouseleave="onViewerToolbarLeave"
       >
         <div class="viewer-toolbar-info">
+          <!-- 搜索结果预览：补一行「日期 / 库 / 文件名」。这些信息在画廊预览里由画廊本身
+               （标题栏、卡片）承担，搜索结果不在画廊里，得自己带上。 -->
+          <div v-if="viewerIsSearch && viewerItem" class="viewer-meta-block viewer-meta-file">
+            <span v-if="viewerItem.date" class="viewer-meta-date">{{ viewerItem.date }}</span>
+            <span v-if="viewerItem.libraryLabel && viewerItem.libraryLabel !== 'hot_pic'" class="viewer-meta-lib">{{ viewerItem.libraryLabel }}</span>
+            <span class="viewer-meta-filename" :title="viewerItem.filename">{{ viewerItem.filename }}</span>
+          </div>
           <div class="viewer-meta-block">
             <span class="viewer-meta-label">画师</span>
             <template v-for="(token, artistIndex) in (viewerItem?.artistTokens?.length ? viewerItem.artistTokens : ['未知'])" :key="`v-artist-${token}-${artistIndex}`">
@@ -6279,118 +6590,44 @@ const downloadTargetHint = computed(() => {
             :disabled="!viewerItem"
             :title="viewerItem && isImageFavorited(viewerItem) ? '取消图片收藏' : '加入图片收藏'"
           >{{ viewerItem && isImageFavorited(viewerItem) ? '♥ 已收藏' : '♡ 收藏' }}</button>
-          <button v-if="viewerItem?.filename?.toLowerCase().endsWith('.zip') && !viewerItem?.hasGifCompanion" class="secondary" @click="convertGif(viewerItem)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
+          <button v-if="viewerItem?.filename?.toLowerCase().endsWith('.zip') && !viewerItem?.hasGifCompanion" class="secondary" @click="convertViewerGif" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;">转GIF</button>
           <button class="secondary" @click="copyViewerImage" :disabled="!viewerItem?.localPath || isVideoItem(viewerItem) || ['zip'].includes(itemExtension(viewerItem))" title="复制图片到剪贴板；GIF 复制首帧或动图，视频和 ZIP 不支持图片复制">复制图片</button>
           <button class="primary viewer-watermark-copy" @click="copyViewerImageWithWatermark" :disabled="!viewerItem?.localPath || !(viewerItem?.artist || viewerItem?.author)" title="使用打码设置中的字体，在左上角添加半透明作者文字水印后复制">作者水印并复制图片</button>
           <button
-            @click="viewerItem && emit('caption-image', viewerItem)"
-            :style="hasCaption(viewerItem)
+            @click="viewerIsSearch ? captionSearchLightboxItem() : (viewerItem && emit('caption-image', viewerItem))"
+            :style="viewerHasCaption
               ? 'background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;'
               : 'background: linear-gradient(135deg, #8b5cf6, #6d28d9); border: none; color: white;'"
-            :title="hasCaption(viewerItem) ? '已生成 Caption，点击查看/编辑' : '为这张图生成 AI 描述'"
-          >{{ hasCaption(viewerItem) ? 'Caption ✓' : 'Caption' }}</button>
-          <button @click="editItem(viewerItem)" style="background: linear-gradient(135deg, var(--accent), var(--accent-deep)); border: none; color: white;">编辑图片</button>
+            :title="viewerHasCaption ? '已生成 Caption，点击查看/编辑' : '为这张图生成 AI 描述'"
+          >{{ viewerHasCaption ? 'Caption ✓' : 'Caption' }}</button>
+          <button @click="viewerIsSearch ? editSearchItem(viewerItem) : editItem(viewerItem)" style="background: linear-gradient(135deg, var(--accent), var(--accent-deep)); border: none; color: white;">编辑图片</button>
+          <!-- 搜索结果来自别的日期，这里给个直达该日期画廊的入口 -->
+          <button v-if="viewerIsSearch" class="secondary" @click="jumpToSearchDate(viewerItem)">前往该日期</button>
         </div>
       </div>
+    </Teleport>
 
-      <!-- 始终显示的右上角信息小栏：计数 / 适应窗口 / 固定信息栏。
-           独立于顶部置顶 toolbar，不随 viewerToolbarVisible 收起 -->
-      <div class="viewer-corner-info">
-        <button class="viewer-corner-row viewer-corner-btn viewer-corner-close" @click="closeViewer" title="关闭大图（Esc）">× 关闭</button>
-        <div class="viewer-corner-row viewer-corner-counter">
-          <span class="viewer-corner-counter-label">第</span>
-          <input
-            class="viewer-jump-input viewer-corner-jump"
-            type="number"
-            min="1"
-            :max="viewerItems.length"
-            :value="viewerIndex + 1"
-            @keyup.enter="onViewerJump($event)"
-            @change="onViewerJump($event)"
-            title="输入并回车跳转到指定张数"
-          />
-          <span class="viewer-corner-counter-label">/ {{ viewerItems.length }} 张</span>
-          <span v-if="(viewerItem?.score || 0) > 0" class="viewer-score">★ {{ viewerItem.score }}</span>
-          <span v-if="(viewerItem?.favCount || 0) > 0" class="viewer-fav">♥ {{ viewerItem.favCount }}</span>
-        </div>
-        <button
-          class="viewer-corner-row viewer-corner-btn"
-          @click="toggleViewerFitMode"
-          :title="viewer.fitMode === 'fit' ? '当前：适应窗口，点击切换为原始大小' : '当前：原始大小，点击切换为适应窗口'"
-        >{{ viewer.fitMode === 'fit' ? '原始大小' : '适应窗口' }}</button>
-        <button
-          class="viewer-corner-row viewer-corner-btn"
-          :class="{ 'is-active': viewer.toolbarPinned }"
-          @click="toggleViewerToolbarPin"
-          :title="viewer.toolbarPinned ? '已固定信息栏，点击取消固定（恢复鼠标悬浮显示）' : '固定信息栏（默认悬浮显示）'"
-        >{{ viewer.toolbarPinned ? '已固定' : '固定' }}</button>
-      </div>
-
-      <!-- 左右切换箭头：默认半透明，悬浮变明显；在边界自动隐藏 -->
-      <button
-        v-show="viewerIndex > 0"
-        class="viewer-nav-arrow viewer-nav-prev"
-        @click.stop="stepViewer(-1)"
-        title="上一张 (←)"
-        aria-label="上一张"
-      >
-        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="15 18 9 12 15 6"></polyline>
-        </svg>
-      </button>
-      <button
-        v-show="viewerIndex < viewerItems.length - 1"
-        class="viewer-nav-arrow viewer-nav-next"
-        @click.stop="stepViewer(1)"
-        title="下一张 (→)"
-        aria-label="下一张"
-      >
-        <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="9 18 15 12 9 6"></polyline>
-        </svg>
-      </button>
-
-      <div class="viewer-stage" :class="{ 'is-fit': viewer.fitMode === 'fit' }" @wheel="onViewerWheel" @click.self="closeViewer">
+    <!-- Toast 堆栈：必须 Teleport 到 body。
+         ⚠ 不能留在 .shell 里：.shell.shell-compact 有 isolation: isolate，自成层叠上下文，
+           留在里面的浮层无论 z-index 写多高（这里写的 10100）都会被整个 .shell 压住。
+           而大图预览是 Teleport 到 body 的兄弟节点 —— 于是「预览里点复制」弹出的
+           「已复制图片 W×H」会被预览盖住，用户完全看不到复制结果。
+         ⚠ 副作用：CrawlerPage 用 v-show 常驻，Teleport 后切到别的页面时未消失的
+           toast 仍会显示几秒。已由 active 监听统一收掉（dismissFloatingLayers），
+           否则会带着「已复制图片」之类的提示飘到打码页上。 -->
+    <Teleport to="body">
+      <div class="toast-stack" aria-live="polite">
         <div
-          v-if="viewer.imageUrl"
-          :key="viewer.key"
-          class="viewer-image-wrap"
-          :class="{ 'is-fit': viewer.fitMode === 'fit' }"
-          :style="{ zoom: viewer.zoom }"
+          v-for="t in toasts"
+          :key="t.id"
+          class="toast-overlay"
+          :class="t.type"
         >
-          <video
-            v-if="viewerIsVideo"
-            class="viewer-image"
-            :class="{ 'is-loaded': viewerImageLoaded }"
-            :src="viewer.imageUrl"
-            controls
-            autoplay
-            preload="metadata"
-            @loadeddata="viewerImageLoaded = true"
-          />
-          <img
-            v-else
-            class="viewer-image"
-            :class="{ 'is-loaded': viewerImageLoaded }"
-            :src="viewer.imageUrl"
-            :alt="viewerItem?.filename || 'preview'"
-            @load="viewerImageLoaded = true"
-          />
+          <span class="toast-msg">{{ t.msg }}</span>
+          <button class="toast-close" type="button" @click="dismissToast(t.id)" aria-label="关闭提示">×</button>
         </div>
       </div>
-    </div>
-
-    <div class="toast-stack" aria-live="polite">
-      <div
-        v-for="t in toasts"
-        :key="t.id"
-        class="toast-overlay"
-        :class="t.type"
-      >
-        <span class="toast-msg">{{ t.msg }}</span>
-        <button class="toast-close" type="button" @click="dismissToast(t.id)" aria-label="关闭提示">×</button>
-      </div>
-    </div>
+    </Teleport>
 
     <!-- 教程 Modal -->
     <TutorialsModal
@@ -6400,7 +6637,12 @@ const downloadTargetHint = computed(() => {
     />
 
     <!-- Tag Browse Overlay: 按 tag 预览缩略图，勾选后下载。
+         ⚠ 必须 Teleport 到 body：.shell.shell-compact 上有 isolation: isolate，
+           它自成层叠上下文，作用域内任何 z-index（哪怕 10060）都会被压在整个 .shell 之下。
+           而大图预览/搜索浮层都 Teleport 到了 body，是 .shell 的兄弟节点 —— 于是
+           「画廊预览里右键角色名 → 搜索 Tag」时，browse 会被 viewer 压住（用户报的那个 bug）。
          ⚠ 模板里 browse 是 ref 自动解包后的对象本身，不要写 .value（会 TypeError 把 runBrowseSearch 整个截断） -->
+    <Teleport to="body">
     <BrowseOverlay
       :state="browse"
       :filtered="browseFiltered"
@@ -6433,7 +6675,18 @@ const downloadTargetHint = computed(() => {
       @add-saved-tag="addSavedTag"
       @remove-saved-tag="removeSavedTag"
     />
+    </Teleport>
 
+    <!-- ⚠ 下面 4 个 Modal 都必须 Teleport 到 body。
+         原因：`.shell.shell-compact` 上有 `isolation: isolate`，自成层叠上下文 ——
+         留在 .shell 里的任何浮层（哪怕 z-index 10086）都会被整个 .shell 压住，
+         而大图预览是 body 级兄弟节点（10080），于是「预览里点 ★ 收藏 / 编辑词条」
+         开的弹窗会被预览完全盖住，表现为「点了没反应」。
+         是否要 Teleport 的判据：**这个浮层是否可能需要在预览之上出现**。
+         下面这几个都能从 viewer 工具栏 / chip / 右键菜单直接打开，所以必须出去。
+         （RefreshRange / MergeViewerData / Tutorials / SelectionList 只在主界面用，
+           预览打开时不可达，留在原地即可。） -->
+    <Teleport to="body">
     <!-- Tag 浏览的跨页已选清单（缩略图 + 单条移除） -->
     <BrowseSelectionModal
       v-model="browseSelectionListOpen"
@@ -6464,27 +6717,6 @@ const downloadTargetHint = computed(() => {
       @notify="({ message, type }) => showToast(message, type)"
     />
 
-    <!-- 刷新范围 Modal -->
-    <RefreshRangeModal
-      :state="rangeRefresh"
-      :active-total-pages="activeTotalPages"
-      :active-page="activePage"
-      :page-size="gallery.pageSize"
-      :count="rangeRefreshCount"
-      :is-running="refresh.isRunning"
-      @update:open="closeRangeRefreshDialog"
-      @confirm="startRefreshScoresRange"
-    />
-
-    <!-- 跨盘合并 viewer_data Modal（替代 Electron 不支持的 window.prompt/confirm） -->
-    <MergeViewerDataModal
-      :state="mergeViewerDataModal"
-      :is-busy="task.isRunning || task.isStopping"
-      @update:open="closeMergeViewerDataModal"
-      @roots-changed="onLibraryRootsChanged"
-      @success="onMergeViewerDataSuccess"
-    />
-
     <!-- 加入画师收藏 Modal -->
     <ArtistFavoriteModal
       :state="favoriteDialog"
@@ -6503,6 +6735,28 @@ const downloadTargetHint = computed(() => {
       @toggle-group="toggleCharFavGroup"
       @create-group="createCharFavGroupInline"
       @save="saveCharacterFavoriteDialog"
+    />
+    </Teleport>
+
+    <!-- 刷新范围 Modal（仅主界面可达，留在 .shell 内） -->
+    <RefreshRangeModal
+      :state="rangeRefresh"
+      :active-total-pages="activeTotalPages"
+      :active-page="activePage"
+      :page-size="gallery.pageSize"
+      :count="rangeRefreshCount"
+      :is-running="refresh.isRunning"
+      @update:open="closeRangeRefreshDialog"
+      @confirm="startRefreshScoresRange"
+    />
+
+    <!-- 跨盘合并 viewer_data Modal（替代 Electron 不支持的 window.prompt/confirm） -->
+    <MergeViewerDataModal
+      :state="mergeViewerDataModal"
+      :is-busy="task.isRunning || task.isStopping"
+      @update:open="closeMergeViewerDataModal"
+      @roots-changed="onLibraryRootsChanged"
+      @success="onMergeViewerDataSuccess"
     />
   </div>
 </template>
@@ -7054,10 +7308,23 @@ const downloadTargetHint = computed(() => {
 }
 
 /* 角色 chip 右键迷你菜单：Teleport 到 body，position: fixed 走视口坐标
-   风格跟 .pg-picker-panel / .selection-list-card 一致（淡米黄卡片 + 圆角） */
+   风格跟 .pg-picker-panel / .selection-list-card 一致（淡米黄卡片 + 圆角）
+   层级契约（同为 body 直接子节点，只比 z-index；完整表见 style.css 的「浮层层级表」）：
+    10050 .crawler-viewer-overlay  画廊大图预览（让位给对话框时的降级态）
+    10060 .search-modal-overlay / .browse-overlay
+    10065 .bsl-card                已选清单弹窗
+    10080 .crawler-viewer-overlay  大图预览（默认态；含搜索结果预览）
+    10085 .translation-overlay     角色字典弹窗
+    10086 .translation-overlay     词条详情弹窗
+    10087 .fav-add-modal           加入收藏弹窗
+    10090 .char-ctx-menu   ← 本菜单，必须高于 viewer，否则右键菜单被预览遮罩盖住（曾是 10050 的 bug）
+    10095 .input-ctx-menu          输入框右键菜单
+    10100 .toast-stack             顶部提示（永远最上层；必须 Teleport，否则预览里复制成功的提示看不见）
+    10105 .copy-toast-pill         底部复制轻提示
+   以后抬高预览层级时，上面这些都要一起复核。 */
 .char-ctx-menu {
   position: fixed;
-  z-index: 10050;
+  z-index: 10090;
   min-width: 160px;
   background: var(--panel, #fdf6e3);
   border: 1px solid var(--line, rgba(0, 0, 0, 0.12));
@@ -8233,8 +8500,12 @@ const downloadTargetHint = computed(() => {
   top: 0;
   left: 0;
   right: 0;
-  /* 必须高于所有 modal：合并/翻译/收藏等 modal 用的是 10020，10030 留出缓冲 */
-  z-index: 10030;
+  /* 必须高于所有 modal / 浮层，包括大图预览的 10080：
+     预览里点收藏、复制图片都会弹 toast，低了就整条提示看不见。
+     ⚠ 光有 z-index 不够 —— 本元素必须 Teleport 到 body（见模板），
+       否则被困在 .shell 的 isolation 上下文里，10100 一样被预览压死。
+     详见 .char-ctx-menu 上方的层级契约。 */
+  z-index: 10100;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -10712,7 +10983,16 @@ const downloadTargetHint = computed(() => {
 }
 .search-modal-foot .secondary { min-width: 220px; height: 30px; border-radius: 8px; }
 
-.viewer-overlay { z-index: 10080 !important; }
+/* 画廊大图预览的层级：默认 10080，靠半透明遮罩压住画廊。
+   ⚠ 这里必须走 CSS 变量而不是写死数值：
+   之前是 `z-index: 10080 !important`，带 !important 的样式表声明会盖过元素上的
+   内联 style，导致「在预览里打开搜索浮层时把预览降到 10050」的 JS 完全失效
+   （改的是内联 style，被这条 !important 顶掉），表现为新开的搜索界面仍被预览挡住。
+   现在由 JS 只设置 --viewer-overlay-z 一个变量，层级仍集中在这一处定义。
+
+   选择器用 .crawler-viewer-overlay（本组件专属），而不是 .overlay-shell：
+   后者是全项目 15 个浮层共用的壳类，从 scoped 里去改它会波及所有浮层。 */
+.crawler-viewer-overlay { z-index: var(--viewer-overlay-z, 10080); }
 /* 跨日期搜索结果：宽工作区、分组标题和底部元信息，避免角标覆盖缩略图 */
 .search-modal { width: min(1680px, 98vw); max-height: 94vh; }
 .search-form { align-items: flex-end; }
@@ -10751,58 +11031,45 @@ const downloadTargetHint = computed(() => {
   .search-sort-field { flex: 1 1 100%; justify-content: space-between; }
   .search-sort-select { flex: 1 1 auto; }
 }
-/* 搜索结果 lightbox */
-.search-lightbox-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 10070;
-  background: rgba(8, 10, 24, 0.88);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 48px 24px 64px;
+/* 搜索结果预览沿用主 viewer 的 .viewer-corner-info / .viewer-toolbar，
+   这里只补两处搜索特有的元素：
+     1) 右上角信息栏里的「日期 + 库标签」（替代「第 N/M 张」计数）
+     2) 顶部工具栏里的「日期 / 库 / 文件名」行（画廊预览没有这行，信息由画廊本身承担） */
+.viewer-corner-meta {
+  gap: 8px;
+  cursor: default;
 }
-.search-lightbox-img,
-.search-lightbox-video {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  border-radius: 6px;
-}
-.search-lightbox-nopreview { color: #d8d5e2; font-size: 14px; }
-.search-lightbox-close {
-  position: absolute;
-  top: 12px;
-  right: 14px;
-  width: 34px; height: 34px;
-  /* 全局 button 带 padding:8px 12px，会把 × 字形挤偏；清零 + flex 双轴居中 */
-  padding: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none; border-radius: 50%;
-  background: rgba(255, 255, 255, 0.12);
-  box-shadow: none;
+.viewer-corner-date { color: #7dd3fc; font-size: 12px; font-weight: 600; }
+.viewer-corner-lib {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.82);
   color: #fff;
-  font-size: 20px;
-  line-height: 1;
-  cursor: pointer;
+  font-size: 10px;
+  line-height: 1.6;
 }
-.search-lightbox-close:hover { background: rgba(220, 38, 38, 0.7); box-shadow: none; }
-.search-lightbox-bar {
-  position: absolute;
-  left: 50%;
-  bottom: 14px;
-  transform: translateX(-50%);
+.viewer-meta-file {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 7px 12px;
-  border-radius: 10px;
-  background: rgba(20, 22, 40, 0.82);
-  max-width: 94vw;
+  min-width: 0;
 }
-.search-lightbox-date { color: #7dd3fc; font-size: 12px; font-weight: 600; }
-.search-lightbox-artist { color: #d8d5e2; font-size: 12px; margin-right: 4px; }
-.search-lightbox-bar button { height: 26px; padding: 0 10px; font-size: 12px; border-radius: 7px; }
+.viewer-meta-date { color: #7dd3fc; font-size: 12px; font-weight: 600; }
+.viewer-meta-lib {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(99, 102, 241, 0.82);
+  color: #fff;
+  font-size: 10px;
+  line-height: 1.6;
+  flex: 0 0 auto;
+}
+.viewer-meta-filename {
+  color: #d8d5e2;
+  font-size: 11.5px;
+  max-width: 34vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 </style>

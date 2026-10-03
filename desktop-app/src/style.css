@@ -36,6 +36,32 @@ body {
 
 ::selection { background: rgba(var(--accent-rgb), 0.22); color: var(--ink); }
 
+/* ── 图片浏览面不参与文本选择 ────────────────────────────────────────
+   画廊 / Tag 浏览 / 排行榜 / 日期范围浏览的缩略图，以及大图预览，本质是"看图"
+   而不是"读文本"。可左键按下滑动时浏览器仍会照普通文本框选处理：把图片本身、
+   以及压在图片上的角标（★ 分数 / ♥ 收藏 / ♡ 收藏按钮 / 原帖·本地·编辑）
+   整片刷上 ::selection 的强调色 —— 本主题这个色是棕 rgba(182,83,45,.22)，
+   铺满一屏缩略图非常突兀（实测画廊网格有 25% 像素被刷色）。
+   这里统一：图片不可选中，也不触发原生图片拖拽（<img> 默认 draggable，
+   按住拖会拖出一个半透明图片影子）；承载图片的网格 / 卡片 / 预览舞台同样不可选。
+   ⚠ 只关"看图"面：Caption 正文、词条翻译、输入框等需要复制的文本不受影响。
+   新增图片网格时，把网格容器类名补进下面这组选择器即可。 */
+img,
+video {
+  user-select: none;
+  -webkit-user-drag: none;
+}
+.gallery-grid,
+.image-card,
+.thumb-wrap,
+.browse-grid,
+.browse-cell,
+.search-group-grid,
+.viewer-stage,
+.viewer-image-wrap {
+  user-select: none;
+}
+
 ::-webkit-scrollbar {
   width: 9px;
   height: 9px;
@@ -745,22 +771,97 @@ input[type="range"]:focus {
   from { opacity: 0; }
   to { opacity: 1; }
 }
-.viewer-overlay {
+/* ================= 全屏浮层「壳」=================
+   只负责铺满视口 + 遮罩 + 淡入，**不含 z-index**。
+   层级由各浮层自己的类/内联样式决定，避免再出现「谁知道 viewer 是几层」的问题。
+
+   为什么单独抽出来：此前 15 个组件共用 `.viewer-overlay`（它自带 z-index: 30），
+   于是 z-index 实际散落在 3 个文件、靠约定维持，出过两次静默回归
+   （右键菜单被预览盖住、搜索浮层被预览盖住）。
+   详见 .workbuddy/memory/MEMORY.md 的浮层层级契约。
+
+   新增浮层请这样写：
+     <div class="overlay-shell my-dialog" style="z-index: 100xx">
+   并到下方「浮层层级表」登记。 */
+.overlay-shell {
   position: fixed;
   inset: 0;
-  z-index: 30;
   display: flex;
   flex-direction: column;
   background: rgba(10, 10, 10, 0.85);
   backdrop-filter: blur(12px);
   animation: fadeIn 0.3s ease-out;
 }
+
+/* 兼容别名：老的浮层组件仍写 class="viewer-overlay"。
+   它现在等价于 .overlay-shell（不再自带 z-index），
+   自定义层级请用各自组件的类或内联 style 指定。 */
+.viewer-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: rgba(10, 10, 10, 0.85);
+  backdrop-filter: blur(12px);
+  animation: fadeIn 0.3s ease-out;
+}
+
+/* ================= 浮层层级表（body 直接子节点，只比 z-index）=================
+   ⚠ 前提：**浮层必须 Teleport 到 body 才参与这张表的比较**。
+     `.shell.shell-compact` 上有 `isolation: isolate`，自成层叠上下文 ——
+     留在 .shell 里的浮层无论 z-index 多高，都会被整个 .shell 压住，
+     而 Teleport 到 body 的浮层（预览/搜索/Browse/chip 菜单/toast）是 .shell 的兄弟节点，
+     层级天然高于 .shell 内的一切。所以「要不要 Teleport」比「z-index 写多少」更根本。
+
+   判据：**这个浮层是否可能需要在预览之上出现？** 是 → 必须 Teleport + 层级 ≥ 10080。
+   同一层叠上下文里，后开的浮层必须显式高于它要遮住的浮层。数值集中在各定义处，
+   这里只做索引，改动前后请同步更新：
+
+     9000  .pg-picker-panel              页码选择面板
+    10000  .selection-list-card 等       工具型 modal（SelectionList / Crypto / Tutorials，
+                                         仅主界面可达，未 Teleport，留在 .shell 内）
+    10010  .translation-card 详情         词条详情弹窗
+    10020  .fav-modal / .merge-modal / .range-refresh-modal
+                                         收藏/合并/刷新范围 modal（仅主界面可达，未 Teleport）
+    10025  .caption-panel.floating       预览里的悬浮说明窗
+    10050  .crawler-viewer-overlay       预览让位给搜索/Browse 对话框时
+    10060  .search-modal-overlay         跨日期搜索浮层
+    10060  .browse-overlay               角色/画师浏览浮层（已 Teleport，否则会被预览压住）
+    10065  .bsl-card                     已选清单弹窗（从 Browse 里开，需盖住 Browse）
+    10080  .crawler-viewer-overlay       大图预览（默认态；画廊与搜索结果共用）
+    10080  .fav-page-viewer-overlay      收藏页大图查看器
+    10085  .translation-overlay          角色字典弹窗（可从预览进入）
+    10086  .translation-overlay          词条详情弹窗（可从预览进入）
+    10087  .fav-add-modal                加入画师/角色收藏弹窗（可从预览的 ★ 进入）
+    10090  .char-ctx-menu                角色/画师 chip 右键菜单
+    10095  .input-ctx-menu               输入框右键菜单（预览的跳页框/收藏弹窗里也会触发，
+                                         故必须高于预览，不能只跟对话框同级）
+    ── 通知带：永远是画面最上层，任何浮层都不能超过 ──
+    10100  .toast-stack                  顶部堆叠提示（CrawlerPage，已 Teleport）
+    10105  .copy-toast-pill              底部右键复制轻提示（App，已 Teleport）
+
+   ⚠ 「通知类」浮层同样受上面的 isolation 判据约束：toast-stack / copy-toast-pill
+     都必须 Teleport 到 body，否则预览里点「复制」弹出的成功提示会被预览盖住
+     （用户真报过：复制成功了却看不见提示）。
+
+   ⚠⚠ 比 z-index 更硬的一条：**Teleport 到 body 的浮层，宿主失活时必须主动关掉。**
+     App.vue 用 v-show 常驻 CrawlerPage（为保住画廊状态），切到打码/描述/收藏/姿态页时
+     组件并不会卸载 —— 而 Teleport 出去的元素不在它的 DOM 子树里，
+     v-show 的 display:none 管不到，于是浮层会继续盖在新页面上。
+     用户真报过：「预览里点编辑图片，打码页被预览整个盖住，什么都点不到」。
+     处理入口：CrawlerPage 的 `active` prop + `dismissFloatingLayers()`
+     （App.vue 传 `:active="activePage === 'crawler'"`）。
+     **新增任何 body 级浮层时，都要在 dismissFloatingLayers 里登记一条关闭逻辑。** */
 .viewer-toolbar {
-  position: absolute;
+  /* Teleport 到 body 的 fixed 浮层：贴视口顶部居中，工作栏永远浮在预览图片之上。
+     横向优先撑满（minus 左右各 24px），避免位置靠左的 chip 行塌成一竖条。 */
+  position: fixed;
   top: 24px;
   left: 50%;
   transform: translateX(-50%);
+  /* z-index 由 Vue 内联绑定（viewerOverlayZ + 1），这里只留兜底 */
   z-index: 40;
+  max-width: calc(100vw - 48px);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -778,6 +879,12 @@ input[type="range"]:focus {
   transform: translateX(-50%) translateY(calc(-100% - 32px));
   opacity: 0;
   pointer-events: none;
+}
+/* 工具栏已 Teleport 到 body：这里只是 overlay 顶部的占位，防止下方内容顶到工具栏位置。
+   高度对齐 .viewer-toolbar 的 24px 顶距 + 约 58px 实际高度。 */
+.viewer-toolbar-placeholder {
+  flex: 0 0 auto;
+  height: 82px;
 }
 .viewer-actions .pin-active {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
@@ -1048,6 +1155,109 @@ input[type="range"]:focus {
   background: var(--surface-muted);
   border-top: 1px solid var(--line);
 }
+
+/* ── 切分图片（split 模式）────────────────────────────────────────────── */
+.split-hint { margin-bottom: 10px; }
+.split-apply-label button { width: 100%; }
+
+.split-line-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 10px;
+  max-height: 132px;
+  overflow-y: auto;
+}
+.split-line-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-muted);
+  font-size: 11.5px;
+}
+.split-line-idx { color: var(--muted); flex: 0 0 auto; }
+.split-line-pos { flex: 1; color: var(--ink); font-variant-numeric: tabular-nums; }
+.split-line-del { flex: 0 0 auto; padding: 2px 8px; font-size: 11px; }
+
+.split-preview-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin: 8px 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.split-thumb-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.split-thumb { margin: 0; }
+.split-thumb-imgwrap {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+}
+.split-thumb-imgwrap img { display: block; width: 100%; height: auto; }
+.split-thumb-badge {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: rgba(15, 20, 32, 0.78);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+.split-thumb figcaption {
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--muted);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 有序复制进度条 */
+.split-copy-progress {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: var(--surface-muted);
+}
+.split-copy-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.split-copy-text { font-size: 12px; color: var(--ink); font-weight: 600; }
+.split-copy-next,
+.split-copy-done {
+  flex: 0 0 auto;
+  padding: 3px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  border: 1px solid var(--line-strong);
+  background: var(--surface);
+  color: var(--ink);
+}
+.split-copy-next { background: var(--accent); color: #fff; border-color: var(--accent); }
+.split-copy-actions { display: flex; gap: 8px; margin-top: 6px; }
+.split-copy-actions button { flex: 1; padding: 3px 8px; font-size: 11px; }
 
 .stats { display: flex; gap: 10px; color: var(--muted); font-size: 13px; }
 .editor-wrap {
@@ -1899,10 +2109,12 @@ h2 { letter-spacing: -0.35px; }
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.9);
   box-shadow: 0 3px 12px rgba(30, 41, 82, 0.04);
-  transition: transform 0.16s ease, box-shadow 0.16s ease, border-color 0.16s ease;
+  /* 悬停只用阴影/边框反馈，不要 translateY。
+     卡片上浮会让盒子整体位移，鼠标停在卡片底边几个像素上时
+     会反复进入/离开 hover，卡片抖动抽搐。 */
+  transition: box-shadow 0.16s ease, border-color 0.16s ease;
 }
 .image-card:hover {
-  transform: translateY(-2px);
   border-color: rgba(var(--accent-rgb), 0.25);
   box-shadow: 0 10px 22px rgba(30, 41, 82, 0.10);
 }
@@ -2105,6 +2317,7 @@ input, select, textarea { border-radius: 7px; }
 .gallery-grid { gap: 12px; }
 .image-card { border-radius: 9px; box-shadow: 0 2px 8px rgba(25, 31, 38, 0.05); }
 .image-card:hover { box-shadow: 0 8px 18px rgba(25, 31, 38, 0.1); }
+/* 悬停只加深阴影，不做 translateY（同上方 .image-card:hover 的抽搐说明）。 */
 .log-panel { border-radius: 9px; }
 
 /* Toolbar dropdowns open on hover. A click must not leave a menu pinned open. */
@@ -2152,7 +2365,9 @@ input, select, textarea { border-radius: 7px; }
   left: 50%;
   bottom: 32px;
   transform: translateX(-50%);
-  z-index: 9999;
+  /* 通知带（10100+）：必须高于大图预览(10080)，否则预览里复制时提示被盖住。
+     注意本元素已 Teleport 到 body —— 光写 z-index 不够，留在 .shell 里会被 isolation 压死。 */
+  z-index: 10105;
   padding: 8px 18px;
   border-radius: 999px;
   background: rgba(40, 32, 24, 0.92);

@@ -21,9 +21,9 @@ function close() { open.value = false; }
 <template>
   <div
     v-if="state.open"
-    class="viewer-overlay"
+    class="overlay-shell"
     @click.self="close"
-    style="z-index: 10020; display: flex; justify-content: center; align-items: center; padding: 24px;"
+    style="z-index: 10087; display: flex; justify-content: center; align-items: center; padding: 24px;"
   >
     <div class="fav-add-modal">
       <div class="fav-add-head">

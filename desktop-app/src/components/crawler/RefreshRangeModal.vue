@@ -24,9 +24,14 @@ function confirm() { emit('confirm'); }
 </script>
 
 <template>
+  <!-- 未 Teleport 到 body 是有意的：本弹窗只在主界面（分页栏）可达，
+       预览打开时用不到，所以不需要浮在预览之上。
+       留在 .shell 内即可 —— 但注意 .shell 有 isolation:isolate，
+       一旦将来需要从预览里打开它，必须改成 Teleport 到 body 并提到 ≥10080。
+       完整层级契约见 src/style.css 的「浮层层级表」。 -->
   <div
     v-if="state.open"
-    class="viewer-overlay"
+    class="overlay-shell"
     @click.self="close"
     style="z-index: 10020; display: flex; justify-content: center; align-items: center; padding: 24px;"
   >

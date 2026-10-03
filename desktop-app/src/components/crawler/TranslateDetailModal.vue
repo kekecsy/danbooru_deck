@@ -57,7 +57,9 @@ function parsePastedJson() {
 </script>
 
 <template>
-  <div v-if="state.open" class="viewer-overlay translation-overlay" @click.self="close" style="z-index: 10010;">
+  <!-- 词条详情：叠在 TranslationModal(10085) 之上，故取 10086；
+       同样高于画廊预览（10080），低于右键菜单(10090)与 toast(10100)。 -->
+  <div v-if="state.open" class="overlay-shell translation-overlay" @click.self="close" style="z-index: 10086;">
     <div class="translation-card translation-detail-card">
       <div class="translation-head">
         <div style="min-width: 0;">

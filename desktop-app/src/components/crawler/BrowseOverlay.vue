@@ -133,7 +133,7 @@ function submitJump() {
 </script>
 
 <template>
-  <div v-if="state.open" class="viewer-overlay browse-overlay" @click.self="close">
+  <div v-if="state.open" class="overlay-shell browse-overlay" @click.self="close">
     <div class="browse-card">
       <div class="browse-head">
         <div class="browse-head-title">
@@ -415,6 +415,13 @@ function submitJump() {
   align-items: stretch;
   background: rgba(38, 46, 68, 0.16);
   backdrop-filter: blur(8px) saturate(115%);
+  /* 层级现在名正言顺地写在这里：
+     改用 .overlay-shell 之前，本组件复用了全局 .viewer-overlay，而 CrawlerPage.vue 的
+     scoped 规则 `.viewer-overlay[data-v-…] { z-index: … }` 与 `.browse-overlay[data-v-…]`
+     特异性相同、却排在打包产物更后面，会把这里的声明覆盖掉 —— 当时只能把层级塞进内联
+     style 兜底。拆出 .overlay-shell（不含 z-index）后，这条规则不再被任何东西覆盖。
+     10060 = 与跨日期搜索浮层同级，高于预览让位态(10050)，低于预览默认态(10080)。 */
+  z-index: 10060;
 }
 .browse-card {
   width: min(1200px, 96vw);

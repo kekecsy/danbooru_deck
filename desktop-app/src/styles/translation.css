@@ -11,8 +11,10 @@
   font-size: 11px;
   line-height: 1.5;
 }
+/* 布局壳（居中卡片）；z-index 不在这里定义 ——
+   字典弹窗 10085 / 词条详情 10086，写在各自模板的内联 style 上，
+   因为两者层级不同，且需要显式高于画廊预览(10080)。总表见 style.css 的「浮层层级表」。 */
 .translation-overlay {
-  z-index: 10000;
   display: flex;
   justify-content: center;
   align-items: center;

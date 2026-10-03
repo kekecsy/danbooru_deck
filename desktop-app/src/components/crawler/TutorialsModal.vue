@@ -76,7 +76,7 @@ async function revealFolder(key) {
 <template>
   <div
     v-if="open"
-    class="viewer-overlay"
+    class="overlay-shell"
     @click.self="close"
     style="z-index: 10000; display: flex; justify-content: center; align-items: center;"
   >

@@ -29,7 +29,12 @@ function close() { open.value = false; }
 </script>
 
 <template>
-  <div v-if="state.open" class="viewer-overlay translation-overlay" @click.self="close">
+  <!-- 角色字典 / 未翻译角色弹窗。
+       z-index 10085：刻意高于画廊大图预览（.viewer-overlay 默认 10080），
+       因为字典弹窗可能从右键菜单里、在预览打开的状态下弹出，必须盖住预览；
+       同时低于 .char-ctx-menu(10090) 与 .toast-stack(10100)。
+       （此前沿用 .viewer-overlay 的兜底 z-index，实际低于预览，只是极少同时出现才没暴露。） -->
+  <div v-if="state.open" class="overlay-shell translation-overlay" @click.self="close" style="z-index: 10085;">
     <div class="translation-card">
       <div class="translation-head">
         <div>

@@ -200,7 +200,12 @@ onBeforeUnmount(() => { if (toastTimer) clearTimeout(toastTimer); });
 /* 复用 char-ctx-menu 风格：白底圆角 + 1px 边 + 阴影 + 柔和弹出动画 */
 .input-ctx-menu {
   position: fixed;
-  z-index: 10060;  /* 高于 viewer-overlay(9999) / caption-panel(10025) / toast(10030) / 合并 modal(10020) */
+  /* 10095：右键菜单带，低于通知带(.toast-stack 10100 / .copy-toast-pill 10105)。
+     ⚠ 必须高于大图预览(10080)：预览角标里就有「跳页」输入框(.viewer-corner-jump)，
+       收藏弹窗(10087)里也有输入框 —— 之前写 10060 并注释「不会在预览里触发」是错的，
+       实测右键预览里的跳页输入框，菜单会被预览整个盖住、看不见。
+     本元素自带 <Teleport to="body">（见模板），无需依赖宿主位置。 */
+  z-index: 10095;
   min-width: 168px;
   background: var(--panel, #fdf6e3);
   border: 1px solid var(--line, rgba(0, 0, 0, 0.12));

@@ -1284,7 +1284,7 @@ onMounted(loadFavorites);
     </section>
 
     <!-- 手动添加 modal -->
-    <div v-if="manualAdd.open" class="viewer-overlay fav-overlay" @click.self="closeManualAdd">
+    <div v-if="manualAdd.open" class="overlay-shell fav-overlay" @click.self="closeManualAdd">
       <div class="fav-modal">
         <div class="fav-modal-head">
           <h3>{{ currentMeta.addTitle }}</h3>
@@ -1322,7 +1322,7 @@ onMounted(loadFavorites);
     <!-- 重命名分组 modal（替代原本的 prompt()，因为 Electron renderer 里 prompt 是空实现） -->
     <div
       v-if="renameGroupModal.open"
-      class="viewer-overlay fav-overlay"
+      class="overlay-shell fav-overlay"
       @click.self="closeRenameGroupModal"
     >
       <div class="fav-modal">
@@ -1362,7 +1362,7 @@ onMounted(loadFavorites);
     <!-- 新建分组 modal（替代原本的 prompt()） -->
     <div
       v-if="createGroupModal.open"
-      class="viewer-overlay fav-overlay"
+      class="overlay-shell fav-overlay"
       @click.self="closeCreateGroupModal"
     >
       <div class="fav-modal">
@@ -1398,7 +1398,7 @@ onMounted(loadFavorites);
     <!-- 通用 confirm modal（替代所有 confirm()） -->
     <div
       v-if="favConfirm.open"
-      class="viewer-overlay fav-overlay"
+      class="overlay-shell fav-overlay"
       @click.self="_resolveFavConfirm(false)"
       @keyup.esc="_resolveFavConfirm(false)"
     >
@@ -1425,8 +1425,9 @@ onMounted(loadFavorites);
       </div>
     </div>
 
-    <!-- 大图查看器（与抓图页同款） -->
-    <div v-if="viewer.open" class="viewer-overlay" @click.self="closeViewer" @mousemove="onViewerMouseMove" @mouseleave="viewer.toolbarHovered = false">
+    <!-- 大图查看器（与抓图页同款）。
+         层级 10080 与画廊 viewer 对齐；本页的 fav-modal 层级更低(10000)且与 viewer 互斥。 -->
+    <div v-if="viewer.open" class="overlay-shell fav-page-viewer-overlay" @click.self="closeViewer" @mousemove="onViewerMouseMove" @mouseleave="viewer.toolbarHovered = false">
       <!-- 顶部信息 / 操作栏：跟抓图页同款，画师/角色 token 可点复制 -->
       <div class="viewer-toolbar fav-viewer-toolbar" :class="{ 'is-hidden': !viewerToolbarVisible }">
         <div class="viewer-toolbar-info">
@@ -1785,7 +1786,7 @@ onMounted(loadFavorites);
 .search-clear-btn:hover { background: rgba(157, 44, 44, 0.7); }
 
 /* ---------------- 大图 viewer 样式（对齐抓图页） ----------------
-   全局 style.css 已经给了 .viewer-overlay / .viewer-toolbar / .viewer-stage /
+   全局 style.css 已经给了 .overlay-shell / .viewer-toolbar / .viewer-stage /
    .viewer-image / .viewer-nav-arrow 这些基础骨架，剩下组件级（meta block、token chip、
    fav btn、corner info、按钮行配色等）在 CrawlerPage 的 <style scoped> 里，跨组件不共享，
    所以收藏页这里抄一份。 */
@@ -2404,6 +2405,11 @@ onMounted(loadFavorites);
   justify-content: center;
   align-items: center;
   padding: 24px;
+}
+/* 收藏页大图查看器：层级与画廊 viewer 对齐(10080)，高于本页的 fav-modal(10000)。
+   收藏页没有字符/画师的浮动对话框，因此这里不需要画廊那套「让位」动态层级。 */
+.fav-page-viewer-overlay {
+  z-index: 10080;
 }
 .fav-modal {
   width: 480px;
