@@ -10213,11 +10213,18 @@ const downloadTargetHint = computed(() => {
 .gallery-panel .gallery-grid {
   gap: 8px;
   padding: 0;
-  /* Do not stretch the grid to the panel's remaining height. The pager
-     should sit directly after the last image row. */
-  flex: 0 0 auto;
-  min-height: auto;
-  overflow: visible;
+  /* ⚠ 网格是本页**唯一**的滚动区，不要退回 flex: 0 0 auto + overflow: visible。
+     退回后图一多网格就会顶破面板，滚动被推到外层 .content-frame 上 —— 于是左栏
+     （正好一屏高）和工具栏跟着一起滚上去，下面露出页面底色。用户报的「画廊下滑时
+     左侧红框那一栏跟着动」就是这个。判据：左栏 / 工具栏是不是 `position: sticky`
+     不重要，**重要的是页面根本不该有可滚的溢出**。
+     flex: 1 1 auto + min-height: 0 让它吃掉 head / pager 之外的剩余高度并可收缩；
+     overflow-y: auto 覆盖全局 .gallery-grid 的 overflow: auto，横向显式关掉
+     （auto-fill + 1fr 永不横向溢出，留着只会多一条无用的横向滚动条）。 */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .gallery-panel .cr-pg-bar {
@@ -10225,9 +10232,9 @@ const downloadTargetHint = computed(() => {
   margin: 0;
 }
 
-/* When pagination is present, distribute spare height between the calendar,
-   toolbar, image grid and pager. This keeps the pager at the bottom without
-   leaving a dead area underneath it; with many rows the gaps naturally shrink. */
+/* 分页栏贴底。网格（或空态）用 flex: 1 1 auto 吃掉剩余高度后，space-between 在
+   正常有图时已经是空操作 —— 留着是为了「空态 / 网格缺席」那一路仍能把分页栏压到底，
+   以及在网格 flex 被改动时不至于把分页栏留在半空。 */
 .gallery-panel:has(.cr-pg-bar) {
   justify-content: space-between;
 }
