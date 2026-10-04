@@ -214,6 +214,11 @@ class DownloadJob:
     page_total: int = 0                                   # 抓取 ID 阶段：当前 scope 的总页数（0 = 隐藏页进度条）
     page_done_count: int = 0                              # 抓取 ID 阶段：已完整跑完的页数（不论成功失败）
                                                            # 前端用 (page_done_count - failed_pages.length) 算"成功 X 页"
+    list_cache: dict = field(default_factory=dict)         # 列表页「窗口缓存」，见 _list_posts_for_page：
+                                                           # {(source, date): {"first":窗口首页, "posts":[...],
+                                                           #   "failed":bool, "exhausted":bool}}
+    list_request_count: int = 0                            # 本次 job 已发出的「列表请求」数（页间休息按它计，
+                                                           # 不按页 —— 一个请求覆盖 10~50 页）
     download_concurrency: int = 4                          # 单任务内图片下载并发度（rank→download_ids 阶段也用它）
     skip_logged: bool = True                                # rank·按ID下载 专用：False 时 task_download_ids 不走 log_store 早退
     retry_only: bool = False                                # download_ids 重试失败图专用：True 时只下 inline ids，不消费 folder backlog
@@ -1357,7 +1362,33 @@ class ImageFavoriteRemoveRequest(BaseModel):
 # 3. 核心爬虫逻辑：所有 grabber 都按 job 跑，不再读模块全局
 # ==========================================
 
-def _fetch_page_or_pause(fetch_fn, job, label, page=None):
+def _note_failed_page(job, page=None):
+    """页级抓取失败的统一记账：记 failed_pages → 累计连续失败数 → 达阈值 auto-pause。
+
+    抽出来是因为有两个入口都要记账：`_fetch_page_or_pause` 里真打了请求并撞上永久
+    错误的这次，以及「窗口缓存命中同窗口已失败」的后续页（那次没打请求，但页确实
+    也失败了，不记的话它会被前端算成「成功 X 页」）。
+
+    page=None 时只累计连续失败数、不记 failed_pages —— 与旧行为的条件分支一致。
+    返回 False 表示任务已被用户停止，调用方必须立刻收尾。
+    """
+    if page is not None:
+        job.record_failed_page(page)
+    job.consecutive_page_failures += 1
+    if job.consecutive_page_failures >= CONSECUTIVE_PAGE_FAILURE_THRESHOLD:
+        job.append_log(
+            f"⚠ 连续 {job.consecutive_page_failures} 张/页永久失败，"
+            f"已自动暂停任务等待用户决策。"
+        )
+        job.play_event.clear()
+        job.play_event.wait()
+        if not job.is_running:
+            return False
+        job.consecutive_page_failures = 0
+    return True
+
+
+def _fetch_page_or_pause(fetch_fn, job, label, page=None, on_permanent_error=None):
     """对「页面列表抓取」的统一容错层。区分两类失败：
 
     - 永久错误（400 非法查询 / 403 / 404，PermanentHTTPError）：等待无意义，
@@ -1369,6 +1400,11 @@ def _fetch_page_or_pause(fetch_fn, job, label, page=None):
       play_event 挂起等用户。用户等风控冷却后点「继续」会重新抓同一页（外层
       while 再走一整轮尝试），点「停止」则收尾返回 None。这样 1-50 页任务在第 10
       页撞限流时不会牺牲 10,11,12…，等多久都行，恢复后零遗漏。
+
+    on_permanent_error：命中永久错误时的回调，让调用方把「这一整块都坏了」记下来
+    （窗口缓存用）—— 少了它，热门一个 50 页的窗口失败会连打 50 次注定失败的请求、
+    连原地暂停 50 次。成功返回前还会走一次 _rest_after_list_request（按**请求**计数的
+    防风控休息，不再按页计 —— 一个请求现在覆盖 10~50 页）。
 
     返回值约定：
       - list：成功（fetch_fn 返回值）或永久错误跳过后的 []。
@@ -1401,19 +1437,13 @@ def _fetch_page_or_pause(fetch_fn, job, label, page=None):
                 job.append_log(
                     f"{label} 永久失败（HTTP {e.status_code}），不再重试：{e.url or e}"
                 )
-                if page is not None:
-                    job.record_failed_page(page)
-                job.consecutive_page_failures += 1
-                if job.consecutive_page_failures >= CONSECUTIVE_PAGE_FAILURE_THRESHOLD:
-                    job.append_log(
-                        f"⚠ 连续 {job.consecutive_page_failures} 张/页永久失败，"
-                        f"已自动暂停任务等待用户决策。"
-                    )
-                    job.play_event.clear()
-                    job.play_event.wait()
-                    if not job.is_running:
-                        return None
-                    job.consecutive_page_failures = 0
+                if on_permanent_error is not None:
+                    # 让调用方把「这一整块都坏了」记下来（窗口缓存用）。少了这个回调，
+                    # 同窗口的后续页会各发一次注定失败的请求、各原地暂停一次 ——
+                    # 热门一个窗口 50 页就是 50 次暂停。
+                    on_permanent_error()
+                if not _note_failed_page(job, page):
+                    return None
                 return []
             except Exception as e:
                 last_err = e
@@ -1426,6 +1456,7 @@ def _fetch_page_or_pause(fetch_fn, job, label, page=None):
             # 该页曾失败、这次拿到了：内存 + deck.db 双清，失败横幅不再挂它
             if page is not None:
                 job.clear_failed_page(page)
+            _rest_after_list_request(job)
             return result
 
         # 瞬时错误：静默重试全部耗尽。不记失败页、不跳页 —— 原地暂停等用户冷却后继续。
@@ -1441,19 +1472,25 @@ def _fetch_page_or_pause(fetch_fn, job, label, page=None):
         job.append_log(f"用户已继续，重新抓取 {label}…")
 
 
-def _rest_between_pages(idx, job, n=5, rest_seconds=15):
-    """每抓 N 页休息 rest_seconds 秒（防风控）。idx 是 1-based 页序号。
-    命中条件 idx % n == 0；可被 is_running / play_event（暂停）打断，
-    风格与 popular_range 跨日 throttle 一致。
+def _rest_after_list_request(job, n=5, rest_seconds=15):
+    """每发出 N 个「列表请求」休息 rest_seconds 秒（防风控）。
 
-    默认 5 页 / 15 秒：Danbooru 热门页与排行榜页对短时间内连续请求敏感（频繁出
-    403 / 422 或返回空），5/15 是在「不浪费太多时间」与「稳定抓完 50 页」之间的
-    经验值。覆盖所有走这个函数的 mode：rank / popular / popular_collect_ids /
-    popular_download_ids / popular_range* / tags / recover——限流对它们都只会更安全，
-    不会让任何抓取模式受害。"""
-    if idx <= 0 or idx % n != 0:
+    ⚠ 计数单位是**请求**，不是页。旧版按页计（每 5 页休息 15 秒）在「一页 = 一个请求」
+    的年代与按请求计完全等价；现在一个请求覆盖 10 页（rank/tags）/ 50 页（popular），
+    再按页计就是纯白等 —— 一次 1000 页的热门任务要休息 200 次 × 15s ≈ 50 分钟。
+    按请求计则**请求速率与旧实现逐字相同**（都是 5 个请求 / 20 秒窗口），只是不再为
+    已经省掉的请求付休息费。
+
+    在 _fetch_page_or_pause 的「成功」分支里调用：所有列表抓取（rank / collect_ids /
+    popular* / popular_range* / tags / recover）都从那里过一遍，一处覆盖全部。
+    可被 is_running / play_event（暂停）打断，风格与 popular_range 跨日 throttle 一致。
+    """
+    job.list_request_count += 1
+    if job.list_request_count % n != 0:
         return
-    job.append_log(f"已抓取 {idx} 页，休息 {rest_seconds} 秒防风控（可暂停/停止打断）...")
+    job.append_log(
+        f"已发出 {job.list_request_count} 个列表请求，休息 {rest_seconds} 秒防风控（可暂停/停止打断）..."
+    )
     slept = 0
     while slept < rest_seconds:
         if not job.is_running:
@@ -1462,7 +1499,128 @@ def _rest_between_pages(idx, job, n=5, rest_seconds=15):
         sleep(1)
         slept += 1
     if job.is_running:
-        job.append_log(f"休息结束，继续抓取下一页。")
+        job.append_log("休息结束，继续抓取。")
+
+
+# ---------------- 列表页「窗口缓存」：一次请求拿多页 ID ----------------
+# Danbooru 没有多页语法（实测 page=1,2,3 被当成 page=1），但 limit 可以开到
+# danbooru_api.LIST_LIMIT_MAX —— 实测「大 limit」与「多页顺序拼接」**逐位相同**。
+# 于是「第 N 页的 posts」完全可以从一块更大的窗口里切出来，同窗口内的后续页零请求。
+#
+# 约束：offset 只能是 (page-1) × limit，不能任意指定起点。所以窗口起点必须落在
+# 「页网格」上：块大小取端点上限（rank/tags 200 = 10 页，popular 1000 = 50 页），
+# 窗口首页 = 1 + k×bpp，正好对应 offset 0 / limit / 2×limit…
+#
+# 为什么不把页循环直接改成块循环：页游标（deck.db page_cursor）、failed_pages（页级）、
+# 前端「N/M 页」进度全按「一页 = LIST_PAGE_SIZE 张」记账。把缓存压在这一层，
+# 那些语义一行都不用动，四个 mode 的循环体也保持原样。
+STOPPED = object()  # 「任务被停止」哨兵 —— 区别于「这一页本身是空的」
+
+# 窗口请求的响应体比单页大得多（1000 条 × 46 字段 ≈ 1MB），实测热门 limit=1000
+# 要 6~10 秒。老的单页默认 timeout=20 太紧，这里单独放宽。
+LIST_WINDOW_TIMEOUT = 45
+
+
+def _window_geometry(source, page_num):
+    """第 page_num 页落在哪个服务端窗口。返回 (窗口首页, 窗口覆盖页数, 服务端 page 参数)。
+
+    三个返回值都必要，第三个是最容易搞错的那个 —— Danbooru 的 offset 恒为
+    `(page-1) × limit`，所以「窗口首条帖子的 offset」必须用**窗口自己的 limit**
+    重新换算成页码，不能把 20 网格里的 first 直接当 page 参数发出去：
+
+        offset      = (first-1) × LIST_PAGE_SIZE
+        server_page = offset // limit + 1 = (first-1) // pages_per_window + 1
+
+    例（popular，limit=1000，50 页一窗）：first=1→page=1、first=51→page=2、first=101→page=3。
+    发成 page=51&limit=1000 = offset 50000，远超单日 3000 条上限 → **整窗返空**。
+    """
+    per_req = danbooru_api.LIST_LIMIT_MAX.get(source, danbooru_api.LIST_PAGE_SIZE)
+    pages_per_window = max(1, per_req // danbooru_api.LIST_PAGE_SIZE)
+    first = ((page_num - 1) // pages_per_window) * pages_per_window + 1
+    server_page = (first - 1) // pages_per_window + 1
+    return first, pages_per_window, server_page
+
+
+def _slice_page(window_posts, page_offset_in_window):
+    """从窗口里切出第 page_offset_in_window 页（0-based）的那 LIST_PAGE_SIZE 条。"""
+    lo = page_offset_in_window * danbooru_api.LIST_PAGE_SIZE
+    return window_posts[lo:lo + danbooru_api.LIST_PAGE_SIZE]
+
+
+def _list_posts_for_page(job, source, page_num, fetch_fn, label, scope=None):
+    """取第 page_num 页的 posts，走窗口缓存（同窗口内的后续页零请求）。
+
+    fetch_fn(server_page, limit) -> list，具体打哪个端点由调用方给。⚠ 第一个参数是
+    **_window_geometry 换算出的「limit 网格页码」**，不是 20 网格里的窗口首页
+    （见 _window_geometry 的 docstring）。
+    返回该页的 posts 列表（可能为空 = 这一页确实没有数据）；
+    或 STOPPED，表示任务已被停止，调用方必须立刻收尾（语义同 _fetch_page_or_pause 的 None）。
+
+    scope 只用来给缓存分域，传「同一 source 下会变、且变了结果就不同」的维度：
+    popular 传 target_date（popular_range 逐日切目标，不隔离的话「第二天的第 1 页」
+    会读到「第一天的第 1-50 页」那块缓存），tags 传 tag_query（同一 job 可能换词重试）。
+    """
+    first, pages_per_window, server_page = _window_geometry(source, page_num)
+    last = first + pages_per_window - 1
+    key = (source, scope)
+    st = job.list_cache.get(key)
+
+    # ⚠ 顺序有讲究：failed 必须排在 exhausted 前面判，而且要判 st["first"] == first。
+    #   ① 一次永久错误（403/404/410）会把 failed 置上；若先判 exhausted，后面 9~49 页
+    #      会被当成「已经翻到头了」静默返回空 —— 既不进 failed_pages 也不报错，
+    #      前端会把这些页算进「成功 X 页」，失败横幅漏报。
+    #   ② failed 是「这一块坏了」，只对同一块成立；跨到下一块要重新请求，
+    #      不加 first 判断会把失败状态无限传染给后续所有块。
+    if st is not None and st.get("first") == first and st.get("failed"):
+        # 同一窗口此前已判永久失败：本页也按失败记账，但不再打请求、不再原地暂停一次
+        # —— 否则热门一个 50 页的窗口失败会连暂停 50 次。
+        job.append_log(
+            f"{label} 第 {page_num} 页跳过：同窗口（第 {first}-{last} 页）此前已判失败"
+        )
+        if not _note_failed_page(job, page_num):
+            return STOPPED
+        return []
+
+    # 这一块此前已确认翻到数据尽头：后面的页全空，一个请求都不必再发。
+    # 热门单日上限 3000 条、排行榜 5699 条，请求页范围超过它时后面全是空页。
+    # exhausted 是「数据到此为止」，对后面所有块都成立，所以不判 first。
+    if st is not None and st.get("exhausted"):
+        return []
+
+    if st is None or st.get("first") != first:
+        st = {"first": first, "posts": None, "failed": False, "exhausted": False}
+        job.list_cache[key] = st
+
+        def _mark_window_failed():
+            st["failed"] = True
+
+        limit = pages_per_window * danbooru_api.LIST_PAGE_SIZE
+        # server_page 的来历见 _window_geometry 的 docstring —— 这里发错的代价是
+        # 「first > 1 的窗口整块返空」，而且会被误标 exhausted、后续页静默跳过。
+        job.append_log(
+            f"{label} 批量获取第 {first}-{last} 页"
+            f"（1 个请求，page={server_page}&limit={limit}，host={danbooru_api.get_host()}）"
+        )
+        got = _fetch_page_or_pause(
+            lambda: fetch_fn(server_page, limit), job,
+            label=f"{label} 第 {first}-{last} 页", page=page_num,
+            on_permanent_error=_mark_window_failed,
+        )
+        if got is None:
+            return STOPPED
+        if not got:
+            if st.get("failed"):
+                # 请求整体失败（永久错误）—— 不是「翻到头了」，绝不能标 exhausted，
+                # 否则这个窗口剩下的页会被当成空页静默跳过。
+                return []
+            # 请求成功却一条都没有 = 真的翻到数据末尾了
+            st["exhausted"] = True
+            job.append_log(f"{label} 第 {first}-{last} 页为空（已到数据末尾），后续页不再请求。")
+            return []
+        st["posts"] = got
+        return _slice_page(got, page_num - first)
+
+    return _slice_page(st.get("posts") or [], page_num - first)
 
 
 def _process_post(post, job, do_download=True):
@@ -1641,12 +1799,14 @@ def grabber_rank(job, page_num):
     if not job.is_running:
         return [], page_need_update
 
-    job.append_log(f"[Rank] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
-    posts = _fetch_page_or_pause(
-        lambda: danbooru_api.get_posts_by_rank(page_num), job,
-        label=f"[Rank] 第 {page_num} 页", page=page_num
+    posts = _list_posts_for_page(
+        job, "rank", page_num,
+        lambda first, limit: danbooru_api.get_posts_by_rank(
+            first, limit=limit, timeout=LIST_WINDOW_TIMEOUT
+        ),
+        label="[Rank]",
     )
-    if posts is None:
+    if posts is STOPPED:
         # 任务被停止（用户点「停止」或 _fetch_page_or_pause 内 auto-pause 退出）
         return [], {"1": [], "2": []}
 
@@ -1671,12 +1831,14 @@ def grabber_popular(job, page_num, target_date):
     if not job.is_running:
         return [], page_need_update
 
-    job.append_log(f"[Popular] 正在获取 {target_date} 第 {page_num} 页... (host={danbooru_api.get_host()})")
-    posts = _fetch_page_or_pause(
-        lambda: danbooru_api.get_popular_posts(target_date, page_num),
-        job, label=f"[Popular] {target_date} 第 {page_num} 页", page=page_num
+    posts = _list_posts_for_page(
+        job, "popular", page_num,
+        lambda first, limit: danbooru_api.get_popular_posts(
+            target_date, first, limit=limit, timeout=LIST_WINDOW_TIMEOUT
+        ),
+        label=f"[Popular] {target_date}", scope=target_date,
     )
-    if posts is None:
+    if posts is STOPPED:
         return [], {"1": [], "2": []}
 
     page_success, page_skipped, page_failed = _process_posts_concurrent(
@@ -1706,12 +1868,14 @@ def grabber_popular_collect_ids(job, page_num, target_date):
     if not job.is_running:
         return [], page_need_update
 
-    job.append_log(f"[Popular:Collect] 正在获取 {target_date} 第 {page_num} 页... (host={danbooru_api.get_host()})")
-    posts = _fetch_page_or_pause(
-        lambda: danbooru_api.get_popular_posts(target_date, page_num),
-        job, label=f"[Popular:Collect] {target_date} 第 {page_num} 页", page=page_num
+    posts = _list_posts_for_page(
+        job, "popular", page_num,
+        lambda first, limit: danbooru_api.get_popular_posts(
+            target_date, first, limit=limit, timeout=LIST_WINDOW_TIMEOUT
+        ),
+        label=f"[Popular:Collect] {target_date}", scope=target_date,
     )
-    if posts is None:
+    if posts is STOPPED:
         return [], {"1": [], "2": []}
 
     for post in posts:
@@ -1751,12 +1915,22 @@ def grabber_tags(job, page_num, tag_query, tag_source="danbooru"):
     api = gelbooru_api if source == "gelbooru" else danbooru_api
     source_label = "Gelbooru" if source == "gelbooru" else "Danbooru"
 
-    job.append_log(f"[Tags:{source_label}] 正在获取 [{tag_query}] 第 {page_num} 页... (host={api.get_host()})")
-    posts = _fetch_page_or_pause(
-        lambda: api.get_posts_by_tags(tag_query, page_num),
-        job, label=f"[Tags:{source_label}] [{tag_query}] 第 {page_num} 页", page=page_num
-    )
-    if posts is None:
+    if source == "gelbooru":
+        # gelbooru 的 limit 上限没实测过，保持一页一个请求（不套窗口缓存）。
+        job.append_log(f"[Tags:{source_label}] 正在获取 [{tag_query}] 第 {page_num} 页... (host={api.get_host()})")
+        posts = _fetch_page_or_pause(
+            lambda: api.get_posts_by_tags(tag_query, page_num),
+            job, label=f"[Tags:{source_label}] [{tag_query}] 第 {page_num} 页", page=page_num
+        )
+    else:
+        posts = _list_posts_for_page(
+            job, "tags", page_num,
+            lambda first, limit: api.get_posts_by_tags(
+                tag_query, first, limit=limit, timeout=LIST_WINDOW_TIMEOUT
+            ),
+            label=f"[Tags:{source_label}] [{tag_query}]", scope=tag_query,
+        )
+    if posts is STOPPED or posts is None:
         return [], {"1": [], "2": []}
 
     page_success, page_skipped, page_failed = _process_posts_concurrent(
@@ -1781,12 +1955,14 @@ def grabber_collect_ids(job, page_num):
     if not job.is_running:
         return [], page_need_update
 
-    job.append_log(f"[CollectIDs] 正在获取第 {page_num} 页... (host={danbooru_api.get_host()})")
-    posts = _fetch_page_or_pause(
-        lambda: danbooru_api.get_posts_by_rank(page_num), job,
-        label=f"[CollectIDs] 第 {page_num} 页", page=page_num
+    posts = _list_posts_for_page(
+        job, "rank", page_num,
+        lambda first, limit: danbooru_api.get_posts_by_rank(
+            first, limit=limit, timeout=LIST_WINDOW_TIMEOUT
+        ),
+        label="[CollectIDs]",
     )
-    if posts is None:
+    if posts is STOPPED:
         return [], {"1": [], "2": []}
 
     for post in posts:
@@ -2102,11 +2278,14 @@ def task_popular_recover(job, start_page, end_page):
                                or (page_num - start_page + 1) % 5 == 0)
         if is_progress_log:
             job.append_log(f"[Recover] 正在拉取 {target_date} 第 {page_num}/{progress_last} 页...")
-        posts = _fetch_page_or_pause(
-            lambda: danbooru_api.get_popular_posts(target_date, page_num),
-            job, label=f"[Recover] {target_date} 第 {page_num} 页", page=page_num
+        posts = _list_posts_for_page(
+            job, "popular", page_num,
+            lambda first, limit: danbooru_api.get_popular_posts(
+                target_date, first, limit=limit, timeout=LIST_WINDOW_TIMEOUT
+            ),
+            label=f"[Recover] {target_date}", scope=target_date,
         )
-        if posts is None:
+        if posts is STOPPED:
             # 任务已被停止（_fetch_page_or_pause 内 auto-pause 退出路径）—— 与其他 5 个 grabber
             # 一样 return 出本函数，让外层 _run_job 的 finally 跑 finalize_on_stop 落盘。
             # task_popular_recover 不需要返回 (new_hot_artists, page_need_update)（caller 不消费），
@@ -2122,7 +2301,8 @@ def task_popular_recover(job, start_page, end_page):
             cdn_url = log_store.get(pid)
             candidates.append((pid, cdn_url))
 
-        _rest_between_pages(idx, job)
+        # 防风控休息已挪进 _fetch_page_or_pause（按「请求」计，不按页）：一个请求
+        # 现在覆盖 10~50 页，在这里再按页休一次就是纯白等。
 
     job.append_log(f"[Recover] ID 收集完成，共 {len(candidates)} 个，开始扫描本地文件...")
 
@@ -2345,7 +2525,7 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
                     nu_sets[k].update(n_u_dict[k])
                 job.db.save_hot_drawer(list(set(output)))
                 job.db.save_need_update(nu_sets)
-                _rest_between_pages(idx, job)
+                # 防风控休息已挪进 _fetch_page_or_pause（按请求计，不按页）
             else:
                 # 所有页自然跑完（未 break）：断点清掉
                 _clear_cursor()
@@ -2414,7 +2594,7 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
                             nu_sets[k].update(n_u_dict[k])
                         job.db.save_hot_drawer(list(set(output)))
                         job.db.save_need_update(nu_sets)
-                        _rest_between_pages(idx, job)
+                        # 防风控休息已挪进 _fetch_page_or_pause（按请求计，不按页）
 
                 # 阶段 2：按 ID 下载（仅在 download / two-phase 子动作下执行）。
                 # task_download_ids 内部走 download_concurrency + _worker + 每 20 张 flush
@@ -2539,7 +2719,7 @@ def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
                         nu_sets[k].update(n_u_dict[k])
                     job.db.save_hot_drawer(list(set(output)))
                     job.db.save_need_update(nu_sets)
-                _rest_between_pages(idx, job)
+                # 防风控休息已挪进 _fetch_page_or_pause（按请求计，不按页）
 
             # rank / popular（单日两阶段）模式收完所有页后进入「按 ID 下载」阶段。
             # popular_download_ids 在 per-page 循环里是 pass（直接进 download），

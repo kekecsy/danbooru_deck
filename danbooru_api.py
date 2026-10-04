@@ -189,12 +189,20 @@ def get_posts_by_rank(page, limit=20, timeout=20):
     )
     return r.json()
 
-def get_popular_posts(date_str, page, scale="day", timeout=20):
+def get_popular_posts(date_str, page, scale="day", timeout=20, limit=None):
+    """某日热门（explore/posts/popular）一页。
+
+    limit=None 时**不发** limit 参数，保持服务端默认 20 —— 与加 limit 之前的请求
+    形状逐字节一致，老调用方行为零变化。要一次多页就显式传大 limit（上限见
+    LIST_LIMIT_MAX["popular"]，实测 1000；超出静默截断）。
+    """
     params = {
         "date": date_str,
         "page": page,
         "scale": scale
     }
+    if limit:
+        params["limit"] = limit
     r = http_client.request(
         "GET", f"https://{_HOST}/explore/posts/popular.json",
         kind="json", retries=4, timeout=timeout,
@@ -360,6 +368,25 @@ def fetch_data_with_retry(post_id, retries=5, delay=3, timeout=10):
     except Exception as e:
         print(f"请求ID {post_id} 失败（重试 {retries} 次仍失败）: {e}")
         return None
+
+# ---------------- 列表端点的「一次能拿多少条」 ----------------
+# Danbooru 没有「一次请求拿多页」的语法 —— 实测 `page=1,2,3` 会被当成 `page=1`
+# （返回与 page=1 逐位相同的 20 条）。但**大 limit 与多页顺序拼接严格等价**：
+# 实测 popular / rank 两条路径上，`limit=60` 与「page1+page2+page3（各 20 条）」
+# **逐位完全相同**。所以「一次拿多页」≡「一次多拿几条」，后者是支持的。
+#
+# 各端点上限（实测 2026-10，超出**静默截断**而不是报错）：
+#   /explore/posts/popular.json  → 1000（比 posts.json 宽松 5 倍）
+#   /posts.json（order:rank / tags）→ 200
+# 注意 offset 只能是 `(page-1) × limit`，不能任意指定起点 —— 想在「页」网格上
+# 严格对齐地分块，块大小必须是 LIST_PAGE_SIZE 的整数倍（main._window_geometry）。
+LIST_PAGE_SIZE = 20
+LIST_LIMIT_MAX = {
+    "rank": 200,
+    "tags": 200,
+    "popular": 1000,
+}
+
 
 def download_image(url, folder, custom_print=print, retries=3, delay=3, raise_on_transient=False):
     """下载单张图片。瞬时错误（超时 / 连接错误 / 429 / 5xx）内部重试 retries 次。
