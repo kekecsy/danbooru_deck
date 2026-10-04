@@ -369,6 +369,15 @@ def fetch_data_with_retry(post_id, retries=5, delay=3, timeout=10):
         print(f"请求ID {post_id} 失败（重试 {retries} 次仍失败）: {e}")
         return None
 
+# Danbooru 的 `tags=id:1,2,3` 语法一次请求能回多少条 —— 实测（2026-10）：
+#   200 个 id + limit=200 → 完整返回 200 条（0.8s），字段与 /posts/{id}.json **完全一致**
+#   （46 个字段无差异，score / fav_count / tag_string_* / rating **以及 file_url /
+#   large_file_url / file_ext / file_size** 全都在 —— 所以下载链接也是批量拿的）；
+#   塞超过 200 个 id 会被**静默截断到 200**（因为 limit 的天花板就是 200）。
+# 所以按 200 一批切分，每批一个请求就够了。
+DANBOORU_ID_BATCH_MAX = 200
+
+
 # ---------------- 列表端点的「一次能拿多少条」 ----------------
 # Danbooru 没有「一次请求拿多页」的语法 —— 实测 `page=1,2,3` 会被当成 `page=1`
 # （返回与 page=1 逐位相同的 20 条）。但**大 limit 与多页顺序拼接严格等价**：
@@ -386,6 +395,62 @@ LIST_LIMIT_MAX = {
     "tags": 200,
     "popular": 1000,
 }
+
+
+def fetch_data_batch_detail(post_ids, chunk=DANBOORU_ID_BATCH_MAX, timeout=30):
+    """带「失败归因」的批量拉取，返回 (post_map, unknown_ids)。
+
+    - `post_map`: {post_id(str): post_dict}，字段与 /posts/{id}.json 完全一致
+      （含 `file_url` / `large_file_url` / `file_ext` / `file_size`）—— 所以**下载链接
+      也能批量拿**，不必再逐张打单帖接口。
+    - `unknown_ids`: 属于「整批请求本身失败（网络 / 5xx / 超时）」的那批 id，去重后返回。
+      这些是**不确定**的，调用方必须按「可重试」处理。
+
+    为什么要区分？因为「请求成功但某个 id 没回来」= 该帖在 Danbooru 侧确实不可见
+    （已删除 / 已删号 / 当前 host 隐藏，如 safebooru 下的 R-18），等于逐张请求时的
+    404 —— 调用方应当作**永久失败**、从重试队列里摘掉。
+    如果两者混为一谈，已删除的 id 会被当成网络失败永远留在 ids_data.json 里，
+    用户每点一次「重试这些图片」就把同一批死 id 再跑一遍（正是 PermanentPostError 要解决的问题）。
+
+    刷新热度那种「只要值、失败就跳过」的场景用简化版 fetch_data_batch 即可。
+    """
+    ids = [str(i) for i in post_ids]
+    out, unknown = {}, []
+    for start in range(0, len(ids), chunk):
+        part = ids[start:start + chunk]
+        try:
+            posts = get_posts_by_tags(
+                "id:" + ",".join(part), 1, limit=len(part), timeout=timeout
+            )
+        except Exception as e:
+            print(f"[danbooru_api] 批量拉取 {len(part)} 个 id 失败: {e}")
+            # ⚠ 只有「整批请求失败」才进 unknown。批次成功但某个 id 没回来，
+            #   是 Danbooru 侧确实不可见 —— 不能混进来，否则调用方会把已删除的帖子
+            #   当成网络抖动一直重试（见函数 docstring）。
+            unknown.extend(part)
+            continue
+        for post in posts or []:
+            pid = str(post.get("id") or "")
+            if pid:
+                out[pid] = post
+    # unknown 可能含重复（同一 id 不会跨批，但防御性去重）
+    seen = set()
+    return out, [i for i in unknown if not (i in seen or seen.add(i))]
+
+
+def fetch_data_batch(post_ids, chunk=DANBOORU_ID_BATCH_MAX, timeout=30):
+    """一次拉多个 post 的元数据，返回 {post_id(str): post_dict}。
+
+    相比逐个 /posts/{id}.json，请求数降到 1/chunk。在全局令牌桶 1 req/s 下，
+    1000 张从 ~17 分钟（1000 个请求）降到 5 个请求。
+
+    - **limit 必须显式给 len(part)**：Danbooru 的默认 limit 是 20，不给足就只回来 20 条。
+    - 已删除 / 当前 host（safebooru vs danbooru）不可见的 id **不会出现在结果里** ——
+      本函数不区分「没回来」的原因，只适合「拉不到就跳过」的场景。
+      需要区分「已删除 vs 批次网络失败」时用 fetch_data_batch_detail。
+    - 某一批整体失败只丢这一批，不抛异常 —— 一张图拉不到不该让整次刷新崩掉。
+    """
+    return fetch_data_batch_detail(post_ids, chunk=chunk, timeout=timeout)[0]
 
 
 def download_image(url, folder, custom_print=print, retries=3, delay=3, raise_on_transient=False):

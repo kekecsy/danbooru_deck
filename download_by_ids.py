@@ -11,6 +11,12 @@ def download_by_ids(post_ids, filter_tags=None):
     下载指定的 post ID 列表，并更新全局统计和当天 viewer 数据
     :param post_ids: 可迭代的 post ID 列表（字符串或整数）
     :param filter_tags: 可选，需要过滤的标签列表，若图片包含其中任一标签则跳过
+
+    元数据（含下载链接）走**批量**拉取：原来在循环里逐张 fetch_data_with_retry，
+    N 张图就是 N 个请求，而 Danbooru 的 JSON API 走全进程 1 req/s 的令牌桶 ——
+    光「拿 file_url」这一步就要 N 秒。改用 `tags=id:1,2,3` 语法（一次最多 200 个 id），
+    N 张降到 ceil(N/200) 个请求；返回字段与单帖接口完全一致，file_url /
+    large_file_url 都在里面，所以拿到就能紧接着下。
     """
     db_data = DanbooruData()
     daily_viewer_data = db_data.load_viewer_data()
@@ -21,16 +27,30 @@ def download_by_ids(post_ids, filter_tags=None):
     new_artist_counts = {}
     new_viewer_entries = []
 
-    for pid in post_ids:
-        pid_str = str(pid)  # 确保是字符串
-        if pid_str in db_data.log_data:
-            print(f"ID {pid_str} 已存在于 log.json，跳过")
-            continue
+    # ① 先剔掉 log.json 里已有的，剩下的做批量元数据预取
+    all_ids = [str(p) for p in post_ids]
+    todo = [pid for pid in all_ids if pid not in db_data.log_data]
+    if len(todo) != len(all_ids):
+        print(f"{len(all_ids) - len(todo)} 个 ID 已存在于 log.json，跳过")
+    if not todo:
+        print("没有需要处理的 ID。")
+        return
 
-        print(f"正在处理 ID: {pid_str}")
-        post_data = danbooru_api.fetch_data_with_retry(pid_str)
-        if not post_data:
-            print(f"ID {pid_str} 获取数据失败，跳过")
+    print(f"批量拉取 {len(todo)} 个 ID 的元数据"
+          f"（每批最多 {danbooru_api.DANBOORU_ID_BATCH_MAX} 个）...")
+    post_map, unknown_list = danbooru_api.fetch_data_batch_detail(todo)
+    unknown_ids = set(unknown_list)
+
+    for pid_str in todo:
+        # ② 从预取结果取元数据 —— 三种「没拿到」的情形与 GUI 下载路径保持一致：
+        #    批次整体失败 → 不确定（可重跑）；批次成功但没这个 id → 已删除/不可见；
+        #    有 id 但没 file_url → 帖子可见但没有可下载地址（典型：画师被封禁）。
+        post_data = post_map.get(pid_str)
+        if post_data is None:
+            if pid_str in unknown_ids:
+                print(f"ID {pid_str} 元数据拉取失败（所属批次网络异常），跳过（重跑本脚本会自动重试）")
+            else:
+                print(f"ID {pid_str} 在 Danbooru 侧不可用（已删除/不可见），跳过")
             continue
 
         # 可选过滤标签
@@ -46,6 +66,7 @@ def download_by_ids(post_ids, filter_tags=None):
             print(f"ID {pid_str} 无有效图片 URL，跳过")
             continue
 
+        print(f"正在处理 ID: {pid_str}")
         # 下载图片
         saved_filename = danbooru_api.download_image(image_url, db_data.save_dir)
         if not saved_filename:

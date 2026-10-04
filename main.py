@@ -2037,6 +2037,25 @@ def task_download_ids(job, inline_ids=None):
 
     concurrency = max(1, min(int(getattr(job, 'download_concurrency', 0) or DOWNLOAD_CONCURRENCY), 16))
     job.append_log(f"[DownloadIDs] 开始下载，共 {len(ids_data)} 个 ID（并发 {concurrency}）")
+
+    # ── 元数据批量预取（2026-10）─────────────────────────────────────────────
+    # 原来每个 worker 自己调 fetch_data_with_retry：一次一个请求，而 Danbooru 的
+    # JSON API 走**全进程共享的令牌桶**（1 req/s）—— 4 个 worker 也只是把这 1 req/s
+    # 分着花，于是「拿 file_url」这一步成了整条下载链路的**真正瓶颈**（下载本体走 CDN，
+    # 不过令牌桶，本来就是并发的）。
+    # 现在开跑前一次性批量拉回（`tags=id:1,2,3`，一次最多 200 个 id），worker 只剩 CDN 下载。
+    # 实测：40 个 id 逐张 17.6s → 批量 0.8s；1000 个 id 的元数据从 1000 个请求降到 5 个。
+    #
+    # 只预取「log 里没有 URL 缓存」的 id —— log 命中时要么直接 skip（skip_logged），
+    # 要么用缓存 URL 强制重下，两种情况都不需要 API。
+    need_meta = [pid for pid in ids_data if pid not in log_store]
+    post_map, unknown_ids = {}, set()
+    if need_meta:
+        n_req = (len(need_meta) + danbooru_api.DANBOORU_ID_BATCH_MAX - 1) // danbooru_api.DANBOORU_ID_BATCH_MAX
+        job.append_log(f"[DownloadIDs] 批量拉取 {len(need_meta)} 个 ID 的元数据（{n_req} 个请求，每批最多 {danbooru_api.DANBOORU_ID_BATCH_MAX} 个）")
+        post_map, unknown = danbooru_api.fetch_data_batch_detail(need_meta)
+        unknown_ids = set(unknown)
+        job.append_log(f"[DownloadIDs] 元数据回来了 {len(post_map)} 个；{len(unknown_ids)} 个因所在批次请求失败而待重试")
     success_count = 0
     # 每下载 N 张成功就 flush 一次 viewer_data 到磁盘。原先按页刷新（rank 一次约 100 张），
     # 现在统一走 download_ids 后没有自然分页点；用 20 张粒度平衡「频繁落盘开销」和
@@ -2051,7 +2070,8 @@ def task_download_ids(job, inline_ids=None):
         skip_logged（job.skip_logged，默认 True）：
           - True（默认）：log_store 已记录的 id 视为已下过，skip（去重）
           - False（rank·按ID下载 取消勾选时）：无视 log 命中，继续走下载路径。
-            log 已有 cdn_url 时直接用缓存（0 API 调用），无缓存才走 fetch_data_with_retry。
+            log 已有 cdn_url 时直接用缓存（0 API 调用）；无缓存时从**开跑前批量预取的
+            post_map** 里取（0 API 调用），不再逐张打 /posts/{id}.json。
         """
         def mark_skipped(reason):
             job.skip_count += 1
@@ -2078,21 +2098,23 @@ def task_download_ids(job, inline_ids=None):
             image_url = cached_cdn_url
         else:
             job.append_log(f"[DownloadIDs] 正在处理 ID: {pid_str}")
-            try:
-                post_data = danbooru_api.fetch_data_with_retry(pid_str)
-            except danbooru_api.PermanentPostError as e:
-                # 永久失败（404/410/403/451，已删/不可访问）：
-                # 从待下载队列移除，**不**进 failed_ids —— 之前会进失败表，
-                # 让用户每次点"重试这些图片"都把同一批已删图再 5×3s 跑一遍。
+            # 元数据来自开跑前的批量预取（见 task_download_ids 顶部的说明），0 API 调用。
+            # 三种「没拿到 post_data」的情形必须区分开，否则会重演旧版的老毛病：
+            post_data = post_map.get(pid_str)
+            if post_data is None:
+                if pid_str in unknown_ids:
+                    # ① 所属批次整个请求失败（网络 / 5xx）：**不确定**，等价于旧逻辑
+                    #    的「拉取失败」—— 留在队列里可重试，并记入失败表。
+                    job.record_failed_id(pid_str)
+                    job.fail_count += 1
+                    job.append_log(f"ID {pid_str} 元数据拉取失败（所属批次网络异常），保留在待下载队列可重试")
+                    return "fail"
+                # ② 批次成功但没这个 id：Danbooru 侧确实不可见（已删除 / 已删号 /
+                #    safebooru 下被隐藏的 R-18），等价于旧逻辑吃到的 404 PermanentPostError
+                #    —— 从队列移除且**不写** failed_ids，避免「重试」按钮每次都列出这批死 id。
                 job.resolve_pending_id(pid_str)
                 job.fail_count += 1
-                job.append_log(f"ID {pid_str} 不可用 (HTTP {e.status_code})，已从待下载队列移除")
-                return "fail"
-            if not post_data:
-                # 拉取元数据失败：视为可重试，id 留在队列并记入失败表
-                job.record_failed_id(pid_str)
-                job.fail_count += 1
-                job.append_log(f"ID {pid_str} 获取数据失败，保留在待下载队列可重试")
+                job.append_log(f"ID {pid_str} 在 Danbooru 侧不可用（已删除/当前模式不可见），已从待下载队列移除")
                 return "fail"
 
             if job.filter_tags:
@@ -2104,6 +2126,8 @@ def task_download_ids(job, inline_ids=None):
 
             image_url = post_data.get('file_url') or post_data.get('large_file_url')
             if not image_url:
+                # ③ 帖子可见但没有可下载地址（典型：画师被封禁 is_banned，Danbooru 会
+                #    把 file_url 抹掉）；与旧逻辑一致按「跳过」处理，不计失败。
                 job.resolve_pending_id(pid_str)
                 return mark_skipped("没有可用图片地址")
 
@@ -2354,6 +2378,18 @@ def task_popular_recover(job, start_page, end_page):
     # 与 task_download_ids 对齐 —— 之前是单 for 循环，热门 100 页补齐要等几十秒到几分钟）
     concurrency = max(1, min(int(getattr(job, 'download_concurrency', 0) or DOWNLOAD_CONCURRENCY), 16))
     job.append_log(f"[Recover] 开始并发下载 {len(targets)} 张（并发 {concurrency}）")
+
+    # 元数据批量预取（理由与 task_download_ids 顶部整段相同）：只针对 targets 里
+    # log 没缓存 cdn_url 的那部分。补齐模式常有几百张「log 无记录」的图，逐张打
+    # /posts/{id}.json 同样会被 1 req/s 的令牌桶拖成主要耗时。
+    need_meta = [pid for pid, url in targets if not url]
+    recover_meta, recover_unknown = {}, set()
+    if need_meta:
+        n_req = (len(need_meta) + danbooru_api.DANBOORU_ID_BATCH_MAX - 1) // danbooru_api.DANBOORU_ID_BATCH_MAX
+        job.append_log(f"[Recover] 批量拉取 {len(need_meta)} 个 ID 的元数据（{n_req} 个请求）")
+        recover_meta, _unk = danbooru_api.fetch_data_batch_detail(need_meta)
+        recover_unknown = set(_unk)
+
     # 与 task_download_ids 一样：每 20 张成功就 flush 一次 viewer_data 到磁盘，
     # 方便中途手动刷新图库（补齐模式下中途可能想停下来看进度）。
     flush_every = 20
@@ -2362,7 +2398,8 @@ def task_popular_recover(job, start_page, end_page):
     def _recover_worker(pid_str, cdn_url):
         """处理单个 id：返回 "ok" / "skip" / "fail"。
         与 task_download_ids._worker 的差别：targets 阶段已经把 log 缓存的 cdn_url
-        算好了，worker 直接用 —— 命中缓存的图省一次 API 调用。
+        算好了，worker 直接用 —— 命中缓存的图省一次 API 调用；未命中的从开跑前的
+        批量预取结果 recover_meta 里取，同样 0 API 调用。
         所有共享写（log_store / viewer_data / pending_ids / 计数）都走各自的锁，可安全并发。"""
         job.play_event.wait()
         if not job.is_running:
@@ -2373,19 +2410,20 @@ def task_popular_recover(job, start_page, end_page):
             image_url = cdn_url
             post_data = None
         else:
-            # log 没有：调 API 拿 file_url
-            try:
-                post_data = danbooru_api.fetch_data_with_retry(pid_str)
-            except danbooru_api.PermanentPostError as e:
-                # 永久失败：移除 + 记失败（不写 failed_ids，避免补齐模式里反复重试已删图）
+            # log 没有：用批量预取的元数据（0 API 调用）。三种缺失情形见下方注释。
+            post_data = recover_meta.get(pid_str)
+            if post_data is None:
+                if pid_str in recover_unknown:
+                    # ① 所属批次整个请求失败：不确定，留在队列可重试
+                    job.fail_count += 1
+                    job.record_failed_id(pid_str)
+                    job.append_log(f"[Recover] ID {pid_str} 元数据拉取失败（所属批次网络异常，保留待重试）")
+                    return "fail"
+                # ② 批次成功但没这个 id：Danbooru 侧已删除 / 不可见 —— 与旧逻辑吃 404 等价，
+                #    移除且不写 failed_ids（否则补齐模式会反复重试已删图）
                 job.resolve_pending_id(pid_str)
                 job.fail_count += 1
-                job.append_log(f"[Recover] ID {pid_str} 不可用 (HTTP {e.status_code})，已从待下载队列移除")
-                return "fail"
-            if not post_data:
-                job.fail_count += 1
-                job.record_failed_id(pid_str)
-                job.append_log(f"[Recover] ID {pid_str} API 拉取失败（保留在 ids_data.json 待重试）")
+                job.append_log(f"[Recover] ID {pid_str} 在 Danbooru 侧不可用（已删除/当前模式不可见），已移除")
                 return "fail"
             image_url = post_data.get('file_url') or post_data.get('large_file_url')
             if not image_url:
@@ -4156,19 +4194,20 @@ def _refresh_visible_by_paths(local_paths: list[str]):
         for image_path, post_id in fetch_jobs
     ]
 
-    def _fetch(image_path, post_id):
-        if not post_id:
-            return image_path, post_id, None
-        try:
-            return image_path, post_id, danbooru_api.fetch_data_with_retry(int(post_id))
-        except Exception:
-            return image_path, post_id, None
-
-    fetched = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(_fetch, image_path, post_id) for image_path, post_id in fetch_jobs]
-        for fut in concurrent.futures.as_completed(futures):
-            fetched.append(fut.result())
+    # 批量拉取：一次请求最多 200 个 id（Danbooru `tags=id:1,2,3` 语法，实测见
+    # danbooru_api.fetch_data_batch 的注释）。原来逐张打 /posts/{id}.json —— 一批 120 张
+    # 就是 120 个请求，在全局令牌桶 1 req/s 下要两分钟；现在 1 个请求。
+    unique_ids, seen_ids = [], set()
+    for _, post_id in fetch_jobs:
+        if post_id and post_id not in seen_ids:
+            seen_ids.add(post_id)
+            unique_ids.append(post_id)
+    post_map = danbooru_api.fetch_data_batch(unique_ids) if unique_ids else {}
+    # 没回来的（已删除 / 当前 host 不可见 / 整批失败）留 None，下面统一走「拉取失败」分支
+    fetched = [
+        (image_path, post_id, post_map.get(str(post_id)))
+        for image_path, post_id in fetch_jobs
+    ]
 
     changed_viewers = set()
     for image_path, post_id, post in fetched:
@@ -4325,26 +4364,22 @@ def refresh_visible(req: RefreshVisibleRequest):
             if pid:
                 fn_to_pid_initial[fn] = pid
 
-    def _resolve_one(filename):
-        post_id = fn_to_pid_initial.get(filename) or fn_to_pid_log.get(filename)
-        if not post_id:
-            return filename, None, None
-        try:
-            post = danbooru_api.fetch_data_with_retry(int(post_id))
-        except Exception:
-            post = None
-        return filename, post_id, post
-
-    # Step 2: 锁外并发拉取所有 post 数据 —— 慢操作（每个 post 都要打 Danbooru）
-    MAX_WORKERS = 5
-    fetched = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        futures = [executor.submit(_resolve_one, fn) for fn in filenames]
-        for fut in concurrent.futures.as_completed(futures):
-            try:
-                fetched.append(fut.result())
-            except Exception as e:
-                fetched.append(("?", None, None, e))
+    # Step 2: 批量拉取 —— 一次请求最多 200 个 id（Danbooru `tags=id:1,2,3` 语法，
+    # 实测见 danbooru_api.fetch_data_batch 的注释）。原来逐张打 /posts/{id}.json，
+    # 在全局令牌桶 1 req/s 下每张都要等一秒，一批 120 张就是两分钟。
+    fn_to_pid = {
+        fn: (fn_to_pid_initial.get(fn) or fn_to_pid_log.get(fn))
+        for fn in filenames
+    }
+    post_map = danbooru_api.fetch_data_batch(
+        [pid for pid in fn_to_pid.values() if pid]
+    )
+    # 统一成 3 元组；拉不到的（已删 / 不可见 / 整批失败）给 None。下面仍保留
+    # len(entry)==4 的分支，兼容未来别处塞进来的异常条目。
+    fetched = [
+        (fn, fn_to_pid[fn], post_map.get(str(fn_to_pid[fn])) if fn_to_pid[fn] else None)
+        for fn in filenames
+    ]
 
     # Step 3: 锁内 merge + 落盘
     updates = []
