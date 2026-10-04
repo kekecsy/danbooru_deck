@@ -3,7 +3,6 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import GalleryCalendar from './GalleryCalendar.vue';
 import TaskDatePicker from './TaskDatePicker.vue';
 import TutorialsModal from './crawler/TutorialsModal.vue';
-import RefreshRangeModal from './crawler/RefreshRangeModal.vue';
 import ArtistFavoriteModal from './crawler/ArtistFavoriteModal.vue';
 import CharacterFavoriteModal from './crawler/CharacterFavoriteModal.vue';
 import BrowseOverlay from './crawler/BrowseOverlay.vue';
@@ -962,20 +961,16 @@ function jumpToSelected(id) {
   selectionListOpen.value = false;
 }
 
+// 刷新热度：现在只剩「刷当前日期全部图」一个动作（本页 / 指定页码范围 / 分批节流都已删）。
+// ⚠ 刻意不显示任何「已刷新 N 张」或「N/total」计数器：后端一次请求就把整日拉完
+//   （见 danbooru_api.fetch_data_batch），前端拿到的只有一个终值 —— 运行中显示计数
+//   只会长期停在 0，像卡死（2026-10-04 记录的老问题）。运行中只报阶段文案
+//   「正在刷新全部 N 张…」——这里的 N 是**本次请求的张数**，不是别的维度的总量，
+//   所以它是个合法的分母；一旦要加「已完成 x」，就必须同量纲，否则宁可不显示。
 const refresh = ref({
   isRunning: false,
-  done: 0,
-  // ⚠ total 已下线（保留字段只为兼容旧引用，不再赋值、不再显示）。原因：
-  //   批量刷新按「批」发请求，一批的响应要等整批都返回才处理，所以 done 是阶梯式跳
-  //   （每批 60 张就是 0 → 60 → 120…），而 total 是全量总数（1522 张这种量级）。
-  //   两者一起显示会同时误导：起点长期停在「0/1522」像卡死；后面的「60/1522」
-  //   也分不清「已处理完的」和「还剩一大批」。现在只报「已刷新 N 张」+
-  //   （分批时）「第 i/n 批 · 第 x-y 页」，不显示百分比。
-  total: 0,
   dateStr: '',
   phase: '',
-  batchIndex: 0,
-  batchTotal: 0
 });
 
 // 按 score / 收藏数 排序时锁定排序的快照：
@@ -2740,72 +2735,6 @@ async function convertGif(item) {
   }
 }
 
-async function startRefreshScores() {
-  // 刷新「当前展示页」而不是整日 —— 一次只调 15~30 张，避免被风控；
-  // 同时这条路径会把孤立文件（之前下载到本地但没有 viewer_data 条目的图）
-  // 通过后端的 log.json 反查补全 artist / 热度信息。
-  const date = gallery.value.selectedDate;
-  if (!date) {
-    showToast('请先选择日期', 'error');
-    return;
-  }
-  if (refresh.value.isRunning) {
-    showToast('已有刷新任务在运行', 'info');
-    return;
-  }
-  const pageItems = pagedLocalImages.value;
-  if (!pageItems.length) {
-    showToast('当前页没有图片', 'info');
-    return;
-  }
-  const localPaths = pageItems.map(it => it.localPath).filter(Boolean);
-
-  refresh.value.isRunning = true;
-  refresh.value.dateStr = date;
-  refresh.value.done = 0;
-  refresh.value.phase = '正在处理当前页';
-  refresh.value.batchIndex = 0;
-  refresh.value.batchTotal = 1;
-  const rootsText = rootBreakdownText(pageItems);
-  showToast(`正在刷新当前页 ${localPaths.length} 张${rootsText ? `（${rootsText}）` : ''}`, 'info');
-
-  try {
-    const res = await fetch('http://127.0.0.1:18765/api/refresh_visible', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, local_paths: localPaths })
-    });
-    const result = await res.json();
-    if (!result.ok) {
-      showToast(result.msg || '刷新失败', 'error');
-      return;
-    }
-    let okCount = 0;
-    let failCount = 0;
-    for (const u of result.updates || []) {
-      if (!u.ok) { failCount += 1; continue; }
-      const target = gallery.value.images.find(img => (u.local_path && img.localPath === u.local_path) || img.filename === u.filename);
-      if (target) {
-        applyRefreshUpdate(target, u);
-        okCount += 1;
-      }
-      refresh.value.done = okCount + failCount;
-    }
-    if (failCount > 0) {
-      showToast(`已刷新 ${okCount} 张，${failCount} 张失败`, okCount > 0 ? 'info' : 'error');
-    } else {
-      showToast(`已刷新 ${okCount} 张`, 'success');
-    }
-  } catch (err) {
-    showToast(`请求失败: ${err.message}`, 'error');
-  } finally {
-    refresh.value.isRunning = false;
-    refresh.value.phase = '';
-    refresh.value.batchIndex = 0;
-    refresh.value.batchTotal = 0;
-  }
-}
-
 function applyRefreshUpdate(target, u) {
   target.score = u.score;
   target.favCount = u.fav_count;
@@ -2824,218 +2753,96 @@ function applyRefreshUpdate(target, u) {
   if (newRating) target.rating = newRating;
 }
 
-// ---------------- 刷新指定范围页的热度 ----------------
-const rangeRefresh = ref({
-  open: false,
-  startPage: 1,
-  endPage: 1,
-});
+// ---------------- 刷新当前日期「全部」图的热度 ----------------
+// 只剩这一个动作。曾经有「本页 / 指定页码范围 / 全部」三档，外加「每 4 页一批 +
+// 批间休息 40s」的节流；后端改成批量拉取后（一次请求最多 200 个 id，见
+// danbooru_api.fetch_data_batch），1522 张也只有 8 个请求、十几秒跑完 ——
+// 那两档和分批节流都成了纯多余，已整体删除。
+let refreshAbort = null;
 
-function openRangeRefreshDialog() {
-  if (!gallery.value.selectedDate) {
-    showToast('请先选择日期', 'error');
-    return;
-  }
-  if (refresh.value.isRunning) {
-    showToast('已有刷新任务在运行', 'info');
-    return;
-  }
-  rangeRefresh.value.open = true;
-  // 默认从当前页开始，向后多刷几页（不超过总页数）
-  const total = activeTotalPages.value;
-  const cur = activePage.value;
-  rangeRefresh.value.startPage = Math.max(1, Math.min(total, cur));
-  rangeRefresh.value.endPage = Math.max(rangeRefresh.value.startPage, Math.min(total, cur + 4));
-}
-
-function closeRangeRefreshDialog() {
-  rangeRefresh.value.open = false;
-}
-
-function refreshAllPages() {
-  if (!gallery.value.selectedDate) { showToast('请先选择日期', 'error'); return; }
-  if (refresh.value.isRunning) { showToast('已有刷新任务在运行', 'info'); return; }
-  const total = activeTotalPages.value;
-  if (!total) { showToast('当前没有可刷新的图片', 'info'); return; }
-  // 直接把范围拉满走节流路径（>5 页自动每 4 页休 40s）
-  rangeRefresh.value.startPage = 1;
-  rangeRefresh.value.endPage = total;
-  startRefreshScoresRange();
-}
-
-const rangeRefreshCount = computed(() => {
-  const total = activeTotalPages.value;
-  if (!total) return 0;
-  const start = Math.max(1, Math.min(total, rangeRefresh.value.startPage || 1));
-  const end = Math.max(start, Math.min(total, rangeRefresh.value.endPage || start));
-  const ps = gallery.value.pageSize;
-  return filteredLocalImages.value.slice((start - 1) * ps, end * ps).length;
-});
-
-async function startRefreshScoresRange() {
+async function startRefreshScores() {
   const date = gallery.value.selectedDate;
   if (!date) { showToast('请先选择日期', 'error'); return; }
   if (refresh.value.isRunning) { showToast('已有刷新任务在运行', 'info'); return; }
 
-  const total = activeTotalPages.value;
-  const start = Math.max(1, Math.min(total, rangeRefresh.value.startPage || 1));
-  const end = Math.max(start, Math.min(total, rangeRefresh.value.endPage || start));
-  const pageCount = end - start + 1;
-  const ps = gallery.value.pageSize;
-  const items = filteredLocalImages.value.slice((start - 1) * ps, end * ps);
+  const items = filteredLocalImages.value;
   const localPaths = items.map(it => it.localPath).filter(Boolean);
-  if (!localPaths.length) { showToast('范围内没有图片', 'info'); return; }
+  if (!localPaths.length) { showToast('当前没有可刷新的图片', 'info'); return; }
 
-  closeRangeRefreshDialog();
   refresh.value.isRunning = true;
   refresh.value.dateStr = date;
-  refresh.value.done = 0;
-  refresh.value.phase = '准备刷新';
-  refresh.value.batchIndex = 0;
-  refresh.value.batchTotal = 0;
+  refresh.value.phase = `正在刷新全部 ${localPaths.length} 张…`;
+  const rootsText = rootBreakdownText(items);
+  showToast(`正在刷新全部 ${localPaths.length} 张${rootsText ? `（${rootsText}）` : ''}`, 'info');
 
-  // 页数超过 5 时，按每 4 页一批切片，批间休息 40s 防止 Danbooru 风控
-  const THROTTLE_THRESHOLD = 5;
-  const BATCH_PAGES = 4;
-  const REST_MS = 40000;
-  const throttled = pageCount > THROTTLE_THRESHOLD;
-
-  const batches = [];
-  if (throttled) {
-    for (let p = start; p <= end; p += BATCH_PAGES) {
-      const pEnd = Math.min(end, p + BATCH_PAGES - 1);
-      const sliceItems = filteredLocalImages.value.slice((p - 1) * ps, pEnd * ps);
-      const bp = sliceItems.map(it => it.localPath).filter(Boolean);
-      if (bp.length) batches.push({ pStart: p, pEnd, localPaths: bp });
-    }
-  } else {
-    batches.push({ pStart: start, pEnd: end, localPaths });
-  }
-
-  let okCount = 0;
-  let failCount = 0;
-
-  // 阶段文案：分批时同时给出「第几批」和「第几页」，避免只写「第 2/11 批」这种
-  // 看不出还剩多少的表述。页码是用户真正在画廊里能看到的东西。
-  function phaseTextFor(b, batchIndex, batchTotal) {
-    if (!throttled) return '正在处理当前范围';
-    return `第 ${batchIndex}/${batchTotal} 批 · 第 ${b.pStart}-${b.pEnd} 页`;
-  }
-
-  async function runBatch(b, label, batchIndex, batchTotal) {
-    // 批次号必须在「还没开始处理这一批」时就更新，且紧跟着更新阶段文案：
-    // done 要等整批响应回来才跳，这段等待里批次号是唯一的进度信息。
-    refresh.value.batchIndex = batchIndex;
-    refresh.value.batchTotal = batchTotal;
-    refresh.value.phase = phaseTextFor(b, batchIndex, batchTotal);
-    if (!b.localPaths.length) return;
-    if (label) showToast(`${label}，已刷新 ${refresh.value.done} 张`, 'info');
+  const ac = new AbortController();
+  refreshAbort = ac;
+  try {
     const res = await fetch('http://127.0.0.1:18765/api/refresh_visible', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date, local_paths: b.localPaths }),
+      body: JSON.stringify({ date, local_paths: localPaths }),
+      signal: ac.signal,
     });
     const result = await res.json();
     if (!result.ok) {
       showToast(result.msg || '刷新失败', 'error');
       return;
     }
+    // 先建一遍索引再匹配：原来每收到一条 update 就 find 一遍整表，
+    // 1522 张就是 1522 × 1522 次比较。
+    const byPath = new Map();
+    const byName = new Map();
+    for (const img of gallery.value.images) {
+      if (img.localPath) byPath.set(img.localPath, img);
+      if (img.filename) byName.set(img.filename, img);
+    }
+    let okCount = 0;
+    let failCount = 0;
     for (const u of result.updates || []) {
       if (!u.ok) { failCount += 1; continue; }
-      const target = gallery.value.images.find(img => (u.local_path && img.localPath === u.local_path) || img.filename === u.filename);
+      const target = (u.local_path && byPath.get(u.local_path)) || byName.get(u.filename);
       if (target) { applyRefreshUpdate(target, u); okCount += 1; }
-      refresh.value.done = okCount + failCount;
-    }
-  }
-
-  async function sleepCancellable(ms) {
-    const step = 500;
-    let waited = 0;
-    while (waited < ms) {
-      if (!refresh.value.isRunning) return;
-      await new Promise(r => setTimeout(r, Math.min(step, ms - waited)));
-      waited += step;
-    }
-  }
-
-  try {
-    if (throttled) {
-      showToast(`共 ${pageCount} 页，将分 ${batches.length} 批刷新（每 ${BATCH_PAGES} 页一批，批间休息 ${REST_MS / 1000}s 防风控）`, 'info');
-  } else {
-      showToast(`正在刷新第 ${start}-${end} 页共 ${localPaths.length} 张（${rootBreakdownText(items)}）`, 'info');
-  }
-    for (let bi = 0; bi < batches.length; bi += 1) {
-      if (!refresh.value.isRunning) break;
-      const b = batches[bi];
-      const label = throttled
-        ? `批次 ${bi + 1}/${batches.length} · 第 ${b.pStart}-${b.pEnd} 页（${b.localPaths.length} 张）`
-        : '';
-      await runBatch(b, label, bi + 1, batches.length);
-      if (throttled && bi < batches.length - 1 && refresh.value.isRunning) {
-        showToast(`已刷新 ${okCount} 张，休息 ${REST_MS / 1000}s 防风控…`, 'info');
-        await sleepCancellable(REST_MS);
-      }
     }
     if (failCount > 0) {
       showToast(`已刷新 ${okCount} 张，${failCount} 张失败`, okCount > 0 ? 'info' : 'error');
-    } else if (refresh.value.isRunning || okCount) {
-      showToast(`已刷新 ${okCount} 张`, 'success');
     } else {
-      showToast('已停止刷新', 'info');
+      showToast(`已刷新 ${okCount} 张`, 'success');
     }
   } catch (err) {
-    showToast(`请求失败: ${err.message}`, 'error');
+    // AbortError = 用户自己点了「停止」，不是故障，别弹红字
+    if (err.name !== 'AbortError') showToast(`请求失败: ${err.message}`, 'error');
   } finally {
+    if (refreshAbort === ac) refreshAbort = null;
     refresh.value.isRunning = false;
     refresh.value.phase = '';
-    refresh.value.batchIndex = 0;
-    refresh.value.batchTotal = 0;
   }
 }
 
-async function stopRefreshScores() {
-  // 现在使用同步的 /api/refresh_visible，没有后台线程可停 —— 保留按钮但只做兜底
+function stopRefreshScores() {
+  // /api/refresh_visible 是同步接口，没有后台线程可停：这里只能 ① 中断前端这次
+  // fetch（回来的数据丢弃、不写 UI），② 顺手调一下 refresh_scores_stop 兜底。
+  // 后端仍会把已收到的请求跑完并落盘 —— 数据不会坏，只是用户不再等结果。
   refresh.value.isRunning = false;
   refresh.value.phase = '';
-  refresh.value.batchIndex = 0;
-  refresh.value.batchTotal = 0;
+  if (refreshAbort) {
+    try { refreshAbort.abort(); } catch (_) { /* noop */ }
+    refreshAbort = null;
+  }
   try {
-    await fetch('http://127.0.0.1:18765/api/refresh_scores_stop', { method: 'POST' });
+    fetch('http://127.0.0.1:18765/api/refresh_scores_stop', { method: 'POST' }).catch(() => {});
   } catch (_) { /* noop */ }
 }
 
-// 工具栏下拉互斥：显示 / 刷新热度 / 翻译 三个下拉菜单的触发按钮都用了 @click.stop
+// 工具栏下拉互斥：显示 / 翻译两个下拉菜单的触发按钮都用了 @click.stop
 // （@click.stop 的初衷是：阻止冒泡到 document click 后立刻被 onDocClickFor*Menu 把自己关掉）。
-// 副作用是点其他下拉的触发按钮时，document click 不会触发，原本打开的那个下拉就关不掉，
-// 多个下拉同时展开会互相重叠，看着很乱。解决：每次「打开」某个下拉时，主动把另外两个收起来。
+// 副作用是点另一个下拉的触发按钮时，document click 不会触发，原本打开的那个下拉就关不掉，
+// 多个下拉同时展开会互相重叠，看着很乱。解决：每次「打开」某个下拉时，主动把另一个收起来。
 // 「关闭」时不主动收其他（用户是显式收起的，别动他的状态）；外部点击关闭仍走 onDocClickFor*Menu。
+// （「刷新热度」原本也是这套机制里的第三个下拉，改成单个按钮后已退出互斥组。）
 function closeOtherToolbarDropdowns(exceptKey) {
   if (exceptKey !== 'display') displayMenu.value.open = false;
-  if (exceptKey !== 'refresh') refreshMenu.value.open = false;
   if (exceptKey !== 'translate') translateMenu.value.open = false;
-}
-
-// 「刷新热度」下拉菜单：把原先的 3 个按钮（本页/范围/全部）合并到一个入口
-const refreshMenu = ref({ open: false });
-function toggleRefreshMenu() {
-  if (refresh.value.isRunning) {
-    stopRefreshScores();
-    return;
-  }
-  refreshMenu.value.open = false;
-}
-function onRefreshChoice(scope) {
-  refreshMenu.value.open = false;
-  if (scope === 'page') startRefreshScores();
-  else if (scope === 'range') openRangeRefreshDialog();
-  else if (scope === 'all') refreshAllPages();
-}
-function onDocClickForRefreshMenu(e) {
-  if (!refreshMenu.value.open) return;
-  const dropdown = document.querySelector('.refresh-dropdown');
-  if (dropdown && !dropdown.contains(e.target)) {
-    refreshMenu.value.open = false;
-  }
 }
 
 // 「翻译」下拉菜单：把「翻译角色」和「导入翻译字典」合并成一个入口，
@@ -5333,7 +5140,6 @@ onMounted(async () => {
   loadFavSnapshot();
   pollTimer = window.setInterval(syncStatus, 1200);
   window.addEventListener('keydown', onKeyDown);
-  document.addEventListener('click', onDocClickForRefreshMenu);
   document.addEventListener('click', onDocClickForTranslateMenu);
   document.addEventListener('click', onDocClickForDisplayMenu);
   document.addEventListener('click', onDocClickForPagePicker);
@@ -5349,7 +5155,6 @@ onBeforeUnmount(() => {
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
   if (pollTimer) window.clearInterval(pollTimer);
   window.removeEventListener('keydown', onKeyDown);
-  document.removeEventListener('click', onDocClickForRefreshMenu);
   document.removeEventListener('click', onDocClickForTranslateMenu);
   document.removeEventListener('click', onDocClickForDisplayMenu);
   document.removeEventListener('click', onDocClickForPagePicker);
@@ -5694,14 +5499,13 @@ const downloadTargetHint = computed(() => {
           </div>
         </div>
         <div class="progress-panel">
-          <!-- 刷新热度进度：独立于下载任务的前台批次刷新，放在下载进度的上面一行。
+          <!-- 刷新热度进度：独立于下载任务的前台刷新，放在下载进度的上面一行。
                与工具栏「刷新热度」按钮的 running 文案共享同一 refresh 状态；× 就地停止。
-               ⚠ 这里**不放进度条、也不显示 total**：批量刷新按批发请求，批处理完才更新
-                 done（阶梯式跳），配上 1522 这种总量会变成「一直显示 0/1522，像卡死」。
-                 只报「已刷新 N 张」+（分批时）「第 i/n 批 · 第 x-y 页」。 -->
+               ⚠ 这里**不放进度条、也不显示「已刷新 N 张」计数器**：后端一次请求就把整日
+                 拉完（见 danbooru_api.fetch_data_batch），前端只有一个终值 —— 运行中显示
+                 计数只会长期停在 0，像卡死。只报阶段文案「正在刷新全部 N 张…」。 -->
           <div v-if="refresh.isRunning" class="refresh-progress-row">
             <span class="rp-label">刷新热度 · {{ refresh.dateStr }}</span>
-            <span class="rp-count">已刷新 {{ refresh.done }} 张</span>
             <span v-if="refresh.phase" class="rp-phase">{{ refresh.phase }}</span>
             <button type="button" class="rp-stop" title="停止刷新热度" @click="stopRefreshScores">×</button>
           </div>
@@ -5986,43 +5790,30 @@ const downloadTargetHint = computed(() => {
               </label>
             </div>
           </div>
-          <div class="refresh-dropdown">
-            <button
-              :class="['refresh-btn', { active: refresh.isRunning, 'menu-open': refreshMenu.open }]"
-              @click.stop="toggleRefreshMenu"
-              :disabled="!gallery.selectedDate && !refresh.isRunning"
-              :title="refresh.isRunning ? '点击停止刷新' : '选择刷新范围（本页 / 指定范围 / 全部），或切换『看图刷新热度』'"
-            >
-              <span v-if="!refresh.isRunning">刷新热度 ▾</span>
-              <!-- 运行中：只报「已刷新 N 张」+（分批时）批次/页码。不显示 N/total ——
-                   批处理下 done 是阶梯跳，配合 1522 这种总量会长期停在 0/x，像卡死。 -->
-              <span v-else>已刷新 {{ refresh.done }} 张<template v-if="refresh.batchTotal > 1"> · {{ refresh.batchIndex }}/{{ refresh.batchTotal }} 批</template></span>
-            </button>
-            <div v-if="!refresh.isRunning" class="refresh-menu" @click.stop>
-              <button class="refresh-menu-item" @click="onRefreshChoice('page')">
-                <span class="refresh-menu-label">本页</span>
-                <span class="refresh-menu-meta">{{ pagedLocalImages.length }} 张</span>
-              </button>
-              <button class="refresh-menu-item" @click="onRefreshChoice('range')">
-                <span class="refresh-menu-label">指定页码范围…</span>
-                <span class="refresh-menu-meta">自定义</span>
-              </button>
-              <button class="refresh-menu-item" @click="onRefreshChoice('all')">
-                <span class="refresh-menu-label">全部</span>
-                <span class="refresh-menu-meta">{{ activeTotalPages }} 页</span>
-              </button>
-              <div class="refresh-menu-divider" role="separator"></div>
-              <button
-                class="refresh-menu-item is-toggle"
-                :class="{ active: gallery.refreshOnView }"
-                @click="gallery.refreshOnView = !gallery.refreshOnView"
-                title="开启后，点开 / 切换大图会联网刷新该图 score / 收藏数；离线时建议保持关闭"
-              >
-                <span class="refresh-menu-label">看图刷新热度</span>
-                <span class="refresh-menu-state">{{ gallery.refreshOnView ? '开' : '关' }}</span>
-              </button>
-            </div>
-          </div>
+          <!-- 刷新热度：单一动作，点一下就把当前日期的**全部**图刷一遍。
+               曾经是「本页 / 指定页码范围 / 全部」三选一的下拉，外加每 4 页一批的节流；
+               后端改成批量拉取后（一次请求 200 个 id）1522 张也只有 8 个请求、十几秒，
+               那两档和节流全成了多余，已删除。运行中按钮变成停止入口。 -->
+          <button
+            :class="['refresh-btn', { active: refresh.isRunning }]"
+            @click="refresh.isRunning ? stopRefreshScores() : startRefreshScores()"
+            :disabled="!gallery.selectedDate && !refresh.isRunning"
+            :title="refresh.isRunning
+              ? '刷新中，点击停止（已经发出的请求后端还会跑完，只是不再等它返回）'
+              : '刷新当前日期全部图片的 score / 收藏数。后端按 200 个 id 一批批量拉取，整日一次跑完'"
+          >
+            <span v-if="!refresh.isRunning">↻ 刷新热度</span>
+            <!-- ⚠ 运行中刻意用短文案「刷新中…」：工具栏在 1600px 宽下本来就是满的，
+                 写成「刷新中… 点此停止」会把「翻译 ▾」挤出去、整条工具栏重排。
+                 「点击停止」的语义放 title + 进度行里那个 × 按钮。 -->
+            <span v-else>刷新中…</span>
+          </button>
+          <button
+            class="secondary tool-btn refresh-onview-btn"
+            :class="{ active: gallery.refreshOnView }"
+            @click="gallery.refreshOnView = !gallery.refreshOnView"
+            title="开启后，点开 / 切换大图会联网刷新该图 score / 收藏数；离线时建议保持关闭"
+          >看图刷新热度 {{ gallery.refreshOnView ? '开' : '关' }}</button>
           <div class="translate-dropdown">
             <button
               class="secondary translate-trigger tool-btn"
@@ -6694,7 +6485,7 @@ const downloadTargetHint = computed(() => {
          开的弹窗会被预览完全盖住，表现为「点了没反应」。
          是否要 Teleport 的判据：**这个浮层是否可能需要在预览之上出现**。
          下面这几个都能从 viewer 工具栏 / chip / 右键菜单直接打开，所以必须出去。
-         （RefreshRange / MergeViewerData / Tutorials / SelectionList 只在主界面用，
+         （MergeViewerData / Tutorials / SelectionList 只在主界面用，
            预览打开时不可达，留在原地即可。） -->
     <Teleport to="body">
     <!-- Tag 浏览的跨页已选清单（缩略图 + 单条移除） -->
@@ -6747,18 +6538,6 @@ const downloadTargetHint = computed(() => {
       @save="saveCharacterFavoriteDialog"
     />
     </Teleport>
-
-    <!-- 刷新范围 Modal（仅主界面可达，留在 .shell 内） -->
-    <RefreshRangeModal
-      :state="rangeRefresh"
-      :active-total-pages="activeTotalPages"
-      :active-page="activePage"
-      :page-size="gallery.pageSize"
-      :count="rangeRefreshCount"
-      :is-running="refresh.isRunning"
-      @update:open="closeRangeRefreshDialog"
-      @confirm="startRefreshScoresRange"
-    />
 
     <!-- 跨盘合并 viewer_data Modal（替代 Electron 不支持的 window.prompt/confirm） -->
     <MergeViewerDataModal
@@ -8389,14 +8168,8 @@ const downloadTargetHint = computed(() => {
   color: #7dd3fc;
   white-space: nowrap;
 }
-/* .rp-count 从「定宽右对齐的计数器」改成普通文本：内容是「已刷新 N 张」，
-   不再需要 min-width/等宽字体去对齐小数点。 */
-.rp-count {
-  flex: 0 0 auto;
-  white-space: nowrap;
-  font-size: 11.5px;
-  color: rgba(255, 255, 255, 0.75);
-}
+/* ⚠ 这里删掉了 .rp-count（原「已刷新 N 张」）：后端一次请求拉完全部图，前端只有
+   一个终值，运行中显示计数只会长期停在 0。详见 <template> 里该行的注释。 */
 .rp-phase {
   /* ⚠ 不能 flex: 1 0 100% —— 那会独占一整行、把已经处理完的图挤成 0 像素宽；
      而且父容器宽度只有 ~270px 时 nowrap 会被裁掉（用户只看到「第 1/2 批 · 第 1-4」）。
@@ -8598,13 +8371,12 @@ const downloadTargetHint = computed(() => {
 
 /* .fav-add-* 样式已抽到 src/styles/fav-add.css（两个 favorite modal 共享） */
 
-/* ---------------- 刷新热度下拉菜单（合并原本 3 个按钮） ---------------- */
-.refresh-dropdown {
-  position: relative;
-  display: inline-block;
-}
-.refresh-btn.menu-open {
+/* ---------------- 「看图刷新热度」开关 ----------------
+   原本挂在「刷新热度」下拉里的开关行；下拉改成单按钮后独立成工具栏按钮。
+   开启态复用「选择模式」那套 accent 渐变，一眼能看出是开还是关。 */
+.refresh-onview-btn.active {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  border-color: transparent;
   color: #fff;
 }
 
@@ -8887,83 +8659,13 @@ const downloadTargetHint = computed(() => {
 .translate-menu-item:hover:not(:disabled) .translate-menu-meta {
   color: var(--accent-deep);
 }
-.refresh-menu {
-  position: absolute;
-  /* 与 .display-menu 同款：重叠 1px，杜绝 hover 缝隙导致菜单收起 */
-  top: calc(100% - 1px);
-  right: 0;
-  z-index: 200;
-  min-width: 200px;
-  padding: 4px;
-  background: rgba(255, 255, 255, 0.98);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  animation: refresh-menu-in 0.12s ease-out;
-}
+/* .refresh-menu / .refresh-menu-item / .refresh-menu-divider 已随「刷新热度」下拉
+   一起删除（现在只剩单个按钮）。⚠ @keyframes refresh-menu-in 必须留着 ——
+   .display-menu 与 .translate-menu 的入场动画都还在用它。 */
 @keyframes refresh-menu-in {
   from { opacity: 0; transform: translateY(-4px); }
   to { opacity: 1; transform: translateY(0); }
 }
-.refresh-menu-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  font-size: 12px;
-  text-align: left;
-  background: transparent;
-  color: var(--ink);
-  border: none;
-  border-radius: 6px;
-  cursor: pointer;
-  white-space: nowrap;
-  font-family: inherit;
-  font-weight: 600;
-}
-.refresh-menu-item:hover {
-  background: rgba(99, 102, 241, 0.1);
-  color: var(--accent-deep);
-}
-.refresh-menu-meta {
-  font-size: 11px;
-  color: var(--muted);
-  font-weight: 500;
-}
-.refresh-menu-item:hover .refresh-menu-meta {
-  color: var(--accent-deep);
-}
-
-/* 刷新菜单里的开关型行：左侧 label，右侧「开/关」pill；
-   用 .is-toggle 修饰而不是另起元素，避免和动作行 class 冲突。 */
-.refresh-menu-item.is-toggle {
-  cursor: pointer;
-}
-.refresh-menu-item.is-toggle .refresh-menu-state {
-  padding: 3px 10px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--muted);
-  background: var(--surface-muted);
-  transition: background 0.14s ease, color 0.14s ease;
-}
-.refresh-menu-item.is-toggle.active .refresh-menu-state {
-  color: #fff;
-  background: linear-gradient(135deg, #ff8a3d, #e05a17);
-}
-.refresh-menu-divider {
-  height: 1px;
-  margin: 4px 8px;
-  background: var(--line);
-  opacity: 0.7;
-}
-
-/* 刷新范围 Modal 样式已随 RefreshRangeModal.vue 一起搬走 */
 
 /* ---------------- 收藏卡片 / chip 异色高亮 ---------------- */
 .search-input-wrap {
@@ -10125,7 +9827,6 @@ const downloadTargetHint = computed(() => {
 }
 .gallery-tools > button,
 .gallery-tools > .display-dropdown,
-.gallery-tools > .refresh-dropdown,
 .gallery-tools > .translate-dropdown {
   flex: 0 0 auto;
 }
@@ -10167,7 +9868,6 @@ const downloadTargetHint = computed(() => {
   background: #fff;
 }
 .display-dropdown:hover .tool-btn,
-.refresh-dropdown:hover .refresh-btn,
 .translate-dropdown:hover .translate-trigger {
   border-color: rgba(var(--accent-rgb), 0.45);
   background: var(--soft);

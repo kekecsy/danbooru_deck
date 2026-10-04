@@ -821,8 +821,8 @@ input[type="range"]:focus {
     10000  .selection-list-card 等       工具型 modal（SelectionList / Crypto / Tutorials，
                                          仅主界面可达，未 Teleport，留在 .shell 内）
     10010  .translation-card 详情         词条详情弹窗
-    10020  .fav-modal / .merge-modal / .range-refresh-modal
-                                         收藏/合并/刷新范围 modal（仅主界面可达，未 Teleport）
+    10020  .fav-modal / .merge-modal
+                                         收藏 / 合并 modal（仅主界面可达，未 Teleport）
     10025  .caption-panel.floating       预览里的悬浮说明窗
     10050  .crawler-viewer-overlay       预览让位给搜索/Browse 对话框时
     10060  .search-modal-overlay         跨日期搜索浮层
@@ -2320,12 +2320,11 @@ input, select, textarea { border-radius: 7px; }
 /* 悬停只加深阴影，不做 translateY（同上方 .image-card:hover 的抽搐说明）。 */
 .log-panel { border-radius: 9px; }
 
-/* Toolbar dropdowns open on hover. A click must not leave a menu pinned open. */
+/* Toolbar dropdowns open on hover. A click must not leave a menu pinned open.
+   （「刷新热度」已从下拉改成单个按钮，不再参与这套 hover 机制。） */
 .display-dropdown,
-.refresh-dropdown,
 .translate-dropdown { position: relative; }
 .display-menu,
-.refresh-menu,
 .translate-menu {
   z-index: 80;
   top: calc(100% - 1px);
@@ -2334,7 +2333,6 @@ input, select, textarea { border-radius: 7px; }
   box-shadow: 0 12px 28px rgba(25, 31, 38, 0.14);
 }
 .display-menu,
-.refresh-menu,
 .translate-menu {
   visibility: hidden;
   opacity: 0;
@@ -2343,7 +2341,6 @@ input, select, textarea { border-radius: 7px; }
   transition: opacity 0.12s ease, transform 0.12s ease, visibility 0s linear 0.12s;
 }
 .display-dropdown:hover .display-menu,
-.refresh-dropdown:hover .refresh-menu,
 .translate-dropdown:hover .translate-menu {
   visibility: visible;
   opacity: 1;
