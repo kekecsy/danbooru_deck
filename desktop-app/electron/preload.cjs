@@ -26,7 +26,9 @@ contextBridge.exposeInMainWorld('desktopAPI', {
     stop: () => ipcRenderer.invoke('crawler:stop'),
     status: () => ipcRenderer.invoke('crawler:status'),
     recoveryState: (params) => ipcRenderer.invoke('crawler:recovery-state', params),
-    setSafeMode: (safe) => ipcRenderer.invoke('crawler:set-safe-mode', !!safe)
+    setSafeMode: (safe) => ipcRenderer.invoke('crawler:set-safe-mode', !!safe),
+    idleDownload: () => ipcRenderer.invoke('crawler:idle-download'),
+    setIdleDownload: (payload) => ipcRenderer.invoke('crawler:set-idle-download', payload)
   },
   external: {
     open: (url) => ipcRenderer.invoke('external:open', url)

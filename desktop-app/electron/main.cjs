@@ -1540,6 +1540,20 @@ ipcMain.handle('crawler:set-safe-mode', async (_event, safe) => {
     body: JSON.stringify({ safe: !!safe })
   });
 });
+// 空闲下载：没有任务、网络安静时自动吃掉各日期 folder 里积压的待下载 id。
+// 配置持久化在后端（deck.db 的 meta 表），前端只做读 / 改，不自己存一份。
+ipcMain.handle('crawler:idle-download', async () => {
+  await ensureCrawlerService();
+  return apiFetchJson('/api/idle_download');
+});
+ipcMain.handle('crawler:set-idle-download', async (_event, payload) => {
+  await ensureCrawlerService();
+  return apiFetchJson('/api/idle_download', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload || {})
+  });
+});
 
 // 旧 Portable 版（exe 隣の Danbooru Deck Data）に溜まっていたデータを、
 // 新しい固定先 userData（%APPDATA%\Danbooru Deck）へ初回だけ移行する。

@@ -442,6 +442,9 @@ const task = ref({
   tagSource: 'danbooru',
   filterTags: [],
   cursor: null,             // 收 ID 阶段页断点 {mode,page,start_page,end_page,...}
+  // 当前 job 是不是「空闲下载」轮次（后端 status.is_idle）：
+  // 它虽然走的是 download_ids，但收尾要静默 —— 不弹「任务完成」、不把视图拽到别的日期。
+  isIdle: false,
   backendError: '',
   backendErrorExpanded: false,
   backendTail: []
@@ -450,11 +453,14 @@ const task = ref({
 // 区分依据是 task.progress.total —— 只有 task_download_ids 入口在 main.py 里设 total_planned，
 // 所以 total > 0 等价于「已进入按 ID 下载阶段」；否则是「抓取 ID / 抓取页面列表」阶段。
 // collect 阶段如果后端给了 page_total，会顺带显示「N/M 页」。
+// 阶段提示：运行中也要能一眼看出这轮是「空闲下载」自动跑的，而不是自己排的任务
+// —— 它凭空出现在进度面板里本来就会让人以为是失控行为。
 const runningPhaseText = computed(() => {
   if (!task.value.isRunning && !task.value.isPaused && !task.value.isStopping) return '';
   const target = task.value.targetFolder ? ` · 目标 ${task.value.targetFolder}` : '';
   if (task.value.isStopping) return `正在停止…${target}`;
   if (task.value.isPaused) return `已暂停${target}`;
+  if (task.value.isIdle) return `空闲下载中…${target}`;
   if (task.value.progress.total > 0) return `正在下载…${target}`;
   const pp = task.value.pageProgress;
   if (pp && pp.total > 0) {
@@ -1864,6 +1870,11 @@ async function syncStatusOnce() {
     task.value.isPaused = !!status.is_paused;
     task.value.jobId = status.job_id || '';
     task.value.mode = status.mode || '';
+    // 这一轮是不是「空闲下载」自动跑的（后端 status.is_idle）：决定收尾要静默
+    task.value.isIdle = !!status.is_idle;
+    // 空闲下载面板的开关 / 倒计时 / 积压数：跟着同一次轮询回读，
+    // 不额外打一个请求（它每秒都在跑，多一个请求就是每秒多一次无谓 IPC）
+    applyIdlePayload(status.idle_download);
     task.value.outcome = status.outcome || (status.is_running ? 'running' : 'idle');
     task.value.errorMessage = status.error_message || '';
     task.value.backendError = status.backendError || '';
@@ -1963,6 +1974,15 @@ async function syncStatusOnce() {
     }
 
     if (wasActive && !task.value.isRunning && !task.value.isStopping) {
+      // 空闲下载轮次：它是后台自己跑的一轮，静默收尾 —— 既不弹「任务完成」，
+      // 也**不跳日期**（跳过去看新图会直接把用户正在看的东西拽走）。
+      // 只在下到的正好是当前画廊日期时把图刷进来。
+      if (status.is_idle) {
+        if (targetFolder && targetFolder === gallery.value.selectedDate) {
+          await reloadCurrentGallery();
+        }
+        return;
+      }
       // 断点恢复横幅：只在单任务路径自动弹（队列中途的失败页等队列跑完用「检查断点」）。
       // 必须在本帧抓快照：job 注册表只保留 30s，之后 status 不再给 mode/tag 字段。
       if (!queueRunning.value) populateRecoveryBanner(status);
@@ -2833,6 +2853,140 @@ function stopRefreshScores() {
     fetch('http://127.0.0.1:18765/api/refresh_scores_stop', { method: 'POST' }).catch(() => {});
   } catch (_) { /* noop */ }
 }
+
+// ---------------- 空闲下载（idle download） ----------------
+// 没有前台任务、热度刷新停着、网络也安静时，后端自己隔一段时间把各日期 folder 里
+// 积压的待下载 id 下掉一批（走的就是 download_ids 同一条链路）。
+//
+// ⚠ 配置（开关 / 轮间隔）**只存后端**（deck.db 的 meta 表），前端不另存一份 ——
+// 两处存同一件事迟早会对不上。点开关 → POST → 下一帧 /api/status 回读为准。
+const idleDl = ref({
+  enabled: false,
+  intervalSec: 600,
+  perRound: 100,
+  pendingTotal: 0,
+  pendingFolders: [],
+  nextRunIn: 0,
+  reason: '',
+  lastRound: null,
+  runningFolder: '',
+  busy: false,
+});
+
+const IDLE_INTERVAL_CHOICES = [
+  { value: 300, label: '5 分钟' },
+  { value: 600, label: '10 分钟' },
+  { value: 1800, label: '30 分钟' },
+  { value: 3600, label: '1 小时' },
+];
+
+function fmtIdleInterval(sec) {
+  const s = Number(sec) || 0;
+  if (s >= 3600 && s % 3600 === 0) return `${s / 3600} 小时`;
+  if (s >= 60 && s % 60 === 0) return `${s / 60} 分钟`;
+  return `${s} 秒`;
+}
+
+// 倒计时用「约」口径（进一取整），别显示「0 分钟」→ 用户以为卡住了
+function fmtIdleCountdown(sec) {
+  const s = Math.max(0, Number(sec) || 0);
+  if (s < 60) return `${s} 秒`;
+  if (s < 3600) return `${Math.ceil(s / 60)} 分钟`;
+  return `${(s / 3600).toFixed(1)} 小时`;
+}
+
+// 下拉选项跟着后端真实值走：后端被外部改成 120s 这类非预设值时，
+// 补一个选项进去而不是让 select 显示空白（选中项与 value 对不上会显示第一项）。
+const idleIntervalChoices = computed(() => {
+  const list = [...IDLE_INTERVAL_CHOICES];
+  const cur = idleDl.value.intervalSec;
+  if (!list.some(o => o.value === cur)) {
+    list.push({ value: cur, label: fmtIdleInterval(cur) });
+    list.sort((a, b) => a.value - b.value);
+  }
+  return list;
+});
+
+function applyIdlePayload(payload) {
+  if (!payload) return;
+  idleDl.value.enabled = !!payload.enabled;
+  idleDl.value.intervalSec = Number(payload.interval_sec || 600);
+  idleDl.value.perRound = Number(payload.per_round || 100);
+  idleDl.value.pendingTotal = Number(payload.pending_total || 0);
+  idleDl.value.pendingFolders = Array.isArray(payload.pending_folders) ? payload.pending_folders : [];
+  idleDl.value.nextRunIn = Number(payload.next_run_in || 0);
+  idleDl.value.reason = payload.reason || '';
+  idleDl.value.lastRound = payload.last_round || null;
+  idleDl.value.runningFolder = payload.running_folder || '';
+}
+
+async function toggleIdleDownload() {
+  if (idleDl.value.busy) return;
+  const next = !idleDl.value.enabled;
+  idleDl.value.enabled = next;   // 乐观更新：点击立刻有反馈；后端返回后以它为准覆盖
+  idleDl.value.busy = true;
+  try {
+    const res = await window.desktopAPI.crawler.setIdleDownload({ enabled: next });
+    applyIdlePayload(res);
+    if (next) {
+      showToast(
+        idleDl.value.pendingTotal
+          ? `空闲下载已开启：当前积压 ${idleDl.value.pendingTotal} 张，没任务时每 ${fmtIdleInterval(idleDl.value.intervalSec)} 下一批`
+          : '空闲下载已开启：当前没有积压，之后新收集的 ID 会自动补下',
+        'success',
+      );
+    } else {
+      showToast('空闲下载已关闭', 'info');
+    }
+  } catch (err) {
+    idleDl.value.enabled = !next;   // 失败回滚，别让按钮停在一个假状态上
+    showToast(`空闲下载设置失败：${err.message}`, 'error');
+  } finally {
+    idleDl.value.busy = false;
+  }
+}
+
+async function setIdleInterval(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value === idleDl.value.intervalSec) return;
+  try {
+    applyIdlePayload(await window.desktopAPI.crawler.setIdleDownload({ interval_sec: value }));
+  } catch (err) {
+    showToast(`改轮间隔失败：${err.message}`, 'error');
+  }
+}
+
+// 面板上那行状态：优先说「正在干什么」→「为什么还没动」→「积压多少 + 下次什么时候」。
+// reason 由后端给（有任务在跑 / 网络刚有活动 / 没有积压），倒计时是独立字段，
+// 两者拼在一起而不是互相覆盖 —— 只显示倒计时的话，真正卡住的原因就永远看不见。
+const idleDlStatusText = computed(() => {
+  const st = idleDl.value;
+  if (st.runningFolder) return `正在下 ${st.runningFolder}…`;
+  if (!st.enabled) return st.pendingTotal ? `已关闭 · 积压 ${st.pendingTotal} 张` : '已关闭';
+  const head = st.pendingTotal ? `积压 ${st.pendingTotal} 张` : '待命中 · 暂无积压';
+  if (st.reason) return `${head} · ${st.reason}`;
+  if (st.nextRunIn > 0) return `${head} · 约 ${fmtIdleCountdown(st.nextRunIn)}后`;
+  return head;
+});
+
+const idleDlTooltip = computed(() => {
+  const st = idleDl.value;
+  const lines = [
+    '开启后：没有前台任务、热度刷新停着、网络静默 1 分钟以上时，自动下载各日期文件夹里积压的待下载 ID。',
+    `每轮最多 ${st.perRound} 张、轮间隔 ${fmtIdleInterval(st.intervalSec)}；走的是和「按ID下载」完全相同的下载链路。`,
+    '任何时候你点「开始」新任务，它都会立刻把位置让出来。',
+  ];
+  if (st.pendingFolders.length) {
+    lines.push('—— 当前积压 ——');
+    for (const it of st.pendingFolders) lines.push(`${it.folder}：${it.count} 张`);
+  }
+  if (st.lastRound) {
+    const r = st.lastRound;
+    lines.push(`上一轮 ${r.at} · ${r.folder}：成功 ${r.success} / 跳过 ${r.skip} / 失败 ${r.fail}`);
+  }
+  if (st.reason) lines.push(`当前：${st.reason}`);
+  return lines.join('\n');
+});
 
 // 工具栏下拉互斥：显示 / 翻译两个下拉菜单的触发按钮都用了 @click.stop
 // （@click.stop 的初衷是：阻止冒泡到 document click 后立刻被 onDocClickFor*Menu 把自己关掉）。
@@ -5407,6 +5561,37 @@ const downloadTargetHint = computed(() => {
           @click="checkRecoveryForCurrentScope"
           title="按当前任务配置查询中途停止留下的断点和永久失败页（deck.db）"
         >检查断点</button>
+      </div>
+
+      <!-- 空闲下载：没有前台任务、热度刷新停着、网络也安静时，自动把各日期 folder
+           里积压的待下载 id 下一批。与「顺序队列」并列但互补：队列跑用户显式排的
+           任务，它跑没人管的积压。开关 / 间隔都存后端（deck.db meta），前端只读写。 -->
+      <div
+        class="idle-dl-panel"
+        :class="{ 'is-on': idleDl.enabled, 'is-busy': !!idleDl.runningFolder }"
+      >
+        <button
+          type="button"
+          class="idle-dl-toggle"
+          :class="{ active: idleDl.enabled }"
+          :disabled="idleDl.busy"
+          :title="idleDlTooltip"
+          @click="toggleIdleDownload"
+        >
+          <span class="idle-dl-dot" aria-hidden="true"></span>
+          空闲下载 {{ idleDl.enabled ? '开' : '关' }}
+        </button>
+        <select
+          class="idle-dl-interval"
+          :value="idleDl.intervalSec"
+          :title="`两轮之间的间隔（每轮最多 ${idleDl.perRound} 张）`"
+          @change="setIdleInterval($event.target.value)"
+        >
+          <option v-for="opt in idleIntervalChoices" :key="opt.value" :value="opt.value">
+            {{ opt.label }}
+          </option>
+        </select>
+        <span class="idle-dl-status" :title="idleDlTooltip">{{ idleDlStatusText }}</span>
       </div>
 
       <!-- 顺序任务队列：默认折叠成一行标题（含图标化的运行/暂停/停止/跳过/清除），
@@ -9239,6 +9424,82 @@ const downloadTargetHint = computed(() => {
 }
 
 /* ---------------- 顺序任务队列 ---------------- */
+/* ---------------- 空闲下载面板 ----------------
+   和「顺序队列」并列的一块：队列跑用户显式排的任务，它跑没人管的积压。
+   沿用 .task-queue-panel 的视觉语言（同边框 / 圆角 / accent 淡底），但更矮更安静。 */
+.idle-dl-panel {
+  margin-top: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.05), rgba(var(--accent-rgb), 0));
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.idle-dl-panel.is-on {
+  border-color: rgba(var(--accent-rgb), 0.42);
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.13), rgba(var(--accent-rgb), 0.02));
+}
+.idle-dl-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.idle-dl-toggle.active {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  border-color: transparent;
+  color: #fff;
+}
+.idle-dl-toggle:disabled { opacity: 0.6; cursor: default; }
+.idle-dl-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: 0 0 auto;
+}
+.idle-dl-toggle.active .idle-dl-dot { background: #fff; }
+/* 有轮次在跑：呼吸一下，让「它正在自己干活」这件事在侧栏里可见 */
+.idle-dl-panel.is-busy .idle-dl-dot { animation: idle-dl-pulse 1.2s ease-in-out infinite; }
+@keyframes idle-dl-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+.idle-dl-interval {
+  /* ⚠ style.css 里那条全局 input/select/textarea 规则把宽度定成了 100%，
+     会把下拉撑满整行、把「开关 / 间隔 / 状态」挤成三行（截图里看到过）。
+     这里必须显式收回自然宽度。 */
+  width: auto;
+  flex: 0 0 auto;
+  padding: 4px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 12px;
+}
+.idle-dl-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
 .task-queue-panel {
   margin-top: 12px;
   /* 左右 padding 设为 0：让任务条撑到面板边缘，最大化利用左栏宽度；
