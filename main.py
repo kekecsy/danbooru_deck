@@ -4153,8 +4153,10 @@ IDLE_DOWNLOAD_DEFAULTS = {
 }
 IDLE_DOWNLOAD_TICK = 2.0            # 调度线程的检查周期
 IDLE_DOWNLOAD_RETRY_SCAN = 60       # 没有积压时多久重扫一次
-IDLE_DOWNLOAD_BACKOFF_FACTOR = 3    # 整轮颗粒无收（典型：断网）时把下一轮推远
-IDLE_DOWNLOAD_BACKOFF_MIN_FAIL = 3  # 失败数到这个量级才当「网络真的坏了」，避免 1 张坏图就退避
+# ⚠ 不做退避：轮间隔就是轮间隔。
+#   曾经在「整轮颗粒无收」时把下一轮推远 3 倍（本意是断网了别撞墙），实际效果却是
+#   面板上「设定 5 分钟 / 却写 14 分钟后」两个数打架，还顺带把积压一起拖住 —— 用户点名不要。
+#   现在无论上一轮结果如何，都按 interval_sec 准时来。
 
 
 def _idle_clamp(value, lo, hi, default):
@@ -4280,21 +4282,36 @@ def _idle_pick_round():
       - failed  = 上一轮瞬时网络失败留下的残留。它们**留在队列里就不会自己消失**
         （永久失败如已删帖在下载路径上直接出队），所以顺手带上，否则它们会一直
         挂在日历角标上，而调度器却说「没有积压」。
+
+    ⚠⚠ 但 pending 与 failed **不能同等对待**（走两趟，见函数尾）。挑轮是「按序取第一个
+    能用的文件夹」，而 failed 残留会长期赖在队首那个文件夹里：它不算完成、不会自己消失，
+    于是每一轮都重新挑中它、再失败一次，后面成千上万张 pending **永远轮不到**。
+    实测：default/2025-01-31 只剩 3 张反复失败的 id，把整个队列锁死了一晚上 ——
+    面板上却写着「积压 7770 张 · 约 14 分钟后」，看着像在干活。
     """
     with idle_state.lock:
         per_round = idle_state.per_round
     disk_offline = 0
+    leftover = None      # 「只剩 failed 残留」的文件夹，留到第二趟再动
     for folder, lib_id, _count in _idle_pending_folders():
         pending = deck_db.queue_load(lib_id, folder, status=deck_db.QUEUE_PENDING)
         failed = deck_db.queue_load(lib_id, folder, status=deck_db.QUEUE_FAILED)
-        ids = (pending + failed)[:per_round]
-        if not ids:
+        if not pending and not failed:
             continue
         save_dir = _idle_resolve_dir(lib_id, folder)
         if not save_dir:
             disk_offline += 1
             continue   # 盘没接：跳过，绝不在本地空目录里造一份（同 popular_recover 的断盘保护）
-        return {"folder": folder, "lib_id": lib_id, "ids": ids, "save_dir": save_dir}, ""
+        if pending:
+            return {"folder": folder, "lib_id": lib_id,
+                    "ids": (pending + failed)[:per_round], "save_dir": save_dir}, ""
+        # pending 已经下完了，这个文件夹只剩 failed 残留 —— 第一趟先不动它（见上面的
+        # docstring：它会把队首堵死），只记下第一个可用的，等真的没有 pending 可下再收拾。
+        if leftover is None:
+            leftover = {"folder": folder, "lib_id": lib_id,
+                        "ids": failed[:per_round], "save_dir": save_dir}
+    if leftover:
+        return leftover, ""
     if disk_offline:
         return None, f"积压所在磁盘不在线（{disk_offline} 个文件夹）"
     return None, "没有待下载的积压"
@@ -4335,10 +4352,10 @@ def _idle_run_round(job, ids):
             # 这里若无条件回写，就会用「本轮开始时的 interval」把它盖回去，
             # 用户表现为「点了开关，结果要等满一个 interval 才动」。rev 变了就不回写。
             if idle_state.rev == started_rev:
+                # ⚠ 定时就是定时：不因「这一轮全灭」而把下一轮推远。退避本意是「断网了
+                #   别撞墙」，实际效果却是面板上「设定 5 分钟 / 却写 14 分钟后」两个数
+                #   打架，还把积压一起拖住 —— 用户点名不要，任何结果都按 interval 准时来。
                 wait = idle_state.interval_sec
-                # 一整轮颗粒无收且失败成片 —— 典型是断网 / 被墙，别每 10 分钟再撞一次墙
-                if job.success_count == 0 and job.fail_count >= IDLE_DOWNLOAD_BACKOFF_MIN_FAIL:
-                    wait *= IDLE_DOWNLOAD_BACKOFF_FACTOR
                 idle_state.next_run_at = time.time() + wait
 
 

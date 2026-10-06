@@ -2970,6 +2970,8 @@ const idleDlStatusText = computed(() => {
   // 空积压这件事交给 reason 讲，head 只负责「在不在岗」。
   const head = st.pendingTotal ? `积压 ${st.pendingTotal} 张` : '待命中';
   if (st.reason) return `${head} · ${st.reason}`;
+  // ⚠ 倒计时与轮间隔永远一致：后端不做退避（见 main.py 的说明），所以这里不需要
+  //   任何「为什么不是 N 分钟」的解释 —— 多一句都只是噪音。
   if (st.nextRunIn > 0) return `${head} · 约 ${fmtIdleCountdown(st.nextRunIn)}后`;
   return head;
 });
