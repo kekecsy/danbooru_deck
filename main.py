@@ -11,6 +11,7 @@ import datetime
 import json
 import shutil
 import threading
+import time
 import concurrent.futures
 from contextlib import nullcontext
 from fastapi import FastAPI, BackgroundTasks
@@ -222,6 +223,7 @@ class DownloadJob:
     download_concurrency: int = 4                          # 单任务内图片下载并发度（rank→download_ids 阶段也用它）
     skip_logged: bool = True                                # rank·按ID下载 专用：False 时 task_download_ids 不走 log_store 早退
     retry_only: bool = False                                # download_ids 重试失败图专用：True 时只下 inline ids，不消费 folder backlog
+    is_idle: bool = False                                  # 空闲下载轮次：只下本轮挑中的 ids，且可被前台任务抢占（见 _yield_idle_jobs）
     outcome: str = "pending"                              # pending / running / completed / completed_with_failures / stopped / error
     error_message: str = ""                               # 仅记录任务自身的致命异常，不混用服务 stderr
 
@@ -1991,6 +1993,9 @@ def grabber_collect_ids(job, page_num):
 # --- mode: download_ids ---
 def task_download_ids(job, inline_ids=None):
     retry_only = bool(getattr(job, "retry_only", False))
+    # 空闲下载轮次语义上等价于「只下 inline ids、不消费整个 folder backlog」，
+    # 所以和 retry_only 共用同一条分支 —— 区别只在日志文案（见下）。
+    idle_round = bool(getattr(job, "is_idle", False))
     if inline_ids:
         # 粘贴的 IDs：去重 + 只留纯数字串，合并进 folder 的待下载队列（ids_data.json）
         cleaned = []
@@ -2002,14 +2007,21 @@ def task_download_ids(job, inline_ids=None):
             seen.add(s)
             cleaned.append(s)
         if cleaned:
-            if retry_only:
+            if retry_only or idle_round:
                 # 失败重试：仍写入 queue（让 log.json 记录本次成功 / 失败），
                 # 但本次只下这批，**不**顺手把 folder 里积压的 pending id 全跑一遍
                 # —— 旧版"重试 9 张失败"会把 folder backlog 几百张一起下。
+                # 空闲下载同一条路径：每轮只吃自己挑的那 per_round 张，剩下的留给下一轮。
                 for s in cleaned:
                     job.queue_pending_id(s)
                 ids_data = sorted(cleaned)
-                job.append_log(f"[DownloadIDs] 重试模式：仅下指定的 {len(cleaned)} 个 ID（folder backlog 本次跳过）")
+                if idle_round:
+                    job.append_log(
+                        f"[空闲下载] 本轮下 {len(cleaned)} 个 ID"
+                        f"（folder 里剩余的积压留给下一轮，不一次抽干）"
+                    )
+                else:
+                    job.append_log(f"[DownloadIDs] 重试模式：仅下指定的 {len(cleaned)} 个 ID（folder backlog 本次跳过）")
             else:
                 for s in cleaned:
                     job.queue_pending_id(s)
@@ -3272,6 +3284,9 @@ def proxy_thumb(url: str = "", size: int = 0):
 
 @app.post("/api/start")
 def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
+    # 先让正在跑的空闲下载轮次收手 —— 它是我们自己起的后台任务，不能拿它把用户的
+    # 「开始」挡回去（MAX_CONCURRENT=1，不让位的话用户只会看到「已有 1 个任务在跑」）。
+    _yield_idle_jobs()
     if not jobs.can_start():
         active = jobs.list_active()
         return {
@@ -3523,6 +3538,10 @@ def get_status(job_id: str = ""):
             "progress": {"total": 0, "success": 0, "skip": 0, "fail": 0},
             "page_progress": {"current": 0, "total": 0},
             "jobs": [],
+            # 没有 job 时 is_idle 也要在（前端无条件读它，缺字段会让上一次的值残留成 true）
+            "is_idle": False,
+            # 空闲下载：没有任务时前端仍要能显示它的开关状态 / 下一轮倒计时 / 积压数
+            "idle_download": _idle_download_payload(),
         }
 
     # drain logs：push 给前端后从 job 缓冲清掉，下次轮询不重复
@@ -3596,6 +3615,9 @@ def get_status(job_id: str = ""):
         "tag_source": job.tag_source,
         # 收 ID 阶段的页断点：停止后非空 → 一键「从第 N 页续跑（N–原末页）」
         "cursor": cursor_snapshot,
+        # 是不是「空闲下载」轮次：前端据此静默收尾（不弹「任务完成」、不把视图拽到别的日期）
+        "is_idle": bool(getattr(job, "is_idle", False)),
+        "idle_download": _idle_download_payload(),
         # 给前端将来扩展 "多任务 UI" 用的列表；目前只有 1 个（MAX_CONCURRENT=1）
         "jobs": [
             {
@@ -3605,6 +3627,7 @@ def get_status(job_id: str = ""):
                 "tag_source": j.tag_source,
                 "label": j.label,
                 "is_running": j.is_running,
+                "is_idle": bool(getattr(j, "is_idle", False)),
             }
             for j in jobs.list_active()
         ],
@@ -4058,6 +4081,380 @@ def refresh_scores_status():
             "error": refresh_state.error,
             "recent": recent
         }
+
+
+# ==========================================
+# 「空闲下载」：没人用的时候自动吃掉积压的待下载 id
+# ==========================================
+# 场景：用户白天用「仅收集ID」把几个日期 folder 的 id 收好了，人就走开了。这个调度器
+# 在「没有前台任务 + 网络也安静」时，隔一段时间挑一个 folder、下掉一小批（per_round），
+# 走的是下载路径，和用户手点「按ID下载」完全同一条链路。
+#
+# 三条门控缺一不可（缺了就是抢用户带宽 / 抢并发位）：
+#   ① 没有任何 job 在跑 —— 注意**暂停中的任务也算在跑**（is_running 仍为 True）；
+#   ② 热度刷新线程不在跑 —— 它不占 job 注册表，必须单独问 refresh_state；
+#   ③ 网络安静 —— http_client 的活动探针静默超过 min_idle_sec，避免和用户正在做的
+#      浏览 / 缩略图代理抢带宽。
+# 再加一层「轮次间隔」：每轮跑完才预定下一轮，不会连着刷。
+#
+# ⚠⚠ 空闲轮次是一条**可被抢占**的 job。没有抢占的话，MAX_CONCURRENT=1 会让用户点
+#     「开始」得到「已有 1 个任务在跑」—— 而那个任务是用户自己没排过的后台任务，
+#     体验上等于「后台把用户挡在门外」。见 _yield_idle_jobs。
+
+IDLE_DOWNLOAD_META_KEY = "idle_download_cfg"
+IDLE_DOWNLOAD_DEFAULTS = {
+    "enabled": False,     # 默认关：后台自动联网需要用户点头
+    "interval_sec": 600,  # 两轮之间的空档（默认 10 分钟）
+    "per_round": 100,     # 每轮最多下多少张（100 张 = 1 个元数据请求）
+    "min_idle_sec": 60,   # 网络静默多久才算「空闲」
+}
+IDLE_DOWNLOAD_TICK = 2.0            # 调度线程的检查周期
+IDLE_DOWNLOAD_RETRY_SCAN = 60       # 没有积压时多久重扫一次
+IDLE_DOWNLOAD_BACKOFF_FACTOR = 3    # 整轮颗粒无收（典型：断网）时把下一轮推远
+IDLE_DOWNLOAD_BACKOFF_MIN_FAIL = 3  # 失败数到这个量级才当「网络真的坏了」，避免 1 张坏图就退避
+
+
+def _idle_clamp(value, lo, hi, default):
+    try:
+        return max(lo, min(hi, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+class IdleDownloadState:
+    """空闲下载的配置 + 运行态。
+
+    配置持久化在 deck.db 的 meta 表（后端重启后仍然有效，不依赖前端）；
+    运行态（下一轮时间 / 上一轮结果）只在内存，重启即归零。
+    """
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.enabled = IDLE_DOWNLOAD_DEFAULTS["enabled"]
+        self.interval_sec = IDLE_DOWNLOAD_DEFAULTS["interval_sec"]
+        self.per_round = IDLE_DOWNLOAD_DEFAULTS["per_round"]
+        self.min_idle_sec = IDLE_DOWNLOAD_DEFAULTS["min_idle_sec"]
+        self.next_run_at = 0.0        # epoch 秒；<= now 才允许开下一轮
+        self.rev = 0                  # 配置版本号：每次改配置 +1（见 _idle_run_round 的收尾）
+        self.round_seq = 0            # 轮次序号：只增不减，外部据此判断「又跑完了一轮」
+        self.last_round = None        # {seq, at, folder, picked, success, skip, fail, outcome}
+        self.last_skip_reason = ""    # 上一次没开跑的真实原因（给前端解释「为什么还没动」）
+        self.running_folder = ""      # 正在跑的空闲轮次的目标 folder
+
+    def load(self):
+        """从 deck.db 读回上次的配置。读不到 / 读坏了都退回默认值，不抛。"""
+        try:
+            raw = deck_db.meta_get(IDLE_DOWNLOAD_META_KEY)
+            cfg = json.loads(raw) if raw else {}
+        except Exception:
+            cfg = {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        d = IDLE_DOWNLOAD_DEFAULTS
+        with self.lock:
+            self.enabled = bool(cfg.get("enabled", d["enabled"]))
+            self.interval_sec = _idle_clamp(cfg.get("interval_sec"), 30, 86400, d["interval_sec"])
+            self.per_round = _idle_clamp(cfg.get("per_round"), 1, 1000, d["per_round"])
+            self.min_idle_sec = _idle_clamp(cfg.get("min_idle_sec"), 0, 3600, d["min_idle_sec"])
+        if self.enabled:
+            # 重启后不要把「上一轮的时间」也带回来（内存态没持久化）→ 立刻可跑
+            self.next_run_at = 0.0
+
+    def save(self):
+        with self.lock:
+            cfg = {
+                "enabled": self.enabled,
+                "interval_sec": self.interval_sec,
+                "per_round": self.per_round,
+                "min_idle_sec": self.min_idle_sec,
+            }
+        try:
+            deck_db.meta_set(IDLE_DOWNLOAD_META_KEY, json.dumps(cfg, ensure_ascii=False))
+        except Exception as e:
+            print(f"[idle] 配置落库失败（本次运行仍然生效）: {e}")
+
+
+idle_state = IdleDownloadState()
+
+
+def _idle_pending_folders():
+    """有积压的 folder 列表：[(folder, lib_id, 行数), ...]，日期文件夹在前、新日期优先。
+
+    纯 deck.db 查询 —— 不碰磁盘、不碰网络，所以「盘没接」也能列出积压。
+    """
+    try:
+        grouped = deck_db.queue_counts_grouped()
+    except Exception as e:
+        print(f"[idle] 读取积压计数失败: {e}")
+        return []
+    date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    rows = [(folder, lib_id, int(cnt))
+            for (lib_id, folder), cnt in grouped.items() if cnt]
+    # 两次稳定排序：先按名字倒序（新日期 / 大字典序在前），再把日期文件夹稳到最前
+    rows.sort(key=lambda r: r[0], reverse=True)
+    rows.sort(key=lambda r: 0 if date_re.match(r[0]) else 1)
+    return rows
+
+
+def _idle_resolve_dir(lib_id, folder):
+    """(lib_id, folder) → 磁盘上的绝对目录；返回 "" 表示这块盘现在不在。
+
+    ⚠ 不能图省事用 _resolve_save_dir_for_date：那只按**日期名**在所有 root 里找，
+    同一个日期同时存在于两块盘时（混合图库的常见形态）会挑错，把图写进 lib_id
+    对不上的那块盘；这里必须拿 lib_id 精确匹配。
+    """
+    for root in get_library_roots():
+        if root["id"] != lib_id:
+            continue
+        try:
+            candidate = Path(root["path"]) / folder
+            if candidate.is_dir():
+                return str(candidate)
+        except OSError:
+            continue
+    return ""
+
+
+def _idle_pick_round():
+    """挑出本轮要下的一批：一个 folder + 最多 per_round 个 id（挑不到返回 None）。
+
+    pending 在前、failed 在后，一起消费：
+      - pending = 还没下过的积压，是本功能的主目标；
+      - failed  = 上一轮瞬时网络失败留下的残留。它们**留在队列里就不会自己消失**
+        （永久失败如已删帖在下载路径上直接出队），所以顺手带上，否则它们会一直
+        挂在日历角标上，而调度器却说「没有积压」。
+    """
+    with idle_state.lock:
+        per_round = idle_state.per_round
+    for folder, lib_id, _count in _idle_pending_folders():
+        pending = deck_db.queue_load(lib_id, folder, status=deck_db.QUEUE_PENDING)
+        failed = deck_db.queue_load(lib_id, folder, status=deck_db.QUEUE_FAILED)
+        ids = (pending + failed)[:per_round]
+        if not ids:
+            continue
+        save_dir = _idle_resolve_dir(lib_id, folder)
+        if not save_dir:
+            continue   # 盘没接：跳过，绝不在本地空目录里造一份（同 popular_recover 的断盘保护）
+        return {"folder": folder, "lib_id": lib_id, "ids": ids, "save_dir": save_dir}
+    return None
+
+
+def _idle_run_round(job, ids):
+    """跑一轮空闲下载：复用 _run_job 的全部收尾逻辑（outcome / 落盘 / 注册表延迟清理）。"""
+    started_rev = getattr(job, "idle_rev", 0)
+    try:
+        _run_job(job, 1, 1, "download_ids", job.target_folder, "", "", ids, "", "danbooru", [])
+    finally:
+        with idle_state.lock:
+            idle_state.last_round = {
+                # seq 单调递增，外部（前端 / e2e）据此判断「又跑完了一轮」——
+                # 别拿 at（秒级时间戳）当标记：同一秒内连跑两轮就分不出来了。
+                "seq": getattr(job, "idle_seq", 0),
+                "at": datetime.datetime.now().strftime("%H:%M:%S"),
+                "folder": job.target_folder,
+                "picked": len(ids),
+                "success": int(job.success_count),
+                "skip": int(job.skip_count),
+                "fail": int(job.fail_count),
+                "outcome": job.outcome,
+            }
+            idle_state.running_folder = ""
+            # ⚠ 本轮跑着的时候用户可能改过配置（尤其是刚把开关打开）。那一刻
+            # set_idle_download 已经把 next_run_at 归零、想让调度器立刻动起来；
+            # 这里若无条件回写，就会用「本轮开始时的 interval」把它盖回去，
+            # 用户表现为「点了开关，结果要等满一个 interval 才动」。rev 变了就不回写。
+            if idle_state.rev == started_rev:
+                wait = idle_state.interval_sec
+                # 一整轮颗粒无收且失败成片 —— 典型是断网 / 被墙，别每 10 分钟再撞一次墙
+                if job.success_count == 0 and job.fail_count >= IDLE_DOWNLOAD_BACKOFF_MIN_FAIL:
+                    wait *= IDLE_DOWNLOAD_BACKOFF_FACTOR
+                idle_state.next_run_at = time.time() + wait
+
+
+def _idle_start_round(target):
+    job = _make_job(
+        target["folder"], "download_ids", [],
+        label=f"空闲下载 · {target['folder']}",
+        save_dir=target["save_dir"],
+        download_concurrency=DOWNLOAD_CONCURRENCY,
+    )
+    job.is_idle = True
+    # 记下起跑时的配置版本：收尾时靠它判断「用户中途改过配置没有」（见 _idle_run_round）
+    job.idle_rev = idle_state.rev
+    idle_state.round_seq += 1
+    job.idle_seq = idle_state.round_seq
+    job.is_running = True
+    job.outcome = "running"
+    job.error_message = ""
+    job.play_event.set()
+    jobs.add(job)
+    job.append_log(
+        f"[空闲下载] 本轮处理 {target['folder']} 的 {len(target['ids'])} 个待下载 ID"
+        f"（每轮上限 {idle_state.per_round}）"
+    )
+    job.thread = threading.Thread(
+        target=_idle_run_round, args=(job, target["ids"]),
+        daemon=True, name=f"idle-dl-{job.job_id}",
+    )
+    job.thread.start()
+    return job
+
+
+def _yield_idle_jobs(timeout=10.0):
+    """前台任务要开跑时，让正在跑的空闲下载立刻收手、把并发位让出来。
+
+    只在「活跃 job 全是空闲轮次」时动手（用户自己的任务永远不动）。
+    返回 True 表示确实让过位。_run_job 的 finally 仍会把已下好的图落盘。
+    """
+    active = jobs.list_active()
+    idle_jobs = [j for j in active if getattr(j, "is_idle", False)]
+    if not idle_jobs or len(idle_jobs) != len(active):
+        return False
+    for j in idle_jobs:
+        j.append_log("[空闲下载] 前台任务要开始了，本轮提前收手（已下好的图会正常落盘）")
+        j.outcome = "stopped"
+        j.is_running = False
+        j.play_event.set()
+    deadline = time.time() + timeout
+    while time.time() < deadline and jobs.list_active():
+        sleep(0.05)
+    return True
+
+
+def _idle_download_tick():
+    """调度线程的一拍：判断门控 → 挑目标 → 起一轮。任何异常都由调用方兜住。"""
+    st = idle_state
+    with st.lock:
+        if not st.enabled:
+            st.last_skip_reason = "空闲下载已关闭"
+            return
+        if st.next_run_at - time.time() > 0:
+            # ⚠ 倒计时**不写 reason**。reason 是「上一次真的没能开跑的原因」
+            # （有任务在跑 / 网络刚有活动 / 没有积压），每拍都被倒计时覆盖的话，
+            # 用户永远只能看到「距下一轮 3 分 12 秒」，真正的原因一闪就没。
+            # 倒计时另有 next_run_in 字段，前端自己拼。
+            return
+    active = jobs.list_active()
+    if active:
+        label = getattr(active[0], "label", "") or active[0].mode
+        with st.lock:
+            st.last_skip_reason = f"有任务在跑（{label}）"
+        return
+    if refresh_state.is_running:
+        with st.lock:
+            st.last_skip_reason = "热度刷新进行中"
+        return
+    with st.lock:
+        min_idle = st.min_idle_sec
+    quiet = http_client.seconds_since_activity()
+    if quiet < min_idle:
+        with st.lock:
+            st.last_skip_reason = f"网络刚有活动（{int(quiet)}s 前，需静默 {min_idle}s）"
+        return
+    target = _idle_pick_round()
+    if not target:
+        with st.lock:
+            st.last_skip_reason = "没有待下载的积压"
+            st.next_run_at = time.time() + IDLE_DOWNLOAD_RETRY_SCAN
+        return
+    with st.lock:
+        st.last_skip_reason = ""
+        st.running_folder = target["folder"]
+    _idle_start_round(target)
+
+
+def _idle_download_loop():
+    """常驻调度线程（daemon：随后端进程一起退出，不留孤儿）。"""
+    while True:
+        try:
+            _idle_download_tick()
+        except Exception as e:
+            try:
+                with idle_state.lock:
+                    idle_state.last_skip_reason = f"调度异常：{e}"
+                    idle_state.running_folder = ""
+            except Exception:
+                pass
+        sleep(IDLE_DOWNLOAD_TICK)
+
+
+def _idle_download_payload():
+    """给 /api/status 与 /api/idle_download 共用的状态快照。
+
+    ⚠ 积压计数只 GROUP BY 一次（queue_counts_grouped），总数和 folder 明细都从这一份
+    派生 —— /api/status 每秒被轮询一次，别在这里打两次库。
+    """
+    try:
+        grouped = deck_db.queue_counts_grouped()
+    except Exception:
+        grouped = {}
+    date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    folders = [(folder, lib_id, int(cnt))
+               for (lib_id, folder), cnt in grouped.items() if cnt]
+    folders.sort(key=lambda r: r[0], reverse=True)
+    folders.sort(key=lambda r: 0 if date_re.match(r[0]) else 1)
+    with idle_state.lock:
+        return {
+            "enabled": idle_state.enabled,
+            "interval_sec": idle_state.interval_sec,
+            "per_round": idle_state.per_round,
+            "min_idle_sec": idle_state.min_idle_sec,
+            "next_run_in": max(0, int(idle_state.next_run_at - time.time())),
+            "running_folder": idle_state.running_folder,
+            "reason": idle_state.last_skip_reason,
+            "last_round": idle_state.last_round,
+            "pending_total": sum(cnt for _f, _l, cnt in folders),
+            "pending_folders": [
+                {"folder": f, "count": c} for f, _l, c in folders[:8]
+            ],
+        }
+
+
+class IdleDownloadRequest(BaseModel):
+    enabled: bool | None = None
+    interval_sec: int | None = None
+    per_round: int | None = None
+    min_idle_sec: int | None = None
+
+
+@app.get("/api/idle_download")
+def get_idle_download():
+    """空闲下载配置 + 运行态。前端轮询走 /api/status 的同名字段，这里是手动查 / 断言入口。"""
+    return {"ok": True, **_idle_download_payload()}
+
+
+@app.post("/api/idle_download")
+def set_idle_download(req: IdleDownloadRequest):
+    """改空闲下载配置。只传想改的字段，返回改完后的完整状态。"""
+    with idle_state.lock:
+        changed = any(v is not None for v in
+                      (req.enabled, req.interval_sec, req.per_round, req.min_idle_sec))
+        if changed:
+            # 版本号 +1：正在跑的那一轮收尾时看到 rev 变了，就不会用旧 interval 覆盖
+            # 这里刚定下的 next_run_at（否则「刚点开开关却要等满一个轮间隔」）。
+            idle_state.rev += 1
+        if req.enabled is not None:
+            idle_state.enabled = bool(req.enabled)
+            # 打开的瞬间就把「下一轮」定在现在：用户点一下就能马上看到它动，
+            # 不然要盯着「距下一轮还有 10 分」怀疑自己没点成功
+            if idle_state.enabled:
+                idle_state.next_run_at = 0.0
+                # 顺手清掉关闭时留下的那句「空闲下载已关闭」——它会被 tick 覆盖，
+                # 但清掉后前端下一帧就能显示真正的原因，不用等一拍
+                idle_state.last_skip_reason = ""
+            else:
+                idle_state.last_skip_reason = "空闲下载已关闭"
+        if req.interval_sec is not None:
+            idle_state.interval_sec = _idle_clamp(
+                req.interval_sec, 30, 86400, idle_state.interval_sec)
+        if req.per_round is not None:
+            idle_state.per_round = _idle_clamp(
+                req.per_round, 1, 1000, idle_state.per_round)
+        if req.min_idle_sec is not None:
+            idle_state.min_idle_sec = _idle_clamp(
+                req.min_idle_sec, 0, 3600, idle_state.min_idle_sec)
+    idle_state.save()
+    return {"ok": True, **_idle_download_payload()}
 
 
 @app.get("/api/refresh_score/{post_id}")
@@ -5229,6 +5626,18 @@ def api_caption_prompt(req: CaptionPromptRequest):
 
 
 if __name__ == "__main__":
+    # 空闲下载配置从 deck.db 读回（后端重启后仍然生效，不依赖前端来推）。
+    # 放在这里而不是模块顶层：它要连 deck.db，而 import 阶段的 DB 初始化已经由
+    # 上面的 DanbooruData() 引导实例完成，这里只做一次纯读。
+    idle_state.load()
+
+    # 空闲下载调度线程：daemon，随后端进程一起走。
+    # ⚠ 必须在所有 API 路由定义之后再起 —— tick 会用到 refresh_state / _run_job
+    #   这些下面才定义的对象，早起会在 import 期间撞 NameError。
+    threading.Thread(
+        target=_idle_download_loop, daemon=True, name="idle-download",
+    ).start()
+
     import uvicorn
     uvicorn.run(
         app,

@@ -11,6 +11,10 @@
 
 对外只暴露 request()/get_session()/reset_sessions()/RateLimiter/PermanentHTTPError，
 danbooru_api / gelbooru_api / main.py 的直连点全部走这里。
+
+4. 网络活动探针 —— seconds_since_activity() 供 main.py 的「空闲下载」判断网络是否安静。
+   刻意挂在 request() 这个唯一入口上，而不是让每个调用方自己上报：列表请求 / 元数据 /
+   CDN 下载 / 缩略图代理全都经过这里，一处记录即全局有效。
 """
 import email.utils
 import json
@@ -75,6 +79,24 @@ def get_session():
         _local.session = sess
         _local.gen = gen
     return sess
+
+
+# ---------------- 网络活动探针 ----------------
+# 「空闲下载」需要知道「最近有没有人在用网」。monotonic 不受系统时间调整影响；
+# 初值取 -1e9 而非 0：Windows 上 monotonic() 是「开机以来秒数」，刚开机时它可能只有
+# 几百秒，用 0 当初值会让「从没发过请求」被算成「1 分钟前刚发过」→ 白等一轮。
+_last_activity = time.monotonic() - 1e9
+
+
+def note_activity():
+    """记录一次真实的网络活动（在 request() 里每次实际发出 HTTP 前调用）。"""
+    global _last_activity
+    _last_activity = time.monotonic()
+
+
+def seconds_since_activity():
+    """距上一次真实网络请求过了多少秒。从未请求过 → 一个很大的数。"""
+    return time.monotonic() - _last_activity
 
 
 # ---------------- 令牌桶 ----------------
@@ -199,6 +221,7 @@ def request(method, url, *, kind="json", retries=5, timeout=20,
         if limiter is not None:
             limiter.acquire()
         attempt += 1
+        note_activity()
         try:
             resp = get_session().request(
                 method,
