@@ -5625,19 +5625,25 @@ def api_caption_prompt(req: CaptionPromptRequest):
     }
 
 
+# ⚠⚠ 这两句**绝不能**放进下面的 `if __name__ == "__main__":` 里。
+# 桌面应用（desktop-app/electron/main.cjs）拉起后端的方式是
+#     python -u -c "... uvicorn.run('main:app', host='127.0.0.1', port=18765, ...)"
+# 即把 main **当模块导入**，此时 __name__ == "main"，守护块里的代码一行都不执行。
+#
+# 症状极具迷惑性：面板开关能拨、配置能落库、/api/idle_download 也答得好好的，
+# 但调度线程根本不存在 —— 一张图都不会下。最明显的指纹是 reason 恒为空串：
+# _idle_download_tick 的**每一条**跳过分支都会写 last_skip_reason，静态对象才空。
+# 而 `python main.py` 手跑一切正常，所以「用脚本启动后端」的 e2e 永远抓不到它。
+#
+# 放在模块尾部 = 「被导入」与「当脚本跑」两种情况都在 import 完成时各执行一次；
+# 位置必须在所有路由与 refresh_state / _run_job 定义之后，否则 import 期撞 NameError。
+idle_state.load()          # 配置从 deck.db 读回（后端重启后仍然生效，不靠前端推）
+threading.Thread(
+    target=_idle_download_loop, daemon=True, name="idle-download",
+).start()
+
+
 if __name__ == "__main__":
-    # 空闲下载配置从 deck.db 读回（后端重启后仍然生效，不依赖前端来推）。
-    # 放在这里而不是模块顶层：它要连 deck.db，而 import 阶段的 DB 初始化已经由
-    # 上面的 DanbooruData() 引导实例完成，这里只做一次纯读。
-    idle_state.load()
-
-    # 空闲下载调度线程：daemon，随后端进程一起走。
-    # ⚠ 必须在所有 API 路由定义之后再起 —— tick 会用到 refresh_state / _run_job
-    #   这些下面才定义的对象，早起会在 import 期间撞 NameError。
-    threading.Thread(
-        target=_idle_download_loop, daemon=True, name="idle-download",
-    ).start()
-
     import uvicorn
     uvicorn.run(
         app,
