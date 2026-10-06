@@ -2963,7 +2963,10 @@ const idleDlStatusText = computed(() => {
   const st = idleDl.value;
   if (st.runningFolder) return `正在下 ${st.runningFolder}…`;
   if (!st.enabled) return st.pendingTotal ? `已关闭 · 积压 ${st.pendingTotal} 张` : '已关闭';
-  const head = st.pendingTotal ? `积压 ${st.pendingTotal} 张` : '待命中 · 暂无积压';
+  // 没有积压时 head 只说「待命中」，**不再自带「暂无积压」** —— 那会和后端给出的
+  // reason「没有待下载的积压」撞成「待命中 · 暂无积压 · 没有待下载的积压」，同一件事说两遍。
+  // 空积压这件事交给 reason 讲，head 只负责「在不在岗」。
+  const head = st.pendingTotal ? `积压 ${st.pendingTotal} 张` : '待命中';
   if (st.reason) return `${head} · ${st.reason}`;
   if (st.nextRunIn > 0) return `${head} · 约 ${fmtIdleCountdown(st.nextRunIn)}后`;
   return head;
