@@ -177,6 +177,9 @@ watch(downloadConcurrency, (v) => {
   if (clamped !== v) downloadConcurrency.value = clamped;
   habits.downloadConcurrency = downloadConcurrency.value;
   localStorage.setItem('crawlerHabits', JSON.stringify(habits));
+  // 空闲下载也跟着走这个数（它没有请求上下文，只能靠这里推过去）。
+  // 放在夹取之后：调这里读的是 downloadConcurrency.value，已经是 1..16 的合法值。
+  pushIdleConcurrency();
 });
 
 watch(() => form.value.mode, (newMode) => {
@@ -2872,6 +2875,9 @@ const idleDl = ref({
   lastRound: null,
   runningFolder: '',
   busy: false,
+  // 后端那一轮**实际会用**的并发度（= 本组件「下载并发」设置的镜像，见 pushIdleConcurrency）。
+  // 面板只展示它，不改它：改了也只是自我安慰，真正的取值在 deck.db 里。
+  downloadConcurrency: 0,
 });
 
 const IDLE_INTERVAL_CHOICES = [
@@ -2908,6 +2914,23 @@ const idleIntervalChoices = computed(() => {
   return list;
 });
 
+// 把「下载并发」推给空闲下载（后端只认 deck.db 里那一份，调度线程每轮读它）。
+//
+// ⚠ 为什么必须由前端推：空闲轮次是**调度线程自己起的**，不经过 /api/start，
+//    拿不到随请求下发的 download_concurrency —— 之前后端只能写死 4，于是
+//    「界面设 8 / 空闲轮次仍跑 4」，而且面板上一个字都不说。
+// ⚠ 只取返回里的 download_concurrency，**不要**整包 applyIdlePayload：点开关是
+//    乐观更新（本地先翻成「开」再去 POST），整包回填会把那个中间态盖回旧值。
+async function pushIdleConcurrency() {
+  const v = Math.max(1, Math.min(16, Math.round(Number(downloadConcurrency.value) || 4)));
+  try {
+    const res = await window.desktopAPI.crawler.setIdleDownload({ download_concurrency: v });
+    if (res) idleDl.value.downloadConcurrency = Number(res.download_concurrency || v);
+  } catch (err) {
+    // 后端还没就绪 / 未开的会话：静默。改设置与进面板都会再推一次，不必打扰用户。
+  }
+}
+
 function applyIdlePayload(payload) {
   if (!payload) return;
   idleDl.value.enabled = !!payload.enabled;
@@ -2917,6 +2940,8 @@ function applyIdlePayload(payload) {
   idleDl.value.pendingFolders = Array.isArray(payload.pending_folders) ? payload.pending_folders : [];
   idleDl.value.pendingFolderCount = Number(payload.pending_folder_count ?? idleDl.value.pendingFolders.length);
   idleDl.value.nextRunIn = Number(payload.next_run_in || 0);
+  idleDl.value.downloadConcurrency = Number(
+    payload.download_concurrency || idleDl.value.downloadConcurrency || 0);
   idleDl.value.reason = payload.reason || '';
   idleDl.value.lastRound = payload.last_round || null;
   idleDl.value.runningFolder = payload.running_folder || '';
@@ -2978,9 +3003,14 @@ const idleDlStatusText = computed(() => {
 
 const idleDlTooltip = computed(() => {
   const st = idleDl.value;
+  // 并发度：后端下发的是「下一轮实际会用几路」，也就是本组件「下载并发」的镜像。
+  // 必须说清它跟哪个设置走 —— 否则「4 路」看着像又一个藏在后台的隐藏参数。
+  const conc = st.downloadConcurrency || downloadConcurrency.value;
   const lines = [
     '开启后：没有前台任务、热度刷新停着、网络静默 1 分钟以上时，自动下载各日期文件夹里积压的待下载 ID。',
-    `每轮最多 ${st.perRound} 张、轮间隔 ${fmtIdleInterval(st.intervalSec)}；走的是和「按ID下载」完全相同的下载链路。`,
+    `每轮最多 ${st.perRound} 张、轮间隔 ${fmtIdleInterval(st.intervalSec)}；并发 ${conc} 路`
+      + '（跟随上方「下载并发」设置）。',
+    '走的是和「按ID下载」完全相同的下载链路。',
     '任何时候你点「开始」新任务，它都会立刻把位置让出来。',
   ];
   if (st.pendingFolders.length) {
@@ -5303,6 +5333,9 @@ onMounted(async () => {
   // 静默加载：Python 后端就绪后在后台刷新翻译，不再显示”正在读取”遮罩，消除闪烁
   await loadGallery(gallery.value.selectedDate, true);
   await syncStatus();
+  // 后端就绪后把「下载并发」推给它一次：空闲下载读的是 deck.db 里那一份，
+  // 不推的话，本会话若改了设置而此前没打开过空闲面板，它就跑在老值上。
+  await pushIdleConcurrency();
   loadFavSnapshot();
   pollTimer = window.setInterval(syncStatus, 1200);
   window.addEventListener('keydown', onKeyDown);

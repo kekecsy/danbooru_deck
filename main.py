@@ -4150,6 +4150,11 @@ IDLE_DOWNLOAD_DEFAULTS = {
     "interval_sec": 600,  # 两轮之间的空档（默认 10 分钟）
     "per_round": 100,     # 每轮最多下多少张（100 张 = 1 个元数据请求）
     "min_idle_sec": 60,   # 网络静默多久才算「空闲」
+    # 轮内并发度。**跟随界面「下载并发」设置** —— 空闲轮次没有请求上下文，
+    # 拿不到 StartRequest.download_concurrency（那是用户点「开始」时随请求下发的），
+    # 所以由前端把设置推过来（见 IdleDownloadRequest.download_concurrency）。
+    # 这个默认值只在「前端一次都还没推过」时兜底（正常进一次面板就会覆盖）。
+    "download_concurrency": DOWNLOAD_CONCURRENCY,
 }
 IDLE_DOWNLOAD_TICK = 2.0            # 调度线程的检查周期
 IDLE_DOWNLOAD_RETRY_SCAN = 60       # 没有积压时多久重扫一次
@@ -4179,6 +4184,7 @@ class IdleDownloadState:
         self.interval_sec = IDLE_DOWNLOAD_DEFAULTS["interval_sec"]
         self.per_round = IDLE_DOWNLOAD_DEFAULTS["per_round"]
         self.min_idle_sec = IDLE_DOWNLOAD_DEFAULTS["min_idle_sec"]
+        self.download_concurrency = IDLE_DOWNLOAD_DEFAULTS["download_concurrency"]
         self.next_run_at = 0.0        # epoch 秒；<= now 才允许开下一轮
         self.rev = 0                  # 配置版本号：每次改配置 +1（见 _idle_run_round 的收尾）
         self.round_seq = 0            # 轮次序号：只增不减，外部据此判断「又跑完了一轮」
@@ -4194,6 +4200,10 @@ class IdleDownloadState:
         用户某次点开过，之后每次开机它都以「开」的状态醒过来、在后台自己下载，
         而界面上一句提示都没有（开关就那么亮着，很像应用自作主张）。
         所以每个会话一律从「关」开始；轮间隔 / 每轮张数 / 静默阈值照旧持久化。
+
+        并发度（download_concurrency）也读回：它只是界面设置的**镜像**，而界面每次
+        进面板都会回推一次（见 pushIdleConcurrency），所以读回一个旧值不会持续生效 ——
+        不读回的后果反而是「重启后还没进过面板的那段时间里，空闲轮次跑在老并发度上」。
         """
         try:
             raw = deck_db.meta_get(IDLE_DOWNLOAD_META_KEY)
@@ -4208,6 +4218,8 @@ class IdleDownloadState:
             self.interval_sec = _idle_clamp(cfg.get("interval_sec"), 30, 86400, d["interval_sec"])
             self.per_round = _idle_clamp(cfg.get("per_round"), 1, 1000, d["per_round"])
             self.min_idle_sec = _idle_clamp(cfg.get("min_idle_sec"), 0, 3600, d["min_idle_sec"])
+            self.download_concurrency = _idle_clamp(
+                cfg.get("download_concurrency"), 1, 16, d["download_concurrency"])
         # next_run_at 不必处理：保持初值 0（= 立即可跑）。关着的会话用不到它，
         # 用户点开开关那一刻 set_idle_download 会再归零一次。
 
@@ -4220,6 +4232,7 @@ class IdleDownloadState:
                 "interval_sec": self.interval_sec,
                 "per_round": self.per_round,
                 "min_idle_sec": self.min_idle_sec,
+                "download_concurrency": self.download_concurrency,
             }
         try:
             deck_db.meta_set(IDLE_DOWNLOAD_META_KEY, json.dumps(cfg, ensure_ascii=False))
@@ -4360,11 +4373,16 @@ def _idle_run_round(job, ids):
 
 
 def _idle_start_round(target):
+    # 轮内并发度取**配置里的**（= 界面「下载并发」的镜像），不是模块常量：
+    # 写死 DOWNLOAD_CONCURRENCY 的话，用户把界面设成 8、自己的任务跑 8，
+    # 空闲轮次却永远只跑 4，而面板上一个字都不说（2026-10 查出来的）。
+    with idle_state.lock:
+        conc = idle_state.download_concurrency
     job = _make_job(
         target["folder"], "download_ids", [],
         label=f"空闲下载 · {target['folder']}",
         save_dir=target["save_dir"],
-        download_concurrency=DOWNLOAD_CONCURRENCY,
+        download_concurrency=conc,
     )
     job.is_idle = True
     # 记下起跑时的配置版本：收尾时靠它判断「用户中途改过配置没有」（见 _idle_run_round）
@@ -4503,6 +4521,9 @@ def _idle_download_payload():
             "interval_sec": idle_state.interval_sec,
             "per_round": idle_state.per_round,
             "min_idle_sec": idle_state.min_idle_sec,
+            # 轮内并发度。下发给前端有两个用处：面板 tooltip 能说清「这轮是几路」，
+            # 以及验收能直接读它断言「界面改了就跟着变」。
+            "download_concurrency": idle_state.download_concurrency,
             "next_run_in": max(0, int(idle_state.next_run_at - time.time())),
             "running_folder": idle_state.running_folder,
             "reason": idle_state.last_skip_reason,
@@ -4523,6 +4544,10 @@ class IdleDownloadRequest(BaseModel):
     interval_sec: int | None = None
     per_round: int | None = None
     min_idle_sec: int | None = None
+    # 界面「下载并发」的镜像。空闲轮次没有请求上下文（它由调度线程自己起，不经过
+    # StartRequest），拿不到那个随请求下发的 download_concurrency —— 只能让前端
+    # 在改设置 / 进面板时推一次过来，落在 deck.db 里，调度线程每轮读它。
+    download_concurrency: int | None = None
 
 
 @app.get("/api/idle_download")
@@ -4535,11 +4560,19 @@ def get_idle_download():
 def set_idle_download(req: IdleDownloadRequest):
     """改空闲下载配置。只传想改的字段，返回改完后的完整状态。"""
     with idle_state.lock:
+        # 落库前先拍一张：前端进面板 / 每敲一下并发数字框都会回推一次，
+        # 值没变就不该反复写库（见文件尾的 dirty 判断）。
+        before = (idle_state.interval_sec, idle_state.per_round,
+                  idle_state.min_idle_sec, idle_state.download_concurrency)
         changed = any(v is not None for v in
                       (req.enabled, req.interval_sec, req.per_round, req.min_idle_sec))
         if changed:
             # 版本号 +1：正在跑的那一轮收尾时看到 rev 变了，就不会用旧 interval 覆盖
             # 这里刚定下的 next_run_at（否则「刚点开开关却要等满一个轮间隔」）。
+            # ⚠ download_concurrency **刻意不算在里面**：它只影响下一轮怎么跑，不碰
+            #   next_run_at，不需要 rev 保护；把它算进来的话，前端每次进面板回推一次
+            #   就会白涨一个版本号，正在跑的那一轮收尾时误判「用户改过配置」而不写
+            #   next_run_at —— 倒计时就停在原地不刷新了。
             idle_state.rev += 1
         if req.enabled is not None:
             idle_state.enabled = bool(req.enabled)
@@ -4561,7 +4594,13 @@ def set_idle_download(req: IdleDownloadRequest):
         if req.min_idle_sec is not None:
             idle_state.min_idle_sec = _idle_clamp(
                 req.min_idle_sec, 0, 3600, idle_state.min_idle_sec)
-    idle_state.save()
+        if req.download_concurrency is not None:
+            idle_state.download_concurrency = _idle_clamp(
+                req.download_concurrency, 1, 16, idle_state.download_concurrency)
+        dirty = before != (idle_state.interval_sec, idle_state.per_round,
+                           idle_state.min_idle_sec, idle_state.download_concurrency)
+    if dirty:
+        idle_state.save()
     return {"ok": True, **_idle_download_payload()}
 
 
