@@ -5578,7 +5578,7 @@ const downloadTargetHint = computed(() => {
            任务，它跑没人管的积压。开关 / 间隔都存后端（deck.db meta），前端只读写。 -->
       <div
         class="idle-dl-panel"
-        :class="{ 'is-on': idleDl.enabled, 'is-busy': !!idleDl.runningFolder }"
+        :class="{ 'is-on': idleDl.enabled }"
       >
         <button
           type="button"
@@ -5588,7 +5588,10 @@ const downloadTargetHint = computed(() => {
           :title="idleDlTooltip"
           @click="toggleIdleDownload"
         >
-          <span class="idle-dl-dot" aria-hidden="true"></span>
+          <!-- 这里原本有一个状态小圆点（有轮次在跑时就地呼吸闪烁）。已整体去掉：
+               一个自己会在后台下东西的开关，再挂一盏闪着的灯只是视觉噪音，
+               而且「开/关」由按钮文案 + 底色已经说得很清楚，运行状态归右边的状态行
+               （「正在下 2026-10-06…」）。别再加回来。 -->
           空闲下载 {{ idleDl.enabled ? '开' : '关' }}
         </button>
         <select
@@ -9472,20 +9475,8 @@ const downloadTargetHint = computed(() => {
   color: #fff;
 }
 .idle-dl-toggle:disabled { opacity: 0.6; cursor: default; }
-.idle-dl-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--muted);
-  flex: 0 0 auto;
-}
-.idle-dl-toggle.active .idle-dl-dot { background: #fff; }
-/* 有轮次在跑：呼吸一下，让「它正在自己干活」这件事在侧栏里可见 */
-.idle-dl-panel.is-busy .idle-dl-dot { animation: idle-dl-pulse 1.2s ease-in-out infinite; }
-@keyframes idle-dl-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.25; }
-}
+/* 开关里那个「运行中闪烁」的状态小圆点连同它的呼吸动画一并删掉了（连同 .is-busy 类）。
+   面板里唯一会动的元素现在只有状态行里的文字。 */
 .idle-dl-interval {
   /* ⚠ style.css 里那条全局 input/select/textarea 规则把宽度定成了 100%，
      会把下拉撑满整行、把「开关 / 间隔 / 状态」挤成三行（截图里看到过）。

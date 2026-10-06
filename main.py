@@ -4145,7 +4145,8 @@ def refresh_scores_status():
 
 IDLE_DOWNLOAD_META_KEY = "idle_download_cfg"
 IDLE_DOWNLOAD_DEFAULTS = {
-    "enabled": False,     # 默认关：后台自动联网需要用户点头
+    # 默认关，而且**每次启动都从关开始**（这个值不持久化，见 IdleDownloadState.load）
+    "enabled": False,
     "interval_sec": 600,  # 两轮之间的空档（默认 10 分钟）
     "per_round": 100,     # 每轮最多下多少张（100 张 = 1 个元数据请求）
     "min_idle_sec": 60,   # 网络静默多久才算「空闲」
@@ -4184,7 +4185,14 @@ class IdleDownloadState:
         self.running_folder = ""      # 正在跑的空闲轮次的目标 folder
 
     def load(self):
-        """从 deck.db 读回上次的配置。读不到 / 读坏了都退回默认值，不抛。"""
+        """从 deck.db 读回上次的**偏好项**。读不到 / 读坏了都退回默认值，不抛。
+
+        ⚠⚠ 开关本身（enabled）**不读回、也不落库**。它是「允许后台自动联网」的授权，
+        不是偏好设置 —— 每次启动都得用户当场再点一次头。跟着持久化的话，
+        用户某次点开过，之后每次开机它都以「开」的状态醒过来、在后台自己下载，
+        而界面上一句提示都没有（开关就那么亮着，很像应用自作主张）。
+        所以每个会话一律从「关」开始；轮间隔 / 每轮张数 / 静默阈值照旧持久化。
+        """
         try:
             raw = deck_db.meta_get(IDLE_DOWNLOAD_META_KEY)
             cfg = json.loads(raw) if raw else {}
@@ -4194,18 +4202,19 @@ class IdleDownloadState:
             cfg = {}
         d = IDLE_DOWNLOAD_DEFAULTS
         with self.lock:
-            self.enabled = bool(cfg.get("enabled", d["enabled"]))
+            self.enabled = False     # 见 docstring：这条授权不跨会话继承
             self.interval_sec = _idle_clamp(cfg.get("interval_sec"), 30, 86400, d["interval_sec"])
             self.per_round = _idle_clamp(cfg.get("per_round"), 1, 1000, d["per_round"])
             self.min_idle_sec = _idle_clamp(cfg.get("min_idle_sec"), 0, 3600, d["min_idle_sec"])
-        if self.enabled:
-            # 重启后不要把「上一轮的时间」也带回来（内存态没持久化）→ 立刻可跑
-            self.next_run_at = 0.0
+        # next_run_at 不必处理：保持初值 0（= 立即可跑）。关着的会话用不到它，
+        # 用户点开开关那一刻 set_idle_download 会再归零一次。
 
     def save(self):
         with self.lock:
+            # ⚠ 只存偏好项。**不要把 enabled 写进来** —— load() 不读它，
+            #   存着只会让 deck.db 里留一个「enabled: true」的假象，
+            #   日后排查「它怎么自己在下载」时白绕一圈（见 load 的 docstring）。
             cfg = {
-                "enabled": self.enabled,
                 "interval_sec": self.interval_sec,
                 "per_round": self.per_round,
                 "min_idle_sec": self.min_idle_sec,
