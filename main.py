@@ -555,6 +555,30 @@ class JobRegistry:
 
 jobs = JobRegistry()
 
+# ───────────────────────── 起 job 的「检查 + 注册」闸门 ─────────────────────────
+# 有两条路径会起 job：用户点「开始」(start_scraper) 与空闲下载调度器
+# (_idle_start_round)。两边都是「先看有没有并发位、再构造 job、最后注册」，
+# 而检查与注册之间隔着构造 job（new DanbooruData：建目录 / 读 viewer_data）与
+# 挑目标（查 deck.db / stat 磁盘目录）等耗时操作 —— 对方完全可能在这段缝里
+# 各注册一个，于是 MAX_CONCURRENT = 1 的约束被突破，两个任务同时在跑。
+# 最坏情况：两个 job 落在**同一个 save_dir**（用户手动选了空闲轮次正在下的那天），
+# 并发写同一目录、抢同一批 ID。
+_START_GATE = threading.Lock()
+
+
+def _register_job(job) -> bool:
+    """原子地「占位 + 注册」。返回 False = 并发位已被占（调用方决定让位重试还是报错）。
+
+    ⚠ 调用前提：job.is_running 必须已经置 True —— can_start() 靠它认这个 job
+    （JobRegistry.list_active 判的是 is_running / thread 存活），否则闸门内的检查
+    看不到刚刚注册的对方，等于没加锁。
+    """
+    with _START_GATE:
+        if not jobs.can_start():
+            return False
+        jobs.add(job)
+        return True
+
 
 def append_log(msg):
     """模块级日志：打印到控制台，并 push 到 primary job 的 logs 环（若有）。
@@ -3393,7 +3417,18 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
     job.outcome = "running"
     job.error_message = ""
     job.play_event.set()
-    jobs.add(job)
+    # ⚠ 注册必须走闸门（而不是 jobs.add）：开头的 can_start() 早退只是省下构造开销，
+    #   真正的互斥在这里 —— 上面那句 _yield_idle_jobs() 与本句之间仍有一段缝，空闲
+    #   调度器完全可能刚好又起一轮。被占就再让一次位重试，仍失败才认输报错。
+    if not _register_job(job):
+        _yield_idle_jobs()
+        if not _register_job(job):
+            job.is_running = False
+            job.outcome = "stopped"
+            return {
+                "ok": False,
+                "msg": f"已有 {len(jobs.list_active())} 个任务在跑，达到并发上限 {jobs.MAX_CONCURRENT}",
+            }
 
     job.thread = threading.Thread(
         target=_run_job,
@@ -4055,6 +4090,13 @@ def refresh_scores_start(date_str: str):
         refresh_state.total = 0
         refresh_state.error = ""
         refresh_state.recent = []
+    # ⚠ 让空闲下载轮次收手 —— 刷新是用户按下的动作，优先级高于后台补刀。
+    #   ⚠⚠ 顺序不能反：**先占位 is_running，再让位**。反过来的话，让位期间
+    #   （最多 10s）空闲调度器看到的 is_running 仍是 False，会心安理得地起新一轮，
+    #   于是「刷新 + 空闲下载」并存抢网络 —— 而这个占位一落下，tick 的门控②
+    #   立刻生效，从根上堵住那条缝。（刷新不起 job、不走 _START_GATE，
+    #   它和 job 的互斥就靠这个标志位 + 上面这道让位。）
+    _yield_idle_jobs()
     refresh_thread = threading.Thread(target=_run_refresh_scores, args=(date_str,), daemon=True)
     refresh_thread.start()
     return {"ok": True, "msg": f"已开始刷新 {date_str} 的热度"}
@@ -4281,13 +4323,23 @@ def _idle_start_round(target):
     job.is_idle = True
     # 记下起跑时的配置版本：收尾时靠它判断「用户中途改过配置没有」（见 _idle_run_round）
     job.idle_rev = idle_state.rev
-    idle_state.round_seq += 1
-    job.idle_seq = idle_state.round_seq
     job.is_running = True
     job.outcome = "running"
     job.error_message = ""
     job.play_event.set()
-    jobs.add(job)
+    # ⚠ 走闸门注册（不是 jobs.add）：tick 里「看有没有 active job」到这句之间隔着
+    #   _idle_pick_round()（查 deck.db + stat 磁盘目录），用户完全可能在这段缝里点了
+    #   「开始」。被占就直接放弃本轮（不重试、不硬挤）—— 用户的动作优先，
+    #   下一拍 tick 看到 active 非空自然会让路。
+    if not _register_job(job):
+        job.is_running = False
+        job.outcome = "stopped"
+        return None
+
+    # seq 到这一步才推进：它同时是 last_round.seq 的来源，而 last_round 只在本轮
+    # 真的跑完后才写。注册被拒时若也推进，外部会看到一个「跳号且永远等不到」的序号。
+    idle_state.round_seq += 1
+    job.idle_seq = idle_state.round_seq
     job.append_log(
         f"[空闲下载] 本轮处理 {target['folder']} 的 {len(target['ids'])} 个待下载 ID"
         f"（每轮上限 {idle_state.per_round}）"
@@ -4360,7 +4412,13 @@ def _idle_download_tick():
     with st.lock:
         st.last_skip_reason = ""
         st.running_folder = target["folder"]
-    _idle_start_round(target)
+    if _idle_start_round(target) is None:
+        # 注册被拒：闸门判定并发位已被占（用户在前一瞬点了「开始」）。
+        # 不重试、不硬挤 —— 用户的动作优先；下一拍 tick 自会看到 active 非空而让路。
+        with st.lock:
+            st.running_folder = ""
+            st.last_skip_reason = "刚开始就被前台任务占用了并发位"
+            st.next_run_at = time.time() + IDLE_DOWNLOAD_TICK
 
 
 def _idle_download_loop():
