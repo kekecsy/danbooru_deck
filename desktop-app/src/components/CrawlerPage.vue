@@ -2866,6 +2866,7 @@ const idleDl = ref({
   perRound: 100,
   pendingTotal: 0,
   pendingFolders: [],
+  pendingFolderCount: 0,
   nextRunIn: 0,
   reason: '',
   lastRound: null,
@@ -2914,6 +2915,7 @@ function applyIdlePayload(payload) {
   idleDl.value.perRound = Number(payload.per_round || 100);
   idleDl.value.pendingTotal = Number(payload.pending_total || 0);
   idleDl.value.pendingFolders = Array.isArray(payload.pending_folders) ? payload.pending_folders : [];
+  idleDl.value.pendingFolderCount = Number(payload.pending_folder_count ?? idleDl.value.pendingFolders.length);
   idleDl.value.nextRunIn = Number(payload.next_run_in || 0);
   idleDl.value.reason = payload.reason || '';
   idleDl.value.lastRound = payload.last_round || null;
@@ -2980,8 +2982,13 @@ const idleDlTooltip = computed(() => {
     '任何时候你点「开始」新任务，它都会立刻把位置让出来。',
   ];
   if (st.pendingFolders.length) {
-    lines.push('—— 当前积压 ——');
+    // ⚠ 后端只下发前 8 个 folder。必须把「总共有几个」说出来，否则用户把列出的几项
+    // 一加对不上状态行的「积压 N 张」，只会怀疑计数错了（多盘图库很容易有十几个 folder）。
+    const totalFolders = Math.max(st.pendingFolderCount, st.pendingFolders.length);
+    lines.push(`—— 当前积压（共 ${totalFolders} 个文件夹）——`);
     for (const it of st.pendingFolders) lines.push(`${it.folder}：${it.count} 张`);
+    const hidden = totalFolders - st.pendingFolders.length;
+    if (hidden > 0) lines.push(`…另有 ${hidden} 个文件夹未列出`);
   }
   if (st.lastRound) {
     const r = st.lastRound;

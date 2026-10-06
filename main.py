@@ -4258,7 +4258,13 @@ def _idle_resolve_dir(lib_id, folder):
 
 
 def _idle_pick_round():
-    """挑出本轮要下的一批：一个 folder + 最多 per_round 个 id（挑不到返回 None）。
+    """挑出本轮要下的一批：返回 `(target, why)`；挑不到时 target 为 None、why 说明原因。
+
+    why 只分两种，因为它们的**用户可操作性完全不同**：
+      · 真没有积压             → 无事可做，等着就行
+      · 有积压但盘不在这台机器  → 把那块盘接上就好
+    把后者报成「没有待下载的积压」会自相矛盾 —— 面板上同一行里写着「积压 2 张」
+    又说「没有待下载的积压」（有多盘图库时真的会遇到）。
 
     pending 在前、failed 在后，一起消费：
       - pending = 还没下过的积压，是本功能的主目标；
@@ -4268,6 +4274,7 @@ def _idle_pick_round():
     """
     with idle_state.lock:
         per_round = idle_state.per_round
+    disk_offline = 0
     for folder, lib_id, _count in _idle_pending_folders():
         pending = deck_db.queue_load(lib_id, folder, status=deck_db.QUEUE_PENDING)
         failed = deck_db.queue_load(lib_id, folder, status=deck_db.QUEUE_FAILED)
@@ -4276,9 +4283,12 @@ def _idle_pick_round():
             continue
         save_dir = _idle_resolve_dir(lib_id, folder)
         if not save_dir:
+            disk_offline += 1
             continue   # 盘没接：跳过，绝不在本地空目录里造一份（同 popular_recover 的断盘保护）
-        return {"folder": folder, "lib_id": lib_id, "ids": ids, "save_dir": save_dir}
-    return None
+        return {"folder": folder, "lib_id": lib_id, "ids": ids, "save_dir": save_dir}, ""
+    if disk_offline:
+        return None, f"积压所在磁盘不在线（{disk_offline} 个文件夹）"
+    return None, "没有待下载的积压"
 
 
 def _idle_run_round(job, ids):
@@ -4301,6 +4311,16 @@ def _idle_run_round(job, ids):
                 "outcome": job.outcome,
             }
             idle_state.running_folder = ""
+            # ⚠ 同时清掉 reason。它现在装着的是「有任务在跑（空闲下载 · <本轮的 folder>）」
+            # —— 那是 tick 在本轮跑着时拍的（tick 看到 active 非空就写，而那个 active
+            # 就是**这一轮自己**）。本轮一结束，那个原因就不成立了，但它**不会自己消失**：
+            # 下面刚把 next_run_at 设到未来（退避时是 3 倍 interval），而 tick 在倒计时
+            # 期间刻意不写 reason（见 _idle_download_tick），于是这条过期文案会一直挂在
+            # 面板上，直到下一轮真正开跑。
+            # 用户看到的正是：队列里一个任务都没有，面板却写着
+            # 「积压 8724 张 · 有任务在跑（空闲下载 · 2026-10-06）」。
+            # 清空后下一帧就退回「积压 N 张 · 约 X 后」，tick 也会按真实情况重写。
+            idle_state.last_skip_reason = ""
             # ⚠ 本轮跑着的时候用户可能改过配置（尤其是刚把开关打开）。那一刻
             # set_idle_download 已经把 next_run_at 归零、想让调度器立刻动起来；
             # 这里若无条件回写，就会用「本轮开始时的 interval」把它盖回去，
@@ -4403,10 +4423,10 @@ def _idle_download_tick():
         with st.lock:
             st.last_skip_reason = f"网络刚有活动（{int(quiet)}s 前，需静默 {min_idle}s）"
         return
-    target = _idle_pick_round()
+    target, why = _idle_pick_round()
     if not target:
         with st.lock:
-            st.last_skip_reason = "没有待下载的积压"
+            st.last_skip_reason = why or "没有待下载的积压"
             st.next_run_at = time.time() + IDLE_DOWNLOAD_RETRY_SCAN
         return
     with st.lock:
@@ -4462,9 +4482,13 @@ def _idle_download_payload():
             "reason": idle_state.last_skip_reason,
             "last_round": idle_state.last_round,
             "pending_total": sum(cnt for _f, _l, cnt in folders),
+            # 明细只下发前 8 个（/api/status 每秒轮询一次，别把长列表塞进高频 payload），
+            # 但**总数另外给**：前端才能在 tooltip 里说明「还有几个没列出来」。
+            # 否则用户把列出的这几项一加，对不上「积压 N 张」，只会怀疑计数是错的。
             "pending_folders": [
                 {"folder": f, "count": c} for f, _l, c in folders[:8]
             ],
+            "pending_folder_count": len(folders),
         }
 
 
