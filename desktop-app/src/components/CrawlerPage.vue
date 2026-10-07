@@ -2861,8 +2861,9 @@ function stopRefreshScores() {
 // 没有前台任务、热度刷新停着、网络也安静时，后端自己隔一段时间把各日期 folder 里
 // 积压的待下载 id 下掉一批（走的就是 download_ids 同一条链路）。
 //
-// ⚠ 配置（开关 / 轮间隔）**只存后端**（deck.db 的 meta 表），前端不另存一份 ——
-// 两处存同一件事迟早会对不上。点开关 → POST → 下一帧 /api/status 回读为准。
+// ⚠ 配置（开关 / 等待时间 / 每轮张数 / 并发度）**只存后端**（deck.db 的 meta 表），
+// 前端不另存一份 —— 两处存同一件事迟早会对不上。点开关 / 改数字框 → POST →
+// 下一帧 /api/status 回读为准。
 const idleDl = ref({
   enabled: false,
   intervalSec: 600,
@@ -2880,12 +2881,80 @@ const idleDl = ref({
   downloadConcurrency: 0,
 });
 
-const IDLE_INTERVAL_CHOICES = [
-  { value: 300, label: '5 分钟' },
-  { value: 600, label: '10 分钟' },
-  { value: 1800, label: '30 分钟' },
-  { value: 3600, label: '1 小时' },
-];
+// ── 面板上两个可手输的旋钮：等待时间（分钟）与每轮张数 ────────────────────────
+// 和右上角那个「并发」框一样直接输入任意值，不再是固定档位。
+//
+// ⚠ 这两个值**只有后端一份**（deck.db meta 的 idle_download_cfg）—— 前端不另存
+//   localStorage：两处存同一件事迟早会对不上。「记住用户设的值」由后端负责，
+//   POST → idle_state.save() → 下次启动 load() 读回（开关 enabled 是唯一的例外，
+//   它是授权不是偏好，每次启动一律从「关」开始，见 main.py）。
+//
+// ⚠⚠ 输入框不能直接绑 idleDl.intervalSec：/api/status 每秒回一帧，每帧都会把
+//   intervalSec / perRound 覆盖成后端值 —— 直接绑的话，用户刚敲下的第一位数会在
+//   下一帧被抹回旧值（表现为「输入框自己变回去」）。所以编辑期间用本地草稿显示，
+//   提交（change = 回车 / 失焦）后才 POST，之后再由后端值接管。
+const idleIntervalDraft = ref('10');   // 单位分钟，初值对齐后端默认 600s
+const idlePerRoundDraft = ref('100');
+let idleIntervalEditing = false;
+let idlePerRoundEditing = false;
+
+// 秒 → 输入框里的分钟文本。0.5 分钟（= 30s，后端下限）粒度足够，不显示「5.00」。
+function idleSecToMinutesText(sec) {
+  return String(Math.round((Number(sec) || 0) / 60 * 100) / 100);
+}
+
+// 把后端值写回草稿。正在编辑的那个框不动（理由见上）。
+function syncIdleDrafts() {
+  if (!idleIntervalEditing) idleIntervalDraft.value = idleSecToMinutesText(idleDl.value.intervalSec);
+  if (!idlePerRoundEditing) idlePerRoundDraft.value = String(idleDl.value.perRound);
+}
+
+function onIdleIntervalEdit(e) {
+  idleIntervalEditing = true;
+  idleIntervalDraft.value = e.target.value;
+}
+
+function onIdlePerRoundEdit(e) {
+  idlePerRoundEditing = true;
+  idlePerRoundDraft.value = e.target.value;
+}
+
+// 提交：先按后端的同一区间夹一次再发，免得明显越界还打一趟（后端是最后一道闸）。
+// 空白 / 非正数一律**不发请求**、直接退回后端值 —— 否则「清空输入框」会被当成 0
+// 再夹成下限，把用户设的间隔悄悄改成 30 秒。
+async function commitIdleInterval(e) {
+  idleIntervalEditing = false;
+  const txt = String(e.target.value ?? '').trim();
+  const minutes = Number(txt);
+  if (txt && Number.isFinite(minutes) && minutes > 0) {
+    const sec = Math.min(86400, Math.max(30, Math.round(minutes * 60)));
+    if (sec !== idleDl.value.intervalSec) {
+      try {
+        applyIdlePayload(await window.desktopAPI.crawler.setIdleDownload({ interval_sec: sec }));
+      } catch (err) {
+        showToast(`改等待时间失败：${err.message}`, 'error');
+      }
+    }
+  }
+  syncIdleDrafts();
+}
+
+async function commitIdlePerRound(e) {
+  idlePerRoundEditing = false;
+  const txt = String(e.target.value ?? '').trim();
+  const n = Number(txt);
+  if (txt && Number.isFinite(n) && n >= 1) {
+    const per = Math.min(1000, Math.max(1, Math.round(n)));
+    if (per !== idleDl.value.perRound) {
+      try {
+        applyIdlePayload(await window.desktopAPI.crawler.setIdleDownload({ per_round: per }));
+      } catch (err) {
+        showToast(`改每轮张数失败：${err.message}`, 'error');
+      }
+    }
+  }
+  syncIdleDrafts();
+}
 
 function fmtIdleInterval(sec) {
   const s = Number(sec) || 0;
@@ -2901,18 +2970,6 @@ function fmtIdleCountdown(sec) {
   if (s < 3600) return `${Math.ceil(s / 60)} 分钟`;
   return `${(s / 3600).toFixed(1)} 小时`;
 }
-
-// 下拉选项跟着后端真实值走：后端被外部改成 120s 这类非预设值时，
-// 补一个选项进去而不是让 select 显示空白（选中项与 value 对不上会显示第一项）。
-const idleIntervalChoices = computed(() => {
-  const list = [...IDLE_INTERVAL_CHOICES];
-  const cur = idleDl.value.intervalSec;
-  if (!list.some(o => o.value === cur)) {
-    list.push({ value: cur, label: fmtIdleInterval(cur) });
-    list.sort((a, b) => a.value - b.value);
-  }
-  return list;
-});
 
 // 把「下载并发」推给空闲下载（后端只认 deck.db 里那一份，调度线程每轮读它）。
 //
@@ -2945,6 +3002,8 @@ function applyIdlePayload(payload) {
   idleDl.value.reason = payload.reason || '';
   idleDl.value.lastRound = payload.last_round || null;
   idleDl.value.runningFolder = payload.running_folder || '';
+  // 两个输入框跟着后端值走（正在编辑的那个除外，见 syncIdleDrafts）
+  syncIdleDrafts();
 }
 
 async function toggleIdleDownload() {
@@ -2970,16 +3029,6 @@ async function toggleIdleDownload() {
     showToast(`空闲下载设置失败：${err.message}`, 'error');
   } finally {
     idleDl.value.busy = false;
-  }
-}
-
-async function setIdleInterval(seconds) {
-  const value = Number(seconds);
-  if (!Number.isFinite(value) || value === idleDl.value.intervalSec) return;
-  try {
-    applyIdlePayload(await window.desktopAPI.crawler.setIdleDownload({ interval_sec: value }));
-  } catch (err) {
-    showToast(`改轮间隔失败：${err.message}`, 'error');
   }
 }
 
@@ -3010,6 +3059,8 @@ const idleDlTooltip = computed(() => {
     '开启后：没有前台任务、热度刷新停着、网络静默 1 分钟以上时，自动下载各日期文件夹里积压的待下载 ID。',
     `每轮最多 ${st.perRound} 张、轮间隔 ${fmtIdleInterval(st.intervalSec)}；并发 ${conc} 路`
       + '（跟随上方「下载并发」设置）。',
+    '左边两个数字框可以直接输入等待时间 / 每轮张数（常用档位 5 / 10 / 30 / 60 分钟）。'
+      + '两个值都存在后端（deck.db），重启应用后照旧。',
     '走的是和「按ID下载」完全相同的下载链路。',
     '任何时候你点「开始」新任务，它都会立刻把位置让出来。',
   ];
@@ -5610,7 +5661,8 @@ const downloadTargetHint = computed(() => {
 
       <!-- 空闲下载：没有前台任务、热度刷新停着、网络也安静时，自动把各日期 folder
            里积压的待下载 id 下一批。与「顺序队列」并列但互补：队列跑用户显式排的
-           任务，它跑没人管的积压。开关 / 间隔都存后端（deck.db meta），前端只读写。 -->
+           任务，它跑没人管的积压。开关 / 等待时间 / 每轮张数都存后端（deck.db meta），
+           前端只读写 —— 所以「记得我设过的值」这件事不需要前端再存一份。 -->
       <div
         class="idle-dl-panel"
         :class="{ 'is-on': idleDl.enabled }"
@@ -5629,16 +5681,34 @@ const downloadTargetHint = computed(() => {
                （「正在下 2026-10-06…」）。别再加回来。 -->
           空闲下载 {{ idleDl.enabled ? '开' : '关' }}
         </button>
-        <select
-          class="idle-dl-interval"
-          :value="idleDl.intervalSec"
-          :title="`两轮之间的间隔（每轮最多 ${idleDl.perRound} 张）`"
-          @change="setIdleInterval($event.target.value)"
-        >
-          <option v-for="opt in idleIntervalChoices" :key="opt.value" :value="opt.value">
-            {{ opt.label }}
-          </option>
-        </select>
+        <!-- 等待时间 / 每轮张数：和上面那个「并发」框一样可以直接手输，不再是固定档位。
+             ⚠ 输入期间显示的是本地草稿（idleIntervalDraft / idlePerRoundDraft），不是
+               直接绑 idleDl.intervalSec —— /api/status 每秒回一帧，绑后端值的话用户
+               刚敲下的第一位数会在下一帧被抹回去。见 script 里 syncIdleDrafts 的说明。 -->
+        <label class="idle-dl-num" title="两轮之间等多久（0.5 分钟 ~ 24 小时，可直接输入；常用 5 / 10 / 30 / 60 分钟）">
+          <input
+            type="number"
+            class="idle-dl-input idle-dl-interval"
+            min="0.5" max="1440" step="0.5"
+            :value="idleIntervalDraft"
+            :disabled="idleDl.busy"
+            @input="onIdleIntervalEdit"
+            @change="commitIdleInterval"
+          />
+          <span>分钟</span>
+        </label>
+        <label class="idle-dl-num" title="每轮最多下多少张（1 ~ 1000；100 张 ≈ 1 个元数据请求，太大的一轮会长期占着并发位）">
+          <input
+            type="number"
+            class="idle-dl-input idle-dl-per-round"
+            min="1" max="1000" step="1"
+            :value="idlePerRoundDraft"
+            :disabled="idleDl.busy"
+            @input="onIdlePerRoundEdit"
+            @change="commitIdlePerRound"
+          />
+          <span>张/轮</span>
+        </label>
         <span class="idle-dl-status" :title="idleDlTooltip">{{ idleDlStatusText }}</span>
       </div>
 
@@ -9512,19 +9582,45 @@ const downloadTargetHint = computed(() => {
 .idle-dl-toggle:disabled { opacity: 0.6; cursor: default; }
 /* 开关里那个「运行中闪烁」的状态小圆点连同它的呼吸动画一并删掉了（连同 .is-busy 类）。
    面板里唯一会动的元素现在只有状态行里的文字。 */
-.idle-dl-interval {
-  /* ⚠ style.css 里那条全局 input/select/textarea 规则把宽度定成了 100%，
-     会把下拉撑满整行、把「开关 / 间隔 / 状态」挤成三行（截图里看到过）。
-     这里必须显式收回自然宽度。 */
-  width: auto;
+/* 等待时间 / 每轮张数两个数字框：单位后缀 + 框本体。
+   ⚠ style.css 里那条全局 `input, select, textarea { width: 100% }` 会把输入框撑满整行、
+     把「开关 / 间隔 / 张数 / 状态」挤成四行（同类问题截图里见过）。必须显式收回宽度。 */
+.idle-dl-num {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   flex: 0 0 auto;
-  padding: 4px 6px;
-  border-radius: 8px;
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.idle-dl-input {
+  width: 56px;
+  height: 24px;
+  padding: 1px 4px;
+  flex: 0 0 auto;
+  border-radius: 7px;
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--ink);
   font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  -moz-appearance: textfield;
 }
+/* 上下箭头去掉：宽 56px 里再塞一对 spinner，「1440」就被挤到看不见了。
+   范围改由 title / min / max 交代（和右上角那个「并发」框同一处理）。 */
+.idle-dl-input::-webkit-outer-spin-button,
+.idle-dl-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.idle-dl-input:focus {
+  outline: none;
+  border-color: var(--accent-deep);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.18);
+}
+.idle-dl-input:disabled { opacity: 0.6; cursor: default; }
 .idle-dl-status {
   flex: 1 1 auto;
   min-width: 0;
