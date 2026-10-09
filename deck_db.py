@@ -768,16 +768,38 @@ def viewer_search(token_groups, kinds, folder_start=None, folder_end=None,
                   library_ids=None, limit=200, offset=0, sort="date"):
     """跨日期的整词 tag 搜索。只查 deck.db，不碰磁盘/网络。
 
-    token_groups: [[tag, ...], ...] —— 组间 AND、组内 OR（支持中文角色名展开成多个候选 tag）。
-    kinds: 要匹配的标签类别集合，取值 'character' / 'artist'。
+    token_groups: [[item, ...], ...] —— 组间 AND、组内 OR。组内项有两种形态：
+        'hatsune_miku'        → Danbooru tag 整词匹配（tag_character / tag_copyright / tag_artist）
+        {'hint': 'kancolle'}  → 出处（source_hint）匹配：``tag_copyright`` 整词命中 **或**
+                                ``tag_character`` 里出现 ``(hint)`` 后缀
+    出处为什么必须单独匹配：字典里的 source_hint **常常不是** Danbooru tag —— 实测真实库里
+        source_hint 'kancolle' 整词搜 0 条（库里系列 tag 是 kantai_collection、角色 tag 形如
+        ``xxx_(kancolle)``），'fate' 也为 0（库里是 fate_(series) / fate/grand_order）。
+    ⚠ 但出处标记必须与同段的字面 tag **同组 OR**，不能另立成一个 AND 组：
+        字典里 source_hint 与角色 tag 撞名极常见（实测 355 例 —— 'hatsune_miku' 是 cinnamiku /
+        mikudayo 等换装条目的 source_hint，'kirby' / 'mario' / 'shantae' 同理）。另立成 AND 组的话，
+        搜 'hatsune_miku' 会变成「(字面 tag) AND (出处)」，两边都不命中 → 0 行。
+    kinds: 要匹配的标签类别集合，取值 'character' / 'artist'。出处标记只在 'character' 下生效。
            'character' 同时匹配 tag_character 与 tag_copyright（作品/系列 tag，如 azur_lane）：
            单日画廊子串搜索靠角色 tag 的 _(系列名) 后缀命中系列名，跨日期搜索要保持同等体验。
     folder_start/folder_end: 可选的 YYYY-MM-DD 闭区间（字典序即日期序）。
     library_ids: 仅在这些库内搜索（主进程只传当前在线的 root）。
     返回 (total, rows)：rows 为原始 sqlite Row（含 library_id/folder 上下文，供主进程归一化）。
     """
-    groups = [[str(t).strip().lower() for t in group if str(t).strip()] for group in token_groups]
-    groups = [g for g in groups if g]
+    groups = []
+    for raw_group in token_groups:
+        group = []
+        for item in raw_group:
+            if isinstance(item, dict):
+                hint = str(item.get("hint", "")).strip().lower()
+                if hint:
+                    group.append({"hint": hint})
+            else:
+                token = str(item).strip().lower()
+                if token:
+                    group.append(token)
+        if group:
+            groups.append(group)
     kinds = set(kinds) & {"character", "artist"}
     if not groups or not kinds:
         return 0, []
@@ -803,9 +825,23 @@ def viewer_search(token_groups, kinds, folder_start=None, folder_end=None,
 
     # 每组生成一个 (角色整词匹配 OR 作品系列整词匹配 OR 作者整词匹配) 子句；tag 以空格分词存储，
     # 前后补空格后 LIKE '% tag %' 做整词边界，ESCAPE 让 tag 里的 _ 不被当通配。
+    group_clauses = 0
     for group in groups:
         branches = []
-        for token in group:
+        for item in group:
+            if isinstance(item, dict):
+                # 出处标记：copyright 整词 或 tag_character 含 (hint)。
+                # ⚠ 用 instr 而不是再堆 LIKE —— instr 天然把 _ 当普通字符（不需要 ESCAPE），
+                #   实测也更快：等价写法给每个字典 tag 堆一条 LIKE，483k 行上要 6.5s。
+                if "character" not in kinds:
+                    continue   # 出处不是作者
+                hint = item["hint"]
+                branches.append(
+                    "(instr(' '||IFNULL(tag_copyright,'')||' ', ?) > 0 "
+                    "OR instr(IFNULL(tag_character,''), ?) > 0)")
+                params.extend([f" {hint} ", f"({hint})"])
+                continue
+            token = item
             word = f"% {_escape_like_token(token)} %"
             if "character" in kinds:
                 # tag_character 之外把 tag_copyright（作品/系列，如 azur_lane、genshin_impact）
@@ -823,7 +859,14 @@ def viewer_search(token_groups, kinds, folder_start=None, folder_end=None,
                     "(LOWER(IFNULL(artist,''))=? OR "
                     "(' '||IFNULL(tag_artist,'')||' ' LIKE ? ESCAPE '\\'))")
                 params.extend([token, word])
-        where.append("(" + " OR ".join(branches) + ")")
+        if branches:
+            where.append("(" + " OR ".join(branches) + ")")
+            group_clauses += 1
+
+    # 一个组都没落下（例如作者维度下只给了出处标记）→ 别让 WHERE 退化成「只剩日期过滤」
+    # 把整库当结果返出去；宁可返回 0。
+    if group_clauses == 0:
+        return 0, []
 
     where_sql = " AND ".join(where)
     with _LOCK:

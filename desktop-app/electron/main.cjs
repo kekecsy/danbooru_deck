@@ -578,6 +578,11 @@ async function searchGalleryEntries(params = {}) {
     offset: data.offset || 0,
     kind: data.kind || params.kind || 'auto',
     expandedTags: data.expanded_tags || [],
+    // 命中的出处（source_hint / 别名）：前端据此说明这一搜是按「作品/系列」走的
+    series: (data.series || []).map((s) => ({
+      hint: String(s?.hint || ''),
+      label: String(s?.label || s?.hint || '')
+    })),
     offlineLibraries: data.offline_libraries || []
   };
 }

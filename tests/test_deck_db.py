@@ -749,6 +749,55 @@ def test_viewer_search():
     total, rows = names([["azur_lane"]], {"character"}, libs=("lib2",))
     check("library_ids 限定外置库", total == 1 and rows == {"az2.jpg"}, f"total={total} rows={rows}")
 
+    # ── 出处维度（组内 {'hint': …} 标记）─────────────────────────────────────
+    # 现场问题：字典里的 source_hint 常常**不是** Danbooru tag —— 'kancolle' 整词搜 0 条，
+    # 因为库里的系列 tag 是 kantai_collection、角色 tag 形如 xxx_(kancolle)。
+    # 所以出处要单独匹配：copyright 整词 或 tag_character 里出现 (hint)。
+    # 它与同段的字面 tag 同组 OR（撞名场景见下面的 hatsune_miku 用例）。
+    kc_char = _entry("kc1.jpg", "https://x/201", "w201", artist="artist_k",
+                     tags=_tags(character="kiso_(kancolle)", copyright_="kantai_collection"))
+    kc_group = _entry("kc2.jpg", "https://x/202", "w202", artist="artist_k",
+                      tags=_tags(general="multiple_girls", character="",
+                                 copyright_="kantai_collection"))
+    # 撞名用例要的那张：字面 tag 就是 hatsune_miku（它同时是若干换装条目的 source_hint）
+    kc_miku = _entry("kc3.jpg", "https://x/203", "w203", artist="artist_a",
+                     tags=_tags(character="hatsune_miku", copyright_="vocaloid"))
+    # ⚠ 本节一律放**独占库**，不放 default：_entry() 的默认 tags 就是
+    #   tag_character='hatsune_miku'/copyright='vocaloid'，前面几节
+    #   （test_page_cursor_and_failed_scope 等）在 default 库里留了一堆这样的行，
+    #   整份文件连跑时会被一起搜出来 —— 撞名那条断言会从「只有 miku.jpg」变成 6 行，
+    #   而单独跑本函数却是绿的（假绿）。lib 只按 library_id 过滤，不必是真实图库根。
+    KC_LIB = "lib_kc"
+    deck_db.viewer_replace(KC_LIB, d1, [kc_char, kc_group, kc_miku])
+
+    def series(hint, kinds={"character"}, libs=(KC_LIB,)):
+        total, rows = deck_db.viewer_search([[{"hint": hint}]], kinds,
+                                            library_ids=list(libs))
+        return total, {r["filename"] for r in rows}
+
+    total, rows = series("kancolle")
+    check("⚠ 出处 'kancolle'（不是合法 tag）靠角色 tag 的 _(kancolle) 后缀命中",
+          total == 1 and rows == {"kc1.jpg"}, f"total={total} rows={rows}")
+    total, rows = series("kantai_collection")
+    check("出处的另一种写法靠 tag_copyright 整词命中（角色图 + 只有系列 tag 的群像图）",
+          total == 2 and rows == {"kc1.jpg", "kc2.jpg"}, f"total={total} rows={rows}")
+    total, _ = series("kancolle", kinds={"artist"})
+    check("出处不是作者：作者维度下出处标记被忽略（返回 0，不是整库）", total == 0, str(total))
+    total, _ = series("kanc")
+    check("出处的整词边界：'kanc' 不命中 'kancolle'（不做子串）", total == 0, str(total))
+    # ⚠ 出处标记必须与字面 tag 同组 OR：字典里 source_hint 与角色 tag 撞名极常见
+    #   （'hatsune_miku' 是若干换装条目的 source_hint）。另立 AND 组会把搜索搜死成 0 行。
+    #   'hatsune_miku' 同时是它自己和若干换装条目的 source_hint：此时字面 tag 必须还在组里。
+    total, rows = names([[{"hint": "hatsune_miku"}, "hatsune_miku"]], {"character"},
+                        libs=(KC_LIB,))
+    check("⚠ 出处与字面 tag 同组 OR：撞名时字面 tag 仍能命中（不会被 AND 成 0）",
+          total == 1 and rows == {"kc3.jpg"}, f"total={total} rows={rows}")
+    # 出处 + tag 组间 AND：出处是 kancolle、作者是 artist_k → 只有 kc1
+    total, rows = deck_db.viewer_search([[{"hint": "kancolle"}], ["artist_k"]],
+                                        {"character", "artist"}, library_ids=[KC_LIB])
+    check("出处与其它条件组间 AND", total == 1 and rows[0]["filename"] == "kc1.jpg",
+          f"total={total}")
+
 
 def race_stress(rounds: int):
     """跨进程首启竞争压力测试：每轮全新临时目录 + 2 进程同时首连。

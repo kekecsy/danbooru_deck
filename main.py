@@ -923,45 +923,98 @@ def build_local_image_library(selected_date=None):
     return library
 
 
-def _expand_search_tokens(q: str, kind: str):
-    """把搜索框输入归一成 deck_db.viewer_search 的 token 组（组间 AND、组内 OR）。
+def _expand_cjk_tokens(text: str):
+    """中文查询 → 候选 tag 组（组内 OR）。返回 (group, expanded_tags)，无命中时 group 为空。"""
+    try:
+        hits = translator.search_translation_entries(text, limit=50)
+    except Exception:
+        hits = []
+    # 描述里「提到」该词的条目噪声大（如 ironmouse 简介提到初音），
+    # 中文名直接包含查询词的候选优先；一个都没有时才退回全文匹配。
+    name_hits = [h for h in hits if text in (h.get("chinese_name") or "")]
+    chosen = name_hits or hits
+    expanded = list(dict.fromkeys(h["tag"] for h in chosen if h.get("tag")))[:12]
+    return expanded, expanded
 
-    含中文时走离线 translator 字典展开成候选角色 tag（中文名可能对应多个 tag）；
-    返回 (token_groups, expanded_tags)，expanded_tags 供前端提示「已展开为哪些 tag」。
+
+def _expand_search_tokens(q: str, kind: str):
+    """把搜索框输入归一成 deck_db.viewer_search 的查询条件。
+
+    返回 (token_groups, series_hints, expanded_tags)：
+    - token_groups: [[tag, ...], ...]，组间 AND、组内 OR（中文名可能对应多个 tag）。
+    - series_hints: 归一化出处（source_hint）列表（与组里的 {'hint': …} 标记一一对应），
+      供端点下发给前端说明「这一搜按出处走的」。
+    - expanded_tags: 中文名展开出的 tag，供前端提示「已展开为哪些 tag」。
+
+    ⚠ 命中的段走**出处匹配**：字典里的 source_hint 常常不是 Danbooru tag —— 实测
+      source_hint 'kancolle' 整词搜 0 条（库里的系列 tag 是 kantai_collection、角色 tag
+      形如 ``xxx_(kancolle)``），'fate' 同样 0 条（库里是 fate_(series)）。
+      但出处标记必须与字面 tag **同组 OR**（不能另立 AND 组）—— 撞名很常见，见 viewer_search。
     """
     raw = (q or "").strip()
     if not raw:
-        return [], []
+        return [], [], []
     has_cjk = bool(re.search(r"[一-鿿]", raw))
     ascii_token = re.sub(r"\s+", "_", raw.lower()).strip("_")
+    # 逗号分隔多个词（如 "hatsune_miku, kagamine_rin"）；词内空格按下划线归一
+    parts = [p for p in re.split(r"[,，]+", raw) if p.strip()]
 
+    # ① 出处 / 出处别名（仅角色维度 —— 出处不是作者）。
+    resolved, rest, series_hints = [], [], []
+    if kind in ("auto", "character"):
+        for part in parts:
+            hits = translator.resolve_search_series(part)
+            if hits:
+                resolved.append((part, hits))
+                series_hints.extend(hits)
+            else:
+                rest.append(part)
+    else:
+        rest = parts
+
+    if series_hints:
+        # ② 命中出处的段：一个段 = 一个 OR 组。
+        # ⚠ 组里同时放**字面 tag** 与出处标记，不能只放标记：字典里 source_hint 与角色 tag
+        #   撞名极常见（实测 355 例 —— 'hatsune_miku' 是 cinnamiku / mikudayo 等换装条目的
+        #   source_hint，'kirby' / 'mario' / 'shantae' 同理）。只放标记、再把标记 AND 出去的话，
+        #   搜 'hatsune_miku' 就成了「(字面 tag) AND (出处)」两边都不中 → 0 行。
+        groups = []
+        for part, hits in resolved:
+            group = [{"hint": h} for h in hits]
+            token = re.sub(r"\s+", "_", part.lower()).strip("_")
+            if token and not re.fullmatch(r"[一-鿿_]+", token):
+                group.append(token)
+            groups.append(group)
+        # 其余段照常当 tag 搜，整体等价于「出处 ∩ 其它条件」。
+        for part in rest:
+            token = re.sub(r"\s+", "_", part.lower()).strip("_")
+            group = []
+            if re.search(r"[一-鿿]", part):
+                expanded, _ = _expand_cjk_tokens(part)
+                group = expanded[:]
+            if token and not re.fullmatch(r"[一-鿿_]+", token) and token not in group:
+                group.insert(0, token)
+            if group:
+                groups.append(group)
+        return groups, list(dict.fromkeys(series_hints)), []
+
+    # ③ 没有出处命中：与既有行为完全一致（先整串中文名展开，再退回逐段整词）。
     if has_cjk and kind in ("auto", "character"):
-        try:
-            hits = translator.search_translation_entries(raw, limit=50)
-        except Exception:
-            hits = []
-        # 描述里「提到」该词的条目噪声大（如 ironmouse 简介提到初音），
-        # 中文名直接包含查询词的候选优先；一个都没有时才退回全文匹配。
-        name_hits = [h for h in hits if raw in (h.get("chinese_name") or "")]
-        chosen = name_hits or hits
-        expanded = list(dict.fromkeys(h["tag"] for h in chosen if h.get("tag")))[:12]
+        expanded, _ = _expand_cjk_tokens(raw)
         if expanded:
             group = expanded[:]
             # 原文里若带英文/数字片段（如「初音 miku」），也作为 OR 候选
             if re.search(r"[a-z0-9]", ascii_token) and ascii_token not in group:
                 group.insert(0, ascii_token)
-            return [group], expanded
+            return [group], [], expanded
 
-    # 逗号分隔多个词 = 组间 AND（如 "hatsune_miku, kagamine_rin"）；
-    # 词内空格按下划线归一（Danbooru tag 本来就用下划线，"hatsune miku" → hatsune_miku）。
-    parts = [p for p in re.split(r"[,，]+", raw) if p.strip()]
     groups = []
     for part in parts:
         token = re.sub(r"\s+", "_", part.lower()).strip("_")
         # 纯中文且没有翻译命中时，它不可能是 deck.db 里的 tag —— 别制造必空的全表扫描
         if token and not re.fullmatch(r"[一-鿿_]+", token):
             groups.append([token])
-    return groups, []
+    return groups, [], []
 
 
 def _search_rows_to_items(rows, roots_by_id):
@@ -3749,17 +3802,21 @@ def get_gallery_data_by_date(date_str: str):
 def api_search_entries(q: str = "", kind: str = "auto", start: str = "",
                        end: str = "", limit: int = 120, offset: int = 0,
                        sort: str = "date"):
-    """跨日期本地搜索：在 deck.db 内按角色/作品系列/作者整词匹配，日期闭区间可选。
+    """跨日期本地搜索：在 deck.db 内按角色/出处（作品系列，含别名）/作者整词匹配，日期闭区间可选。
 
     character 维度同时匹配 tag_character 与 tag_copyright（作品/系列 tag，如 azur_lane；
     单日画廊搜 azur_lane 靠角色 tag 的 _(系列名) 后缀子串命中，这里用 copyright 整词对齐）。
+    另外：查询词若**精确命中**某个 source_hint 或它的别名（``__source_hint_aliases__``，
+    例如 kancolle / 舰娘 / 东方Project），该段按「出处」搜（组内的 {'hint': …} 标记，
+    与同段字面 tag 同组 OR —— 详见 viewer_search），
+    这样字典里那些不是合法 Danbooru tag 的出处（kancolle → kantai_collection）也能搜到。
     只查当前在线的图库根目录；纯离线搜索，不发任何网络请求。
     返回结构与 gallery_data 的 local_images 卡片一致（每项额外带 date，可跨日期）。
     """
     empty = {"ok": False, "items": [], "total": 0, "limit": limit, "offset": offset}
     q = (q or "").strip()
     if not q:
-        return {**empty, "msg": "请输入要搜索的角色或作者"}
+        return {**empty, "msg": "请输入要搜索的角色、出处或作者"}
     if kind not in ("auto", "character", "artist"):
         kind = "auto"
     kinds = {"character", "artist"} if kind == "auto" else {kind}
@@ -3779,9 +3836,10 @@ def api_search_entries(q: str = "", kind: str = "auto", start: str = "",
     if sort not in ("date", "score", "fav_count"):
         sort = "date"
 
-    token_groups, expanded_tags = _expand_search_tokens(q, kind)
-    if not token_groups:
-        hint = "中文角色名未在离线字典中找到对应 tag" if kind != "artist" else "作者请使用 Danbooru 英文名"
+    token_groups, series_hints, expanded_tags = _expand_search_tokens(q, kind)
+    if not token_groups and not series_hints:
+        hint = ("中文角色名未在离线字典中找到对应 tag" if kind != "artist"
+                else "作者请使用 Danbooru 英文名")
         return {**empty, "msg": f"没有可搜索的 tag（{hint}）"}
 
     online_roots = [r for r in get_library_roots() if r["path"].is_dir()]
@@ -3809,6 +3867,12 @@ def api_search_entries(q: str = "", kind: str = "auto", start: str = "",
         "matched_kinds": sorted(kinds),
         "tokens": token_groups,
         "expanded_tags": expanded_tags,
+        # 命中的出处（原生 source_hint 或别名）：hint 是归一化键，label 给人看
+        # （有别名用别名，如 touhou → 东方Project）。前端据此说明「这一搜是按出处走的」。
+        "series": [
+            {"hint": h, "label": translator.source_hint_display(h)}
+            for h in series_hints
+        ],
         "online_libraries": [{"id": r["id"], "label": r["label"]} for r in online_roots],
         "offline_libraries": offline_roots,
     }

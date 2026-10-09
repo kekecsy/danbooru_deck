@@ -4608,6 +4608,8 @@ const searchModal = ref({
   total: 0,
   nextOffset: 0,
   expandedTags: [],
+  // 命中的出处（source_hint / 别名，后端下发 [{hint, label}]）：说明这一搜是按作品走的
+  series: [],
   offlineLibraries: [],
   sort: 'date',
   selectedKeys: [],
@@ -4626,6 +4628,8 @@ function openSearchModal(preset = null) {
   sm.total = 0;
   sm.nextOffset = 0;
   sm.selectedKeys = [];
+  sm.expandedTags = [];
+  sm.series = [];
   if (preset) {
     sm.q = preset.q || '';
     if (preset.kind) sm.kind = preset.kind;
@@ -4658,6 +4662,7 @@ async function requestSearch(offset, append) {
       sm.total = 0;
       sm.nextOffset = 0;
       sm.expandedTags = [];
+      sm.series = [];
     }
     sm.msg = res.msg || '没有找到结果';
     return;
@@ -4683,6 +4688,7 @@ async function requestSearch(offset, append) {
   sm.total = res.total || 0;
   sm.nextOffset = (res.offset || 0) + (res.limit || SEARCH_PAGE_SIZE);
   sm.expandedTags = res.expandedTags || [];
+  sm.series = res.series || [];
   sm.offlineLibraries = res.offlineLibraries || [];
   sm.msg = sm.images.length ? '' : '没有匹配的图片（可能对应文件已不在盘上）';
   await hydrateThumbs(incoming);
@@ -5984,7 +5990,7 @@ const downloadTargetHint = computed(() => {
           <button
             class="secondary tool-btn search-entry-btn"
             @click="openSearchModal"
-            title="在本地 deck.db 内跨日期搜索角色/作者：支持中文名（离线字典展开）与 Danbooru 英文 tag，可限定日期范围，只搜当前在线的图库"
+            title="在本地 deck.db 内跨日期搜索角色/出处/作者：支持中文名（离线字典展开）、Danbooru 英文 tag、作品/系列出处及其别名（如 kancolle / 舰娘），可限定日期范围，只搜当前在线的图库"
           >🔍 跨日期搜索</button>
           <button
             class="secondary tool-btn"
@@ -6394,7 +6400,7 @@ const downloadTargetHint = computed(() => {
                 v-model="searchModal.q"
                 class="search-input"
                 type="text"
-                placeholder="角色或作者：hatsune_miku / 初音 / 作者英文名"
+                placeholder="角色 / 出处 / 作者：hatsune_miku / 初音 / kancolle / 舰娘"
                 @focus="showModalSearchHistory = true"
                 @blur="onModalSearchHistoryBlur"
                 @keyup.enter="runSearch"
@@ -6413,8 +6419,8 @@ const downloadTargetHint = computed(() => {
               />
             </span>
             <div class="seg-group search-kind-group">
-              <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'auto' }" @click="searchModal.kind = 'auto'" title="同时匹配角色 tag、作品系列 tag（如 azur_lane）与作者">自动</button>
-              <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'character' }" @click="searchModal.kind = 'character'" title="匹配角色 tag 与作品系列 tag（tag_character / tag_copyright）">角色</button>
+              <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'auto' }" @click="searchModal.kind = 'auto'" title="同时匹配角色 tag、出处（作品系列，含别名，如 touhou / 舰娘）与作者">自动</button>
+              <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'character' }" @click="searchModal.kind = 'character'" title="匹配角色 tag 与出处（作品系列 tag，含 source_hint 与其别名，如 azur_lane / 碧蓝档案）">角色</button>
               <button type="button" class="seg-btn" :class="{ active: searchModal.kind === 'artist' }" @click="searchModal.kind = 'artist'" title="只匹配作者（artist 列 / tag_artist，需英文原名）">作者</button>
             </div>
             <div class="search-date-row">
@@ -6450,6 +6456,9 @@ const downloadTargetHint = computed(() => {
             </div>
           </div>
 
+          <div v-if="searchModal.series.length" class="search-hint-text" :title="searchModal.series.map(s => s.hint).join(', ')">
+            按出处搜索：{{ searchModal.series.map(s => s.label).join('、') }}（作品/系列，含别名）
+          </div>
           <div v-if="searchModal.expandedTags.length" class="search-hint-text" :title="searchModal.expandedTags.join(', ')">
             中文名已展开为 {{ searchModal.expandedTags.length }} 个 tag：{{ searchModal.expandedTags.slice(0, 6).join(', ') }}{{ searchModal.expandedTags.length > 6 ? ' …' : '' }}
           </div>

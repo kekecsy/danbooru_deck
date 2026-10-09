@@ -58,6 +58,10 @@ class Translator:
         ensure_user_directories()
         self.custom_dict = {}
         self._character_source: Optional[dict] = None
+        # 出处索引缓存（source_hint → 角色 tag 列表 / 别名 → source_hint）。
+        # 只在字典被改写时失效，见 _invalidate_hint_cache。
+        self._hint_index: Optional[dict] = None
+        self._alias_index: Optional[dict] = None
         self.load_dicts()
 
     def load_dicts(self):
@@ -67,6 +71,12 @@ class Translator:
                     self.custom_dict = json.load(f)
             except Exception as e:
                 print(f"Failed to load custom dict: {e}")
+        self._invalidate_hint_cache()
+
+    def _invalidate_hint_cache(self):
+        """字典内容变了 → 出处索引作废（下次用到时重建）。"""
+        self._hint_index = None
+        self._alias_index = None
 
     def save_custom_dict(self):
         with open(CUSTOM_JSON, "w", encoding="utf-8") as f:
@@ -84,17 +94,103 @@ class Translator:
             elif isinstance(v, dict):
                 # 保持原始字典内容（包含 source_hint 等）
                 self.custom_dict[k] = v
+        self._invalidate_hint_cache()
         self.save_custom_dict()
 
     def get_source_hint_alias(self, hint: str) -> Optional[str]:
         aliases = self.custom_dict.get("__source_hint_aliases__", {})
         return aliases.get(hint)
 
+    # ====================================================================
+    # 出处索引：让「按作品/系列（source_hint）或其别名」也能搜
+    # ====================================================================
+
+    @staticmethod
+    def normalize_source_hint(text: str) -> str:
+        """出处归一：去空白换下划线、转小写。'Blue Archive' / 'blue archive' → 'blue_archive'。
+
+        与 main._expand_search_tokens 里英文 tag 的归一规则**必须一致**，否则
+        「命中出处」和「当 tag 搜」两条路会对同一个词给出不同答案。
+        """
+        return re.sub(r"\s+", "_", (text or "").strip().lower())
+
+    def _build_hint_index(self):
+        """懒建两个索引（结果缓存，字典改写时作废）：
+
+        - hint→tags：{归一化 source_hint: [角色 tag, ...]}，custom 与 search 两份字典合并
+          （search 在前会被 custom 覆盖，与 get_translation_entry 的优先级一致）。
+        - alias→hints：{别名(小写): {归一化 source_hint}}，取自 custom_dict 的
+          ``__source_hint_aliases__``（hint → 显示别名，如 touhou → 东方Project）。
+          别名与查询词走**同一套归一**（去空白换下划线、转小写），所以配了
+          「东方 Project」的别名就得照样输入（不会被自动去掉中间那个空格）。
+        """
+        if self._hint_index is not None:
+            return self._hint_index, self._alias_index
+
+        merged: dict = {}
+        for tag, entry in self.load_search_dict().items():
+            if tag == "__source_hint_aliases__" or not isinstance(entry, dict):
+                continue
+            merged[tag] = entry
+        for tag, entry in self.custom_dict.items():
+            if tag == "__source_hint_aliases__" or not isinstance(entry, dict):
+                continue
+            merged[tag] = entry
+
+        hint_tags: dict = {}
+        for tag, entry in merged.items():
+            hint = self.normalize_source_hint(entry.get("source_hint"))
+            if hint:
+                hint_tags.setdefault(hint, []).append(tag)
+
+        alias_index: dict = {}
+        raw_alias = self.custom_dict.get("__source_hint_aliases__") or {}
+        if isinstance(raw_alias, dict):
+            for hint, alias in raw_alias.items():
+                key = self.normalize_source_hint(alias)
+                if key:
+                    alias_index.setdefault(key, set()).add(
+                        self.normalize_source_hint(hint))
+
+        self._hint_index = hint_tags
+        self._alias_index = alias_index
+        return hint_tags, alias_index
+
+    def resolve_search_series(self, query: str) -> list:
+        """把一个查询段解析成「出处」键（归一化 source_hint）列表，解析不到就返回 []。
+
+        只认**精确命中**（归一化后相等）：
+        - query 本身是某个 source_hint（如 kancolle / blue archive / blue_archive）；
+        - query 是某个 source_hint 的别名（如 舰娘 / 东方Project）。
+
+        ⚠ 刻意不做子串匹配：跨日期搜索的语义是「整词 / 精确」，若 `azur` 能命中
+        `azur_lane`，那单日的整词边界契约（tests: "azur 不命中 azur_lane"）就废了。
+        """
+        raw = (query or "").strip()
+        if not raw:
+            return []
+        hint_tags, alias_index = self._build_hint_index()
+        norm = self.normalize_source_hint(raw)
+        if norm in hint_tags:
+            return [norm]
+        return sorted(alias_index.get(norm, ()))
+
+    def source_hint_display(self, hint: str) -> str:
+        """给一个（归一化）出处配展示名：配了别名就用别名，否则把下划线还原成空格。"""
+        norm = self.normalize_source_hint(hint)
+        aliases = self.custom_dict.get("__source_hint_aliases__") or {}
+        if isinstance(aliases, dict):
+            for key, alias in aliases.items():
+                if alias and self.normalize_source_hint(key) == norm:
+                    return str(alias)
+        return norm.replace("_", " ")
+
     def add_custom_translation(self, key: str, chinese_name: str):
         self.custom_dict[key] = {
             "has_chinese": bool(chinese_name),
             "chinese_name": chinese_name
         }
+        self._invalidate_hint_cache()
         self.save_custom_dict()
 
     def _lookup_dict(self, tag: str) -> dict:
@@ -371,6 +467,7 @@ class Translator:
             normalized["chinese_name"] = ""
         data[tag] = normalized
         self.save_search_dict(data)
+        self._invalidate_hint_cache()
 
     def get_translation_entry(self, tag: str) -> dict:
         """返回当前实际命中的翻译条目，并标明 matched_key。
@@ -433,6 +530,7 @@ class Translator:
                 continue
             self.custom_dict[k] = v
             imported += 1
+        self._invalidate_hint_cache()
         self.save_custom_dict()
         return {"imported": imported, "total": len(search)}
 
