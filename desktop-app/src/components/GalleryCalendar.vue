@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref, watch, onMounted, onBeforeUnmount } from 'vue';
+import { fetchDateOrphans } from '../utils/dateOrphans.js';
 
 const props = defineProps({
   availableDates: { type: Array, default: () => [] },
@@ -198,6 +199,27 @@ function syncMonth() {
 }
 watch(() => [props.selectedDate, props.today, sortedAvailableDates.value.join('|')], syncMonth, { immediate: true });
 
+// ── 「有信息缺失的图片」角标（孤立文件） ──────────────────────────────────
+// 盘上有媒体文件、库里没有元数据的日期，日历里打一个感叹号。
+//
+// ⚠ 只扫「当前显示的月份」：三个库根都是 lazy_scan，绝不能在图库加载时逐日期扫盘。
+// 所以只在面板打开 + 日视图时拉一次（换月再拉），数据来自后端 /api/date_orphans。
+// 月 / 年视图不标：那里一格代表 12 个月，得扫 12 次，与「只扫当前月」的约定不符。
+const orphanCounts = ref({});
+function currentMonthKey() {
+  return `${String(currentYear.value).padStart(4, '0')}-${String(currentMonth.value).padStart(2, '0')}`;
+}
+async function loadOrphans() {
+  if (!open.value || dateView.value !== 'days' || !currentYear.value || !currentMonth.value) return;
+  const month = currentMonthKey();
+  const counts = await fetchDateOrphans(month);
+  // 请求期间用户可能已经切走月份：只接受仍属于「当前显示月份」的结果，否则会串月。
+  if (open.value && dateView.value === 'days' && currentMonthKey() === month) {
+    orphanCounts.value = counts;
+  }
+}
+watch([open, dateView, currentYear, currentMonth], loadOrphans);
+
 const availableSet = computed(() => new Set(sortedAvailableDates.value));
 const availableYearSet = computed(() => {
   const years = new Set();
@@ -279,6 +301,8 @@ const cells = computed(() => {
     const date = formatDate(item.year, item.month, item.day);
     const folder = dateFolderMap.value.get(date) || null;
     const pendingIds = folder?.pendingIds || 0;
+    // 孤立文件数只在「当前显示月份」里有值（other 格 = 上/下月溢出格，拿不到就 0）
+    const orphanCount = toFiniteCount(orphanCounts.value[date], 0);
     return {
       ...item,
       date,
@@ -294,6 +318,8 @@ const cells = computed(() => {
       imageCount: folder?.imageCount ?? null,
       pendingIds,
       hasPendingIds: pendingIds > 0,
+      orphanCount,
+      hasOrphans: orphanCount > 0,
       selected: !isTagSelected.value && date === props.selectedDate,
       today: !isTagFolder(props.today) && date === props.today
     };
@@ -370,13 +396,18 @@ function imageCountLabel(count) {
 }
 
 function dateCellTitle(cell) {
-  if (cell.noFolder) return `点击创建 ${cell.date} 的空文件夹并进入`;
+  // 盘上有文件但库里没信息的（孤立文件）：感叹号角标的文字说明
+  const orphans = cell.orphanCount > 0 ? ` · 有 ${cell.orphanCount} 张图片没有信息` : '';
+  // 注：「还没建文件夹」与「有孤立文件」现实中不会同时出现（有文件就说明目录在，
+  // 目录在就会被 get_available_date_folders 列出来）。这里仍把说明拼上，是为了
+  // 万一拿到不一致的数据（两次请求之间目录被删/建）时 tooltip 不至于自相矛盾。
+  if (cell.noFolder) return `点击创建 ${cell.date} 的空文件夹并进入${orphans}`;
   // 不显示具体数量，只提示"有未下载 id"
   const pending = cell.pendingIds > 0 ? ' · 有未下载 id' : '';
-  if (!cell.countKnown) return `查看 ${cell.date} · 图数未统计（点入即扫）${pending}`;
+  if (!cell.countKnown) return `查看 ${cell.date} · 图数未统计（点入即扫）${pending}${orphans}`;
   return cell.hasImages
-    ? `${cell.date} · 有图片${pending}`
-    : `${cell.date} · 文件夹为空${pending}`;
+    ? `${cell.date} · 有图片${pending}${orphans}`
+    : `${cell.date} · 文件夹为空${pending}${orphans}`;
 }
 
 function periodTitle(label, item) {
@@ -567,7 +598,7 @@ function pickTag(folder) {
               v-for="cell in cells"
               :key="cell.date"
               class="day-cell"
-              :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, future: cell.future, 'has-folder': cell.hasFolder, 'no-folder': cell.noFolder, 'has-images': cell.hasImages, 'uncounted': cell.hasFolder && !cell.countKnown, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages, 'has-pending-ids': cell.hasPendingIds }"
+              :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, future: cell.future, 'has-folder': cell.hasFolder, 'no-folder': cell.noFolder, 'has-images': cell.hasImages, 'uncounted': cell.hasFolder && !cell.countKnown, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages, 'has-pending-ids': cell.hasPendingIds, 'has-orphans': cell.hasOrphans }"
               :title="cell.future ? `${cell.date} · 今天之后不可选` : dateCellTitle(cell)"
               :disabled="cell.future"
               @click="pickDate(cell.date)"
@@ -805,6 +836,28 @@ function pickTag(folder) {
   background: rgba(230, 224, 214, 0.58);
   color: #a99684;
   box-shadow: none;
+}
+/* 「没有信息的图片」（孤立文件）：盘上有媒体文件、库里没有元数据的日期，
+   左上角打一个红色感叹号（需求原文：日期内存在没有信息的图片 → 日期加感叹号）。
+   用 ::before 而非 ::after —— ::after 已被「懒扫未数图的 ·」与「待下载 id 橙点」占用。 */
+.day-cell.has-orphans::before {
+  content: '!';
+  position: absolute;
+  top: 1px;
+  left: 3px;
+  font-size: 12px;
+  line-height: 1.1;
+  font-weight: 800;
+  color: #d9480f;
+  pointer-events: none;
+}
+/* 选中格是紫色渐变底，红色感叹号看不清 → 换成暖黄 */
+.day-cell.has-orphans.selected::before {
+  color: #ffe08a;
+}
+/* 未来日期禁手，角标一并收起 */
+.day-cell.future::before {
+  content: none;
 }
 /* ids_data.json 非空（待下载 id 队列）：有图时右上角加橙点；空文件夹时整格变橙强调。*/
 .day-cell.has-pending-ids.has-images {

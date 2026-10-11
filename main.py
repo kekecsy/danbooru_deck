@@ -2,6 +2,7 @@ import os
 import re
 import sys
 import uuid
+import calendar
 import hashlib
 import subprocess
 from dataclasses import dataclass, field
@@ -709,6 +710,53 @@ def get_available_date_folder_details():
             rec["count_known"] = False
             rec["has_images"] = True
     return sorted(folders.values(), key=lambda x: x["date"], reverse=True)
+
+
+# 日历「有缺信息图片」标记（感叹号）───────────────────────────────────────────
+# 「没有信息的图片」= 代码里既有的「孤立文件」：盘上有媒体文件，但 deck.db 里没有它的
+# 元数据/热度（build_local_image_library 里这种卡片 artist 显示"未知"、tags 空、post_url 为 #）。
+# ⚠ 判断它必须列出该日期目录里的文件名，而图库根多为 lazy_scan（正是为了避开逐日期扫盘：
+#   机械盘上 83+ 个日期目录，逐目录 iterdir 会卡）。所以这里**只扫调用方给的那一个月**
+#   （前端在日历面板打开 / 切月时才问），并按月份缓存一小会儿。
+_DATE_ORPHAN_CACHE: dict = {}      # "YYYY-MM" -> (时间戳, {日期: 孤立文件数})
+_DATE_ORPHAN_TTL = 60.0
+
+
+def scan_date_orphans(date_str: str) -> int:
+    """某个日期目录里「孤立文件」的数量（跨所有在线 root 求和）。
+
+    与 build_local_image_library 的可见性规则保持一致：只看 GALLERY_MEDIA_EXTENSIONS 内的
+    文件、有同名 .zip 时跳过 .gif（那是已转出的动画，画廊也不单独显示它）。
+    os.scandir + entry.is_file() 在 Windows 上直接用目录项里已有的属性，不额外逐文件 stat。
+    """
+    total = 0
+    for root in get_library_roots():
+        day = root["path"] / date_str
+        try:
+            if not day.is_dir():
+                continue
+        except OSError:
+            continue
+        known = deck_db.viewer_filename_set(root["id"], date_str)
+        try:
+            entries = list(os.scandir(day))
+        except OSError:
+            continue
+        for entry in entries:
+            name = entry.name
+            suffix = os.path.splitext(name)[1].lower()
+            if suffix not in GALLERY_MEDIA_EXTENSIONS:
+                continue
+            if suffix == ".gif" and (day / (name[:-4] + ".zip")).exists():
+                continue
+            try:
+                if not entry.is_file():
+                    continue
+            except OSError:
+                continue
+            if name not in known:
+                total += 1
+    return total
 
 
 def get_available_date_folders():
@@ -3797,6 +3845,36 @@ def get_gallery_data_by_date(date_str: str):
         "today": datetime.datetime.now().strftime("%Y-%m-%d"),
         "requested_date": date_str
     }
+
+@app.get("/api/date_orphans")
+def api_date_orphans(month: str = ""):
+    """日历标记用：返回该月哪些日期「有缺信息的图片」（孤立文件），形如 {"2026-10-03": 2}。
+
+    只扫调用方给的那一个月 —— 全量扫所有日期在机械盘上会卡（lazy_scan 的初衷就是躲它）。
+    结果按月份缓存 _DATE_ORPHAN_TTL 秒：日历反复开关面板 / 切月不会每次真扫盘。
+    前端只在日历面板打开且处于「日」视图时按需调用（见 utils/dateOrphans.js）。
+    """
+    if not re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", month or ""):
+        return {"ok": False, "msg": "month 参数需要 YYYY-MM", "counts": {}}
+    year, mon = int(month[:4]), int(month[5:7])
+    now = time.time()
+    cached = _DATE_ORPHAN_CACHE.get(month)
+    if cached and now - cached[0] < _DATE_ORPHAN_TTL:
+        return {"ok": True, "month": month, "counts": cached[1], "cached": True}
+    counts = {}
+    try:
+        # 只走到该月真实存在的最后一天（2 月 28/29、4/6/9/11 月 30 天）
+        for day in range(1, calendar.monthrange(year, mon)[1] + 1):
+            date_str = f"{month}-{day:02d}"
+            n = scan_date_orphans(date_str)
+            if n:
+                counts[date_str] = n
+    except Exception as e:
+        print(f"扫描孤立文件失败（{month}）: {e}")
+        return {"ok": False, "msg": f"扫描失败: {e}", "counts": {}}
+    _DATE_ORPHAN_CACHE[month] = (now, counts)
+    return {"ok": True, "month": month, "counts": counts, "cached": False}
+
 
 @app.get("/api/search_entries")
 def api_search_entries(q: str = "", kind: str = "auto", start: str = "",

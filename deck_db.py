@@ -702,6 +702,19 @@ def viewer_folder_counts(library_id=None) -> dict:
     return {(r["library_id"], r["folder"]): r["c"] for r in rows}
 
 
+def viewer_filename_set(library_id: str, folder: str) -> set:
+    """该 (库, 日期) 里**已有元数据**的文件名集合。
+
+    只 SELECT filename（比 viewer_load_entries 少读 tags / web_url 等大列）：
+    日历要给「盘上有文件但库里没信息」（孤立文件）的日期打标记，逐个日期目录比对一次。
+    """
+    rows = query_all(
+        "SELECT filename FROM viewer_entries WHERE library_id=? AND folder=?",
+        (library_id, folder),
+    )
+    return {r["filename"] for r in rows if r["filename"]}
+
+
 def viewer_replace(library_id: str, folder: str, items: list, progress_cb=None):
     """整 folder 行集替换（flush / merge / refresh / 导入器用），单事务保序。
 

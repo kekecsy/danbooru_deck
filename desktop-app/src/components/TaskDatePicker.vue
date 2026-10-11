@@ -1,5 +1,6 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { fetchDateOrphans } from '../utils/dateOrphans.js';
 
 const props = defineProps({
   modelValue: { type: String, default: '' },
@@ -111,6 +112,26 @@ watch(dateView, () => {
   if (open.value) nextTick(positionPanel);
 });
 
+// ── 「有信息缺失的图片」角标（孤立文件） ──────────────────────────────────
+// 与右侧 GalleryCalendar 完全同源：盘上有媒体文件、库里没元数据的日期打感叹号。
+// ⚠ 只扫面板「当前显示的月份」（≤31 天），且只在日视图拉取；月/年视图一格代表
+// 12 个月，扫 12 次与「只扫当前月」的约定不符，故不标。多个日期框实例同时问同一个月
+// 由 utils/dateOrphans 的 in-flight 表去重。
+const orphanCounts = ref({});
+function currentMonthKey() {
+  return `${String(currentYear.value).padStart(4, '0')}-${String(currentMonth.value).padStart(2, '0')}`;
+}
+async function loadOrphans() {
+  if (!open.value || dateView.value !== 'days' || !currentYear.value || !currentMonth.value) return;
+  const month = currentMonthKey();
+  const counts = await fetchDateOrphans(month);
+  // 请求期间可能已切走：只接受仍属于「当前显示月份」的结果，避免串月
+  if (open.value && dateView.value === 'days' && currentMonthKey() === month) {
+    orphanCounts.value = counts;
+  }
+}
+watch([open, dateView, currentYear, currentMonth], loadOrphans);
+
 const triggerLabel = computed(() => props.modelValue || props.placeholder);
 const yearBlockStart = computed(() => Math.floor((currentYear.value || new Date().getFullYear()) / 12) * 12);
 
@@ -142,6 +163,7 @@ const cells = computed(() => {
   return result.map(item => {
     const date = formatDate(item.year, item.month, item.day);
     const folder = dateFolderMap.value.get(date) || null;
+    const orphanCount = toFiniteCount(orphanCounts.value[date], 0);
     return {
       ...item,
       date,
@@ -153,7 +175,9 @@ const cells = computed(() => {
       today: date === todayValue,
       disabled: !!(props.maxDate && date > props.maxDate),
       pendingIds: folder?.pendingIds || 0,
-      hasPendingIds: (folder?.pendingIds || 0) > 0
+      hasPendingIds: (folder?.pendingIds || 0) > 0,
+      orphanCount,
+      hasOrphans: orphanCount > 0
     };
   });
 });
@@ -262,9 +286,11 @@ function imageCountLabel(count) {
 function dateCellTitle(cell) {
   // ids_data.json 非空时与右侧日历一致追加"有未下载 id"提示
   const pending = cell.pendingIds > 0 ? ' · 有未下载 id' : '';
-  if (!cell.hasFolder) return cell.date + pending;
-  if (!cell.countKnown) return `${cell.date} · 图数未统计（点入即扫）${pending}`;
-  return cell.hasImages ? `${cell.date} · 有图片${pending}` : `${cell.date} · 文件夹为空${pending}`;
+  // 盘上有文件但库里没信息的（孤立文件）—— 与右侧日历同款感叹号角标
+  const orphans = cell.orphanCount > 0 ? ` · 有 ${cell.orphanCount} 张图片没有信息` : '';
+  if (!cell.hasFolder) return cell.date + pending + orphans;
+  if (!cell.countKnown) return `${cell.date} · 图数未统计（点入即扫）${pending}${orphans}`;
+  return cell.hasImages ? `${cell.date} · 有图片${pending}${orphans}` : `${cell.date} · 文件夹为空${pending}${orphans}`;
 }
 
 function periodTitle(label, item) {
@@ -453,7 +479,7 @@ onBeforeUnmount(() => {
             :key="cell.date"
             type="button"
             class="day-cell"
-            :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.hasFolder, 'has-images': cell.hasImages, 'uncounted': cell.hasFolder && !cell.countKnown, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages, 'has-pending-ids': cell.hasPendingIds }"
+            :class="{ selected: cell.selected, other: cell.otherMonth, today: cell.today, 'has-folder': cell.hasFolder, 'has-images': cell.hasImages, 'uncounted': cell.hasFolder && !cell.countKnown, 'empty-folder': cell.hasFolder && cell.countKnown && !cell.hasImages, 'has-pending-ids': cell.hasPendingIds, 'has-orphans': cell.hasOrphans }"
             :disabled="cell.disabled"
             :title="cell.disabled ? `${cell.date}（超过可选上限 ${maxDate}）` : dateCellTitle(cell)"
             @click="selectDate(cell.date)"
@@ -716,6 +742,24 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
+/* 「没有信息的图片」（孤立文件）：盘上有媒体文件、库里没有元数据的日期，左上角红色感叹号。
+   与右侧 GalleryCalendar 完全同款；用 ::before 避开 ::after 上已占用的「·」与橙点。 */
+.day-cell.has-orphans::before {
+  content: '!';
+  position: absolute;
+  top: 1px;
+  left: 3px;
+  font-size: 12px;
+  line-height: 1.1;
+  font-weight: 800;
+  color: #d9480f;
+  pointer-events: none;
+}
+/* 选中格是紫色渐变底，红色感叹号看不清 → 换成暖黄 */
+.day-cell.has-orphans.selected::before {
+  color: #ffe08a;
+}
+
 .day-cell:not(.has-folder):not(.selected) {
   background: rgba(230, 224, 214, 0.42);
   color: #b8aa99;
@@ -733,6 +777,10 @@ onBeforeUnmount(() => {
 }
 
 .calendar-grid .day-cell:disabled::after {
+  content: none;
+}
+
+.calendar-grid .day-cell:disabled::before {
   content: none;
 }
 
