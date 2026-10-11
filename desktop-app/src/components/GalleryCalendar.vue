@@ -10,7 +10,9 @@ const props = defineProps({
   selectedDate: { type: String, default: '' },
   today: { type: String, default: '' },
   // 日期 tab 快捷栏显示「同步左」：把当前画廊日期 emit 给父组件，同步到左侧任务日历
-  syncable: { type: Boolean, default: false }
+  syncable: { type: Boolean, default: false },
+  // 左侧任务当前是「日期范围」模式：同步时起止会一起置为同一天，tooltip 得说实话
+  syncRange: { type: Boolean, default: false }
 });
 
 const emit = defineEmits(['select', 'sync-task-date']);
@@ -584,7 +586,7 @@ function pickTag(folder) {
             v-if="syncable"
             class="date-quick date-quick-sync"
             :disabled="!canSyncTaskDate"
-            :title="canSyncTaskDate ? `把左侧任务日期同步为 ${selectedDate}` : '当前是 tag 文件夹，无法同步到日期任务'"
+            :title="canSyncTaskDate ? (syncRange ? `把左侧任务的起止日期一起同步为 ${selectedDate}` : `把左侧任务日期同步为 ${selectedDate}`) : '当前是 tag 文件夹，无法同步到日期任务'"
             @click="syncTaskDate"
           >同步左</button>
         </div>

@@ -141,13 +141,12 @@ function onGallerySyncTaskDate(date) {
     return;
   }
   if (form.value.dateRange) {
-    if (!form.value.startDate) {
-      form.value.startDate = date;
-    } else if (!form.value.endDate || form.value.endDate < date) {
-      form.value.endDate = date;
-    } else {
-      form.value.startDate = date;
-    }
+    // 「同步左」= 把右侧画廊的日期一次性搬过来：**起止一起置为同一天**（单日范围）。
+    // 这里曾经是「增量选区」：第一次点填起、第二次点填止、第三次点改起 —— 用户点一下
+    // 只同步了半边（另半边还停在旧值），看上去就像没同步。要选多天就在左侧两个日期框
+    // 里各自选，别让「同步」这个动作有隐藏的第二击。
+    form.value.startDate = date;
+    form.value.endDate = date;
   } else {
     form.value.targetDate = date;
   }
@@ -6012,6 +6011,7 @@ const downloadTargetHint = computed(() => {
             :selected-date="gallery.selectedDate"
             :today="gallery.today"
             syncable
+            :sync-range="form.mode === 'popular' && form.dateRange"
             @select="loadGallery"
             @sync-task-date="onGallerySyncTaskDate"
           />
