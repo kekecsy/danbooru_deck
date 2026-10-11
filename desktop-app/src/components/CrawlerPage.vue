@@ -1674,7 +1674,7 @@ async function convertAllZipsToGif() {
   }
   if (convertingZips.value) return;
   convertingZips.value = true;
-  showToast(`正在把 ${date} 的 .zip 批量转成 .gif…`, 'info');
+  showToast(`正在把 ${date} 的 .zip 批量转成 .gif…（旧 zip 需要先向 Danbooru 补帧延迟，可能较慢）`, 'info');
   try {
     const res = await fetch('http://127.0.0.1:18765/api/convert_all_zips', {
       method: 'POST',
@@ -1691,11 +1691,25 @@ async function convertAllZipsToGif() {
       showToast(`${date} 没有 .zip 可转换`, 'info');
       return;
     }
+    // 旧 zip 的帧延迟来源：精确（Danbooru 页面）/ 估算（总时长均分）/ 兜底（固定值）。
+    // 三个数都要如实说 —— 用户看到节奏不对时才知道该重试还是该认。
+    const delayDan = result.delay_danbooru || 0;
+    const delayEst = result.delay_estimated || 0;
+    const delayDef = result.delay_default || 0;
+    const legacyCount = delayDan + delayEst + delayDef;
+    if (legacyCount > 0) {
+      const segs = [];
+      if (delayDan) segs.push(`${delayDan} 个取到 Danbooru 帧延迟`);
+      if (delayEst) segs.push(`${delayEst} 个按总时长估算`);
+      if (delayDef) segs.push(`${delayDef} 个只能固定延迟`);
+      appendLog(`[批量转GIF] 旧 zip ${legacyCount} 个的帧延迟：${segs.join(' · ')}`);
+    }
     const parts = [`共 ${total} 个 .zip`];
     if (converted) parts.push(`成功 ${converted}`);
     if (skipped) parts.push(`跳过 ${skipped}（已有 .gif）`);
     if (failed) parts.push(`失败 ${failed}`);
-    const type = failed > 0 ? 'warning' : 'success';
+    if (delayDef) parts.push(`⚠ ${delayDef} 个旧 zip 没取到帧延迟`);
+    const type = failed > 0 || delayDef > 0 ? 'warning' : 'success';
     showToast(parts.join(' · '), type);
     // 失败详情打一行到日志面板，方便排查
     if (failed > 0) {
@@ -2731,6 +2745,26 @@ async function openOriginal(item) {
   await window.desktopAPI.external.open(item.postUrl);
 }
 
+// 帧延迟来源 → 给用户看的一句话。
+// 旧 ugoira zip 里没有 animation.json，帧延迟只能向 Danbooru 要（见 ugoira_meta）。
+// 后端给两个字段：
+//   delay_source —— 转换端用的延迟来自哪：animation_json（zip 自带，正常）/
+//                   delays（外部传入）/ default（固定值兜底）/ existing（没转）
+//   delay_from   —— 延迟从 Danbooru 的哪种途径来：danbooru（页面里的逐帧精确值）/
+//                   duration（只有总时长，按帧数均分）/ 空（没取到）
+function delaySourceNote(result) {
+  if (result?.delay_source === 'default') {
+    return { text: '（没取到帧延迟，已用固定 100ms 兜底）', estimated: true };
+  }
+  if (result?.delay_from === 'danbooru') {
+    return { text: '（帧延迟取自 Danbooru）', estimated: false };
+  }
+  if (result?.delay_from === 'duration') {
+    return { text: '（Danbooru 只有总时长，帧延迟按均值估算）', estimated: true };
+  }
+  return { text: '', estimated: false };
+}
+
 async function convertGif(item) {
   if (!item.localPath) {
     showToast("找不到本地路径", "error");
@@ -2747,7 +2781,11 @@ async function convertGif(item) {
     if (result.ok) {
       // 不再自动打开 GIF：批量转 / 单张转 时用户通常在继续看别的卡片或勾选下一张。
       // 要预览就在画廊点该卡片（或右键「打开」）。
-      showToast("转换成功，已生成 .gif 配套文件", "success");
+      // 帧延迟来源要如实说：旧 zip 没有 animation.json，延迟是去 Danbooru 找的，
+      // 找不到就只能估算/用固定值 —— 用户看到动画节奏不对时该知道是为什么。
+      const extra = delaySourceNote(result);
+      showToast(`转换成功，已生成 .gif 配套文件${extra.text}`,
+                extra.estimated ? 'warning' : 'success');
       // 刷新当前日期图库，让该 zip 卡片立刻显示 gif 缩略图/标志位
       if (gallery.value.selectedDate) {
         await reloadCurrentGallery();

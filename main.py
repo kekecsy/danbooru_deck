@@ -50,6 +50,7 @@ import http_client
 import danbooru_api
 import gelbooru_api
 import deck_db
+import ugoira_meta
 from danbooru_data import DanbooruData
 from runtime_paths import DATA_DIR, HOT_PIC_DIR, RESOURCE_DIR, ensure_user_directories
 
@@ -5803,6 +5804,77 @@ def api_image_favorites_remove(req: ImageFavoriteRemoveRequest):
         deck_db.export_fav_image_mirror(str(IMAGE_FAVORITES_JSON))
     return {"ok": True, "removed": removed, "count": deck_db.fav_image_count()}
 
+# ---------------- 旧 ugoira zip：缺 animation.json 时去 Danbooru 补帧延迟 ----------------
+# 早期从 Danbooru 下载的 ugoira zip 里只有裸帧（000000.jpg / 000001.jpg…），没有
+# Pixiv 的 animation.json，转换端拿不到帧延迟就整张转不动（旧行为是直接
+# ValueError）。帧延迟只能问 Danbooru —— 实测结论、为什么只能抓 HTML 页面、
+# 以及 duration 兜底的依据，全部写在 ugoira_meta 模块头。
+# 这里负责三件事：
+#   ① 从本地 viewer 元数据找到该 zip 的 post_url → post id（**不联网**）；
+#   ② 按 post_id 把结果缓存进 deck.db meta（重复转换不再联网）；
+#   ③ 给调用方一个「拿不到也能转」的降级结果（delays=None → 转换端用固定延迟）。
+
+UGOIRA_DELAY_CACHE_PREFIX = "ugoira_delays:"
+
+
+def _zip_post_id(zip_path: Path) -> str:
+    """该 zip 的 Danbooru post id；本地元数据里没有就返回空串。"""
+    try:
+        row = _find_caption_meta(Path(zip_path))
+    except Exception:
+        row = None
+    if not row:
+        return ""
+    return ugoira_meta.post_id_from_url(row.get("post_url") or "")
+
+
+def _cached_ugoira_delays(post_id: str):
+    raw = deck_db.meta_get(UGOIRA_DELAY_CACHE_PREFIX + post_id)
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return None
+    delays = data.get("delays")
+    if not isinstance(delays, list) or not delays:
+        return None
+    return data
+
+
+def _resolve_ugoira_delays(zip_path: Path, log=None) -> dict:
+    """缺 animation.json 的 zip 取帧延迟：缓存 → Danbooru → 降级。
+
+    返回 ugoira_meta.resolve_frame_delays 同形状的 dict，另加 `cached` 标记。
+    ⚠ 缓存要重新校验长度：zip 被换过（帧数变了）时旧缓存直接作废 —— 缓存里的
+      延迟一旦和当前帧数错位，动画会整体错拍，比没有延迟更难查。
+    """
+    frame_count = ugoira_meta.frame_count_of_zip(zip_path)
+    if frame_count <= 0:
+        return {"delays": None, "source": "", "detail": "zip 里没有帧图片"}
+    post_id = _zip_post_id(zip_path)
+    if not post_id:
+        return {"delays": None, "source": "", "detail": "本地元数据里没有帖子链接"}
+
+    cached = _cached_ugoira_delays(post_id)
+    if cached and len(cached["delays"]) == frame_count:
+        out = dict(cached)
+        out["cached"] = True
+        return out
+
+    info = ugoira_meta.resolve_frame_delays(post_id, frame_count, log=log)
+    if info.get("delays"):
+        try:
+            deck_db.meta_set(UGOIRA_DELAY_CACHE_PREFIX + post_id, json.dumps({
+                "delays": info["delays"],
+                "source": info["source"],
+                "detail": info["detail"],
+            }, ensure_ascii=False))
+        except Exception:
+            pass
+    return info
+
+
 @app.post("/api/convert_local_zip")
 def api_convert_local_zip(req: ConvertLocalZipRequest):
     try:
@@ -5812,10 +5884,29 @@ def api_convert_local_zip(req: ConvertLocalZipRequest):
             return {"ok": False, "msg": "无效的 ZIP 文件路径"}
 
         output_path = target_path.with_suffix('.gif')
-        if not output_path.exists():
-            convert_zip_to_gif(target_path, output_path)
+        if output_path.exists():
+            return {"ok": True, "gif_path": str(output_path), "delay_source": "existing"}
 
-        return {"ok": True, "gif_path": str(output_path)}
+        # 旧 zip（没有 animation.json）→ 先向 Danbooru 要帧延迟；拿不到就交给
+        # 转换端用固定延迟，**不让「延迟查不到」变成「转不出来」**。
+        delay_info = {}
+        delays = None
+        if not ugoira_meta.has_animation_json(target_path):
+            delay_info = _resolve_ugoira_delays(target_path, log=print)
+            delays = delay_info.get("delays")
+
+        meta = convert_zip_to_gif(target_path, output_path, delays=delays) or {}
+        return {
+            "ok": True,
+            "gif_path": str(output_path),
+            "frames": meta.get("frames"),
+            # delay_source 是**转换端**的（animation_json / delays / default / existing），
+            # delay_from 是**延迟从哪来**的（danbooru 精确 / duration 估算 / 空=没取到）——
+            # 前端要跟用户说清楚，两个都得给。
+            "delay_source": meta.get("delay_source"),
+            "delay_from": delay_info.get("source", ""),
+            "delay_detail": delay_info.get("detail", ""),
+        }
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
@@ -5824,7 +5915,12 @@ def api_convert_local_zip(req: ConvertLocalZipRequest):
 def api_convert_all_zips(req: ConvertAllZipsRequest):
     """批量把 hot_pic/<date>/ 下所有 .zip 转成 .gif（单 zip 转不动就跳过、不影响其他）；
     overwrite=False（默认）会跳过已有 .gif；True 会强制覆盖。
-    返回 ok/总数/成功/跳过/失败/逐条结果，前端可据此刷新 gallery（gallery 用 .gif 优先）。"""
+    返回 ok/总数/成功/跳过/失败/逐条结果，前端可据此刷新 gallery（gallery 用 .gif 优先）。
+
+    ⚠ 旧 zip（没有 animation.json）会**先**统一向 Danbooru 补帧延迟再开转：这条路
+      要打网络（全局 1 req/s），混进转换循环里每个 zip 都会卡一下、顺序也看不清。
+      补不到只是退化成固定延迟，不影响「转得出来」。
+    """
     try:
         from pic_web.main import convert_zip_to_gif
     except Exception as e:
@@ -5846,6 +5942,18 @@ def api_convert_all_zips(req: ConvertAllZipsRequest):
         return {"ok": False, "msg": f"找不到日期文件夹: {date}"}
 
     zips = sorted(folder.glob("*.zip"))
+
+    legacy = [z for z in zips
+              if (req.overwrite or not z.with_suffix(".gif").exists())
+              and not ugoira_meta.has_animation_json(z)]
+    delay_plan = {}
+    for idx, zip_path in enumerate(legacy, 1):
+        info = _resolve_ugoira_delays(zip_path, log=print)
+        delay_plan[str(zip_path)] = info
+        print(f"[批量转GIF] 补帧延迟 {idx}/{len(legacy)} {zip_path.name}: "
+              f"{info.get('source') or '没取到'}"
+              f"{'（缓存）' if info.get('cached') else ''} {info.get('detail') or ''}")
+
     results = []
     converted = 0
     skipped = 0
@@ -5856,12 +5964,15 @@ def api_convert_all_zips(req: ConvertAllZipsRequest):
             results.append({"zip": zip_path.name, "gif": gif_path.name, "status": "skipped"})
             skipped += 1
             continue
+        info = delay_plan.get(str(zip_path)) or {}
         try:
-            convert_zip_to_gif(zip_path, gif_path)
-            results.append({"zip": zip_path.name, "gif": gif_path.name, "status": "ok"})
+            meta = convert_zip_to_gif(zip_path, gif_path, delays=info.get("delays")) or {}
+            results.append({"zip": zip_path.name, "gif": gif_path.name, "status": "ok",
+                            "delay_source": meta.get("delay_source")})
             converted += 1
         except Exception as e:
-            results.append({"zip": zip_path.name, "gif": gif_path.name, "status": "failed", "msg": str(e)})
+            results.append({"zip": zip_path.name, "gif": gif_path.name,
+                            "status": "failed", "msg": str(e)})
             failed += 1
 
     return {
@@ -5871,6 +5982,11 @@ def api_convert_all_zips(req: ConvertAllZipsRequest):
         "converted": converted,
         "skipped": skipped,
         "failed": failed,
+        # 帧延迟来源统计（前端据此如实告诉用户：哪些是 Danbooru 精确值、
+        # 哪些只能估算、哪些彻底没拿到）
+        "delay_danbooru": sum(1 for i in delay_plan.values() if i.get("source") == "danbooru"),
+        "delay_estimated": sum(1 for i in delay_plan.values() if i.get("source") == "duration"),
+        "delay_default": sum(1 for i in delay_plan.values() if not i.get("delays")),
         "results": results,
     }
 

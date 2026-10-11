@@ -31,6 +31,17 @@ except ImportError:  # pic_web 单独运行（python pic_web/main.py）时的回
 
 PRESET_DIRS = [PRESET_DIR]
 
+# 帧名清单必须和 ugoira_meta 用**同一份实现**：main.py 是按 ugoira_meta 数出帧数去
+# Danbooru 要延迟的，两边各写一份迟早会对不上（对不上的后果是延迟与帧错位，
+# 但代码只会静默退回固定延迟，很难查）。ugoira_meta 只依赖标准库，导入很轻。
+try:
+    from ugoira_meta import frame_names_in_zip as _frame_names_in_zip
+except ImportError:  # pic_web 单独运行（python pic_web/main.py）时的兜底
+    import sys as _sys2
+
+    _sys2.path.insert(0, str(PROJECT_ROOT))
+    from ugoira_meta import frame_names_in_zip as _frame_names_in_zip
+
 FONT_CANDIDATES = {
     "Arial": [
         Path(r"C:\Windows\Fonts\arial.ttf"),
@@ -226,7 +237,22 @@ def check_ffmpeg_available() -> bool:
         return False
 
 
-def convert_zip_to_gif(zip_file: Path, output_file: Path) -> None:
+def convert_zip_to_gif(zip_file: Path, output_file: Path,
+                       delays: Optional[List[int]] = None,
+                       default_delay_ms: int = 100) -> Dict[str, Any]:
+    """把 ugoira zip 转成 GIF，返回 {"frames": int, "delay_source": str}。
+
+    帧延迟按优先级取：
+      1. `animation.json`（Pixiv 原始帧表，逐帧精确）—— 新 zip 都带；
+      2. 调用方传进来的 `delays`（毫秒列表）—— **旧 zip 没有 animation.json**，
+         由 `ugoira_meta` 去 Danbooru 找出帧延迟后传进来；
+      3. `default_delay_ms` 固定延迟 —— 兜底，保证至少「转得出来」。
+
+    ⚠ `delays` 必须与帧数**长度相等**才用：错位的延迟会让整段动画错拍，
+      比均匀延迟难看得多，所以宁可退回第 3 条。
+    ⚠ 帧名清单走 `ugoira_meta.frame_names_in_zip`（与 main.py 数帧数的那份同一实现），
+      自己再写一份枚举迟早会两边对不上。
+    """
     with tempfile.TemporaryDirectory() as tmp_dir_name:
         tmp_dir = Path(tmp_dir_name)
         with zipfile.ZipFile(zip_file) as archive:
@@ -235,31 +261,65 @@ def convert_zip_to_gif(zip_file: Path, output_file: Path) -> None:
         animation_json = tmp_dir / "animation.json"
         if not animation_json.exists():
             candidates = list(tmp_dir.glob("*/animation.json"))
-            if not candidates:
-                raise ValueError("ZIP 中未找到 animation.json")
-            animation_json = candidates[0]
-            tmp_dir = animation_json.parent
+            if candidates:
+                animation_json = candidates[0]
+                tmp_dir = animation_json.parent
 
-        with animation_json.open("r", encoding="utf-8") as file:
-            payload = json.load(file)
+        # 组装 (帧文件, 延迟毫秒) 的执行计划
+        plan: List[Tuple[Path, float]] = []
+        delay_source = "default"
 
-        frames = payload.get("frames") or []
-        if not frames:
-            raise ValueError("animation.json 中没有 frames")
-
-        concat_lines: List[str] = []
+        frames = []
+        if animation_json.exists():
+            try:
+                with animation_json.open("r", encoding="utf-8") as file:
+                    payload = json.load(file)
+                frames = payload.get("frames") or []
+            except Exception:
+                frames = []   # 坏了就当没有，走下面的兜底（旧 zip 路径）
         for frame in frames:
-            frame_path = tmp_dir / frame["file"]
+            try:
+                frame_path = tmp_dir / str(frame["file"])
+            except (KeyError, TypeError):
+                continue
             if not frame_path.exists():
                 continue
+            try:
+                delay_ms = float(frame.get("delay", default_delay_ms))
+            except (TypeError, ValueError):
+                delay_ms = float(default_delay_ms)
+            plan.append((frame_path, delay_ms if delay_ms > 0 else float(default_delay_ms)))
+        if plan:
+            delay_source = "animation_json"
+
+        if not plan:
+            # 旧 zip 路径：没有（或不可用的）animation.json → 以 zip 清单为帧序
+            names = _frame_names_in_zip(zip_file)
+            use_delays: List[Optional[float]] = [None] * len(names)
+            if delays and len(delays) == len(names):
+                for i, d in enumerate(delays):
+                    try:
+                        val = float(d)
+                    except (TypeError, ValueError):
+                        continue
+                    use_delays[i] = val if val > 0 else None
+                delay_source = "delays"
+            for name, delay in zip(names, use_delays):
+                frame_path = tmp_dir / name
+                if not frame_path.exists():
+                    continue
+                plan.append((frame_path, delay if delay else float(default_delay_ms)))
+
+        if not plan:
+            raise ValueError("ZIP 里没有可用的帧图片")
+
+        concat_lines: List[str] = []
+        for frame_path, delay_ms in plan:
             concat_lines.append(f"file '{frame_path.as_posix()}'")
-            concat_lines.append(f"duration {float(frame.get('delay', 100)) / 1000}")
+            concat_lines.append(f"duration {delay_ms / 1000}")
 
-        if not concat_lines:
-            raise ValueError("没有可用的帧图片")
-
-        last_frame = tmp_dir / frames[-1]["file"]
-        concat_lines.append(f"file '{last_frame.as_posix()}'")
+        # ffmpeg 的 concat demuxer 会丢掉最后一段 duration，末帧要再写一次才停得住。
+        concat_lines.append(f"file '{plan[-1][0].as_posix()}'")
 
         concat_path = tmp_dir / "frames.txt"
         concat_path.write_text("\n".join(concat_lines), encoding="utf-8")
@@ -286,6 +346,8 @@ def convert_zip_to_gif(zip_file: Path, output_file: Path) -> None:
         )
         if result.returncode != 0 or not output_file.exists():
             raise RuntimeError(result.stderr or "ffmpeg 转换失败")
+
+        return {"frames": len(plan), "delay_source": delay_source}
 
 
 @app.get("/", response_class=HTMLResponse)
