@@ -6686,6 +6686,9 @@ const downloadTargetHint = computed(() => {
           :class="{ 'is-fit': viewer.fitMode === 'fit' }"
           :style="{ zoom: viewer.zoom }"
         >
+          <!-- ⚠ `loop`：视频预览必须循环播放。与 GIF 那条需求同源，但手段不同 ——
+               `<img>` 的 GIF 循环只能靠文件自身的 NETSCAPE2.0 块（后端改字节），
+               而 `<video>` 有原生的 loop 属性，前端声明即可。两者别混。 -->
           <video
             v-if="viewerIsVideo"
             class="viewer-image"
@@ -6693,6 +6696,7 @@ const downloadTargetHint = computed(() => {
             :src="viewer.imageUrl"
             controls
             autoplay
+            loop
             preload="metadata"
             @loadeddata="viewerImageLoaded = true"
           />

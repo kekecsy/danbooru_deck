@@ -1538,6 +1538,7 @@ onMounted(loadFavorites);
 
       <div class="viewer-stage" :class="{ 'is-fit': viewer.fitMode === 'fit' }" @wheel="onViewerWheel" @click.self="closeViewer">
         <div class="viewer-image-wrap" :class="{ 'is-fit': viewer.fitMode === 'fit' }" :style="{ zoom: viewer.zoom }">
+          <!-- ⚠ `loop`：收藏页的视频预览同样要循环播放（与抓图页预览保持同一行为）。 -->
           <video
             v-if="viewer.imageUrl && viewerIsVideo"
             class="viewer-image"
@@ -1545,6 +1546,7 @@ onMounted(loadFavorites);
             :src="viewer.imageUrl"
             controls
             autoplay
+            loop
             preload="metadata"
             @loadeddata="viewerImageLoaded = true"
           />
