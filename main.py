@@ -1335,6 +1335,114 @@ def api_thumbnail(date_str: str, filename: str, w: int = 400):
     )
 
 
+# --- GIF 循环播放 -------------------------------------------------------------
+# 预览里的 GIF 是 <img> 直接加载文件，**循环与否完全由文件自己的循环标记决定**：
+# 标记为 1 次（或在首帧前没有 NETSCAPE2.0 应用扩展）的 GIF 就只播一遍、播完停在末帧。
+# 这里把循环计数统一改成 0（无限循环）后再发给前端，**不动磁盘上的原文件**。
+_GIF_NETSCAPE = b"NETSCAPE2.0"
+
+
+def _gif_skip_subblocks(data: bytes, pos: int):
+    """跳过 GIF 子块序列（每块 = 1 字节长度 + 内容，长度 0 结束），返回结束后的偏移。"""
+    n = len(data)
+    while pos < n:
+        size = data[pos]
+        pos += 1 + size
+        if size == 0:
+            return pos
+    return None
+
+
+def _gif_loop_slot(data: bytes):
+    """定位 GIF 的循环计数字段。
+
+    返回 (kind, pos)：
+      ('rewrite', pos) → data[pos:pos+2] 就是 NETSCAPE 扩展里的循环计数（小端 u16）
+      ('insert',  pos) → 文件里没有循环块，pos 是插入位置（第一个图像描述符 / 尾标记）
+      (None, 0)        → 不是 GIF 或结构看不懂 → 调用方原样返回（fail-open）
+    """
+    if len(data) < 14 or data[:6] not in (b"GIF87a", b"GIF89a"):
+        return None, 0
+    pos = 13                                   # 6 字节魔数 + 7 字节逻辑屏幕描述符
+    if data[10] & 0x80:                        # 有全局色表
+        pos += 3 * (2 ** ((data[10] & 0x07) + 1))
+    insert_at = None
+    n = len(data)
+    while pos < n:
+        marker = data[pos]
+        if marker == 0x3B:                     # 尾标记：没有图像数据
+            return ("insert", insert_at if insert_at is not None else pos)
+        if marker == 0x2C:                     # 图像描述符
+            if insert_at is None:
+                insert_at = pos
+            if pos + 10 > n:
+                return None, 0
+            next_pos = pos + 10
+            if data[pos + 9] & 0x80:           # 局部色表
+                next_pos += 3 * (2 ** ((data[pos + 9] & 0x07) + 1))
+            next_pos += 1                      # LZW 最小码长（1 字节）
+            next_pos = _gif_skip_subblocks(data, next_pos)   # LZW 数据子块
+            if next_pos is None:
+                return None, 0
+            pos = next_pos
+            continue
+        if marker == 0x21:                     # 扩展块
+            if pos + 2 > n:
+                return None, 0
+            # 应用扩展: 21 FF 0B "NETSCAPE2.0" 03 01 <lo> <hi> 00
+            if (data[pos + 1] == 0xFF and pos + 19 <= n and data[pos + 2] == 11
+                    and data[pos + 3:pos + 14] == _GIF_NETSCAPE):
+                if data[pos + 14] == 3 and data[pos + 15] == 1:
+                    return ("rewrite", pos + 16)
+                return None, 0
+            next_pos = _gif_skip_subblocks(data, pos + 2)
+            if next_pos is None:
+                return None, 0
+            pos = next_pos
+            continue
+        return None, 0                         # 未知标记：别猜
+    return None, 0
+
+
+def gif_with_infinite_loop(data: bytes) -> bytes:
+    """返回「无限循环」版的 GIF 字节；解析不了就原样返回（宁可不动，也别把图弄坏）。"""
+    kind, pos = _gif_loop_slot(data)
+    if kind == "rewrite":
+        if data[pos:pos + 2] == b"\x00\x00":
+            return data                        # 已经是无限循环
+        return data[:pos] + b"\x00\x00" + data[pos + 2:]
+    if kind == "insert":
+        # 21 FF 0B "NETSCAPE2.0" 03 01 00 00 00 —— 循环次数 0 = 无限
+        block = b"\x21\xff\x0b" + _GIF_NETSCAPE + b"\x03\x01\x00\x00\x00"
+        head = data[:pos]
+        if data[:6] == b"GIF87a":
+            head = b"GIF89a" + head[6:]        # NETSCAPE 扩展是 89a 的特性，顺手升级版本号
+        return head + block + data[pos:]
+    return data
+
+
+@app.get("/gif/{date_str}/{filename}")
+def api_gif_infinite_loop(date_str: str, filename: str):
+    """GIF 预览专用：强制无限循环后返回（前端大图预览对 .gif 走这里）。
+
+    为什么需要它：`<img>` 加载 GIF 时，循环次数只能来自文件本身，前端改不了。
+    下载来的 GIF 里就可能有 loop=1（只播一次）或首帧前没有循环块的，用户看到的是
+    「GIF 播完就停」。这条路由只改内存里的字节，磁盘文件保持原样。
+    """
+    path, _root = _resolve_media_in_library(date_str, filename)
+    if path is None or path.suffix.lower() != ".gif":
+        return PlainTextResponse("not found", status_code=404)
+    try:
+        raw = path.read_bytes()
+    except OSError as e:
+        return PlainTextResponse(f"read error: {e}", status_code=500)
+    return Response(
+        content=gif_with_infinite_loop(raw),
+        media_type="image/gif",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _purge_thumb_cache_dirs() -> dict:
     """清空本地磁盘上的两个缩略图缓存：.thumb_cache（/thumb/ 端点）和
     .browse_thumb_cache（/api/proxy_thumb）。返回各类删除的文件数。

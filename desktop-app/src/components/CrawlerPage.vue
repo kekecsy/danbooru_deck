@@ -692,6 +692,9 @@ const viewer = ref({
   key: '',            // 当前大图的稳定唯一键（localPath||filename）。用键而非索引锁定当前图，
                       // 下载时新图 unshift 进画廊也不会让「正在看的图」错位（标签/复制跟着变）。
   imageUrl: '',
+  // 主图加载失败时的回退地址（目前只有 GIF 用得上）：GIF 走 /gif/ 路由强制无限循环，
+  // 万一后端拿不到该文件（不在库根内 / 后端没起来），@error 里换回本地地址，别留裂图。
+  fallbackUrl: '',
   zoom: 1,
   fitMode: habits.viewerFitMode === 'actual' ? 'actual' : 'fit',
   toolbarPinned: habits.viewerToolbarPinned === true,
@@ -4996,6 +4999,24 @@ function onTranslationFileSelected(event) {
   reader.readAsText(file);
 }
 
+// GIF 预览统一走 /gif/ 路由：`<img>` 加载 GIF 时循环次数**只由文件自身**决定
+// （NETSCAPE2.0 应用扩展里的 loop 值），前端改不了 → 后端在读盘时把循环块强制成
+// 「无限」（磁盘文件一字不动）。拿不到目录/文件名时返回空串，由调用方回退。
+function gifPreviewUrl(folder, filename) {
+  if (!folder || !filename) return '';
+  return `http://127.0.0.1:18765/gif/${folder}/${encodeURIComponent(filename)}`;
+}
+
+function onViewerImageError() {
+  // 主图加载失败：若是走了 /gif/ 路由（拿不到文件 / 后端不可用），回退到本地地址。
+  // 只回退一次，避免回退地址也失败时来回抖动。
+  if (viewer.value.fallbackUrl && viewer.value.imageUrl !== viewer.value.fallbackUrl) {
+    const fb = viewer.value.fallbackUrl;
+    viewer.value.fallbackUrl = '';
+    viewer.value.imageUrl = fb;
+  }
+}
+
 async function openViewer(item, sourceItems = null, source = 'gallery') {
   viewer.value.open = true;
   viewer.value.source = source;
@@ -5003,6 +5024,7 @@ async function openViewer(item, sourceItems = null, source = 'gallery') {
   viewer.value.key = itemKey(item);   // 用稳定唯一键锁定，而非索引
   viewer.value.zoom = 1;
   viewer.value.imageUrl = '';
+  viewer.value.fallbackUrl = '';
 
   // 默认不联网刷新（离线时会一直报错）；开关在工具栏「翻译」右侧，开启后才刷新该图热度
   if (gallery.value.refreshOnView) refreshSinglePost(item);
@@ -5017,10 +5039,23 @@ async function openViewer(item, sourceItems = null, source = 'gallery') {
   }
 
   if (item?.localPath) {
+    // GIF 走后端 /gif/ 路由（强制无限循环）；本地地址留作失败回退。
+    if (ext === 'gif' && itemFolder && item.filename) {
+      viewer.value.fallbackUrl = await window.desktopAPI.file.toLocalUrl(item.localPath);
+      viewer.value.imageUrl = gifPreviewUrl(itemFolder, item.filename);
+      return;
+    }
     if (ext === 'zip') {
       const gifPath = item.localPath.replace(/\.zip$/i, '.gif');
       if (await window.desktopAPI.file.exists(gifPath)) {
-        viewer.value.imageUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+        const gifName = String(item.filename || '').replace(/\.zip$/i, '.gif');
+        // 同名 GIF 也走 /gif/ 路由；拿不到 folder / 名字没换成 .gif 时回退本地地址。
+        if (itemFolder && /\.gif$/i.test(gifName)) {
+          viewer.value.fallbackUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+          viewer.value.imageUrl = gifPreviewUrl(itemFolder, gifName);
+        } else {
+          viewer.value.imageUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+        }
         return;
       }
     }
@@ -5038,6 +5073,7 @@ async function openViewer(item, sourceItems = null, source = 'gallery') {
 async function syncViewerImage() {
   viewer.value.zoom = 1;
   viewer.value.imageUrl = '';
+  viewer.value.fallbackUrl = '';
   if (!viewerItem.value) return;
 
   const ext = (viewerItem.value.filename || '').split('.').pop().toLowerCase();
@@ -5048,10 +5084,22 @@ async function syncViewerImage() {
   }
 
   if (viewerItem.value.localPath) {
+    // GIF 走后端 /gif/ 路由（强制无限循环）；本地地址留作失败回退。
+    if (ext === 'gif' && viewerFolder && viewerItem.value.filename) {
+      viewer.value.fallbackUrl = await window.desktopAPI.file.toLocalUrl(viewerItem.value.localPath);
+      viewer.value.imageUrl = gifPreviewUrl(viewerFolder, viewerItem.value.filename);
+      return;
+    }
     if (ext === 'zip') {
       const gifPath = viewerItem.value.localPath.replace(/\.zip$/i, '.gif');
       if (await window.desktopAPI.file.exists(gifPath)) {
-        viewer.value.imageUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+        const gifName = String(viewerItem.value.filename || '').replace(/\.zip$/i, '.gif');
+        if (viewerFolder && /\.gif$/i.test(gifName)) {
+          viewer.value.fallbackUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+          viewer.value.imageUrl = gifPreviewUrl(viewerFolder, gifName);
+        } else {
+          viewer.value.imageUrl = await window.desktopAPI.file.toLocalUrl(gifPath);
+        }
         return;
       }
     }
@@ -5069,6 +5117,7 @@ async function syncViewerImage() {
 function closeViewer() {
   viewer.value.open = false;
   viewer.value.imageUrl = '';
+  viewer.value.fallbackUrl = '';
   viewer.value.zoom = 1;
   viewer.value.sourceItems = [];
   viewer.value.source = 'gallery';
@@ -6616,6 +6665,7 @@ const downloadTargetHint = computed(() => {
             :src="viewer.imageUrl"
             :alt="viewerItem?.filename || 'preview'"
             @load="viewerImageLoaded = true"
+            @error="onViewerImageError"
           />
         </div>
       </div>
