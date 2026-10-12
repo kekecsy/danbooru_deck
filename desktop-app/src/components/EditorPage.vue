@@ -48,6 +48,12 @@ const editor = reactive({
   start: null,
   current: null,
   draft: null,
+  // 缩放：拖动某个角时**保持不动的那个对角点**（已按 rotation 旋转，图像坐标系）。
+  //   必须在 mousedown 时缓存一次，不能每帧从 x/y/width/height 重推 —— 见 resizeLayerFromHandle。
+  resizeAnchor: null,
+  // 旋转：上一帧的指针角度，用来取「相邻两帧的角度增量」。
+  //   ⚠ 不能用「当前角 − 起始角」：atan2 值域是 (±180]，跨过 180° 时差值会突跳 360°。
+  lastAngle: 0,
   fillMode: ['mosaic', 'stripe', 'reveal', 'solid', 'image', 'split'].includes(editorHabits.fillMode) ? editorHabits.fillMode : 'mosaic',
   opacity: Number.isFinite(editorHabits.opacity) ? Math.max(0, Math.min(1, editorHabits.opacity)) : 1,
   mosaicBlockSize: Number.isFinite(editorHabits.mosaicBlockSize) ? editorHabits.mosaicBlockSize : 18,
@@ -304,18 +310,79 @@ function handles(layer, customSize = 12) {
   const rotLy = -h / 2 - rH;
   const rx = -rotLy * sin + cx;
   const ry = rotLy * cos + cy;
-  out.rot = { x: rx - 8, y: ry - 8, s: 16 };
+  // ⚠ 尺寸必须跟着 customSize 走。findHandle 用 30 判命中，这里若硬编码 16，
+  //   旋转手柄的点击区就只有四角的一半；再叠加它与 nw/ne 的命中框重叠（细长码块必然重叠），
+  //   结果就是「旋转手柄基本点不到」。下限 16 保住 drawSelection 里的视觉大小不变。
+  const rs = Math.max(customSize, 16);
+  out.rot = { x: rx - rs / 2, y: ry - rs / 2, s: rs };
   return out;
 }
 
 function findHandle(point, layer, hitSize = 30) {
+  // ⚠ 命中框重叠时取「中心离指针最近」的那个，而不是按 nw→ne→sw→se→rot 的书写顺序。
+  //   固定顺序会让排在后面的 rot 永远抢不到重叠区，小码块上等于没有旋转手柄。
   const map = handles(layer, hitSize);
+  let best = null;
+  let bestDist = Infinity;
   for (const [name, handle] of Object.entries(map)) {
-    if (point.x >= handle.x && point.x <= handle.x + handle.s && point.y >= handle.y && point.y <= handle.y + handle.s) {
-      return name;
+    const hx = handle.x + handle.s / 2;
+    const hy = handle.y + handle.s / 2;
+    const dx = point.x - hx;
+    const dy = point.y - hy;
+    if (Math.abs(dx) > handle.s / 2 || Math.abs(dy) > handle.s / 2) continue;
+    const dist = dx * dx + dy * dy;
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = name;
     }
   }
-  return null;
+  return best;
+}
+
+// 拖动某个角时**保持不动的对角点**，返回图像坐标系下的世界坐标。
+// ⚠ 必须按当前 rotation 旋转后再算：码块转过之后，nw 的对角在屏幕上早已不在
+//   (x+width, y+height) 处；直接用未旋转的对角当锚点，整块会在拖动中平移。
+function oppositeCorner(layer, handle) {
+  const cx = layer.x + layer.width / 2;
+  const cy = layer.y + layer.height / 2;
+  const rad = ((layer.rotation || 0) * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  // 被拖的角在「宽度方向 / 高度方向」上的符号，取反即对角
+  const lx = handle.includes('w') ? layer.width / 2 : -layer.width / 2;
+  const ly = handle.includes('n') ? layer.height / 2 : -layer.height / 2;
+  return { x: cx + lx * cos - ly * sin, y: cy + lx * sin + ly * cos };
+}
+
+// 拖角缩放：把指针相对锚点的位移**投影到码块自身的局部坐标轴**上，
+// 于是「手往哪拖、被拖的角就往哪走」在任意旋转角下都成立。
+// ⚠ 这里是「锚点 + 当前指针」的绝对计算，绝不累积 [dx, dy] 增量。
+//   旧写法每帧 layer.width += dx，紧接着 normalizeLayer 又把 x/width 夹回画布内：
+//   一旦贴到图片边缘，被夹掉的那部分就永久留在 layer 上，指针拖回来也回不去
+//   —— 这是「手感怪异」的主因之一（细长的黑白条码块尤其容易撞到夹取）。
+function resizeLayerFromHandle(layer, point) {
+  const anchor = editor.resizeAnchor;
+  if (!anchor) return;
+  const rad = ((layer.rotation || 0) * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const dx = point.x - anchor.x;
+  const dy = point.y - anchor.y;
+  // ex = (cos, sin) 沿宽度方向，ey = (-sin, cos) 沿高度方向
+  const du = dx * cos + dy * sin;
+  const dv = -dx * sin + dy * cos;
+  // 取绝对值 = 拖过对角之后不再翻转，只是缩到最小；避免整块突然跳到另一侧
+  const width = Math.max(1, Math.abs(du));
+  const height = Math.max(1, Math.abs(dv));
+  const sx = du < 0 ? -1 : 1;
+  const sy = dv < 0 ? -1 : 1;
+  const ccx = anchor.x + (sx * width / 2) * cos - (sy * height / 2) * sin;
+  const ccy = anchor.y + (sx * width / 2) * sin + (sy * height / 2) * cos;
+  layer.width = width;
+  layer.height = height;
+  layer.x = ccx - width / 2;
+  layer.y = ccy - height / 2;
+  normalizeLayer(layer);
 }
 
 function pointInRotatedRect(px, py, layer) {
@@ -551,8 +618,10 @@ function drawSelection(ctx, layer) {
   for (const [key, handle] of Object.entries(map)) {
     if (key === 'rot') {
       // 从顶部中点到 rot 手柄的引导线
-      const topX = (layer.x + layer.width / 2) * z;
-      const topY = layer.y * z;
+      // ⚠ 起点必须是**旋转后**的顶部中点。直接用 (x+w/2, y) 画出来的是未旋转的位置，
+      //   码块转过 45° 后这条线会横穿码块内部，看着像坏了。
+      const topX = cx + (h / 2) * Math.sin(rad);
+      const topY = cy - (h / 2) * Math.cos(rad);
       ctx.beginPath();
       ctx.moveTo(topX, topY);
       ctx.lineTo(handle.x + handle.s / 2, handle.y + handle.s / 2);
@@ -1241,6 +1310,7 @@ function onMouseDown(event) {
       const cy = active.y + active.height / 2;
       editor.startAngle = Math.atan2(editor.start.y - cy, editor.start.x - cx) * 180 / Math.PI;
       editor.startRotation = active.rotation || 0;
+      editor.lastAngle = editor.startAngle;
       if (canvasRef.value) canvasRef.value.style.cursor = 'grabbing';
       return;
     }
@@ -1248,6 +1318,8 @@ function onMouseDown(event) {
       editor.handle = handle;
       editor.mode = 'resize';
       editor.start = imagePoint(point);
+      // 锚点在这里算一次就固定住，拖动全程用它做绝对计算
+      editor.resizeAnchor = oppositeCorner(active, handle);
       return;
     }
   }
@@ -1337,29 +1409,29 @@ function onMouseMove(event) {
     return;
   }
   if (editor.mode === 'resize') {
-    const dx = point.x - editor.start.x;
-    const dy = point.y - editor.start.y;
-    if (editor.handle.includes('n')) { layer.y += dy; layer.height -= dy; }
-    if (editor.handle.includes('s')) layer.height += dy;
-    if (editor.handle.includes('w')) { layer.x += dx; layer.width -= dx; }
-    if (editor.handle.includes('e')) layer.width += dx;
-    editor.start = point;
-    normalizeLayer(layer);
+    resizeLayerFromHandle(layer, point);
     render();
     return;
   }
   if (editor.mode === 'rotate') {
-    if (!layer) return;
     const cx = layer.x + layer.width / 2;
     const cy = layer.y + layer.height / 2;
     const curAngle = Math.atan2(point.y - cy, point.x - cx) * 180 / Math.PI;
-    const delta = curAngle - (editor.startAngle || 0);
-    let rot = (editor.startRotation || 0) + delta;
-    if (!event.shiftKey) {
-      // 优先吸附到 0/45/90/.../315（±5° 内），否则按 15° 步进
-      const snap = Math.round(rot / 45) * 45;
-      if (Math.abs(rot - snap) < 5) rot = snap;
-      else rot = Math.round(rot / 15) * 15;
+    // ⚠ 累积「相邻两帧」的角度差，不是「当前角 − 起始角」。
+    //   atan2 的值域是 (±180]，指针绕过 180° 边界时差值会突跳 360°，
+    //   表现为旋转到一半自己弹回去 —— 用户说的「角度很有限」一半来自这里。
+    let step = curAngle - (editor.lastAngle ?? curAngle);
+    step = ((step + 180) % 360 + 360) % 360 - 180;
+    editor.lastAngle = curAngle;
+    let rot = (layer.rotation || 0) + step;
+    if (event.shiftKey) {
+      // Shift → 吸附到 15° 网格
+      rot = Math.round(rot / 15) * 15;
+    } else {
+      // 默认自由旋转（旧版默认就锁 15° 网格，等于只能转 24 个角度）；
+      // 仅在正方向 ±3° 内软吸附一下，方便摆正又不会卡住手感。
+      const snap = Math.round(rot / 90) * 90;
+      if (Math.abs(rot - snap) <= 3) rot = snap;
     }
     layer.rotation = ((rot % 360) + 360) % 360;
     render();
@@ -1412,6 +1484,8 @@ function onMouseUp(event) {
   editor.moveStart = null;
   editor.startAngle = 0;
   editor.startRotation = 0;
+  editor.lastAngle = 0;
+  editor.resizeAnchor = null;
   editor.draggingLineIndex = -1;
   if (canvasRef.value) {
     canvasRef.value.style.cursor = editor.fillMode === 'split' ? 'crosshair' : 'default';
