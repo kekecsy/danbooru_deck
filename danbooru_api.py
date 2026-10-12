@@ -60,6 +60,30 @@ class TransientImageError(Exception):
     pass
 
 
+class _PartialDownloadError(Exception):
+    """响应体没下完（字节数 != Content-Length）。
+
+    刻意让它落进 download_image 的「网络失败」分支（而不是成功分支）：
+    截断的图片必须可重试，绝不能改名成成品留在盘上。
+    """
+
+
+def _expected_size(resp):
+    """响应声明的字节数；拿不到（chunked / 被压缩）返回 None —— 那就不做长度校验。
+
+    ⚠ 只在「没有被压缩」时才敢比：压缩过的响应体经 curl 解压后的长度与
+    Content-Length 天然不等，照比会把每一次正常下载都判成截断。
+    """
+    try:
+        enc = (resp.headers.get("content-encoding") or "").strip().lower()
+        if enc and enc != "identity":
+            return None
+        cl = resp.headers.get("content-length")
+        return int(cl) if cl else None
+    except (TypeError, ValueError):
+        return None
+
+
 class PermanentPostError(Exception):
     """拉取 post 元数据时遇到永久错误（403/404/410/451 —— 帖子已删 / 已删号 / 隐私）。
     上层据此把 id 从待下载队列移除（不写 failed_ids），避免「重试」按钮每次都列出同一个已删图。
@@ -453,37 +477,109 @@ def fetch_data_batch(post_ids, chunk=DANBOORU_ID_BATCH_MAX, timeout=30):
     return fetch_data_batch_detail(post_ids, chunk=chunk, timeout=timeout)[0]
 
 
-def download_image(url, folder, custom_print=print, retries=3, delay=3, raise_on_transient=False):
+def _discard_partial(path):
+    """把没写完的 .part 清掉。失败/取消路径**必须**调它，
+    否则半截文件会留在盘上冒充成品（见 download_image 的注释）。"""
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        # 极端情况下（文件被别的进程占着）删不掉也不该让下载路径崩掉
+        pass
+
+
+def download_image(url, folder, custom_print=print, retries=3, delay=3,
+                   raise_on_transient=False, cancel_token=None):
     """下载单张图片。瞬时错误（超时 / 连接错误 / 429 / 5xx）内部重试 retries 次。
     重试耗尽后：raise_on_transient=True 抛 TransientImageError（供桌面端记入「失败页」可重试），
     否则返回 None（独立 CLI 脚本的旧行为，不破坏现有调用）。
     永久错误（404 / 410 / 403 / 451，帖子已删除或不可访问）直接返回 None（不重试、不计失败页）。
-    成功返回 filename。"""
-    if not url: return None
-    filename = url.split('/')[-1].split('?')[0] # 移除 URL 参数
+    成功返回 filename。
+
+    cancel_token: 停止按钮用的取消令牌（http_client.CancelToken）。取消时抛
+        http_client.RequestCancelled —— **不算失败、不写 failed_ids**，由上层静默收手。
+        不传则保持旧行为（CLI 脚本 / 独立工具用）。
+
+    ⚠ 这条路径有两个容易被忽略的点，别改回去：
+      1. **必须 stream=True + 边下边写**。非流式时响应体在 session.request() 内部就
+         读完了，调用方手里没有句柄、也没有任何可检查的中间点 → 停止按钮对
+         「已经卡住的这一次」毫无办法（只能等它按 timeout 自己回来）。
+         流式下读循环每个 chunk 之后都能查一次取消标记，才谈得上「立刻停」。
+      2. **先落 .part 再 os.replace**。旧实现是 `open(filepath,'wb')` 后写
+         `r.content`，读失败时已经在盘上留下一个 **0 字节文件** —— 下次进来
+         「文件已存在」直接跳过，等于把这张图永久判成已下载（坏图且无法自愈）。
+         中途取消同理，绝不能留半截文件冒充成品。
+    """
+    if not url:
+        return None
+    filename = url.split('/')[-1].split('?')[0]  # 移除 URL 参数
     filepath = os.path.join(folder, filename)
 
     if os.path.exists(filepath):
         custom_print(f"文件已存在: {filename}")
         return filename
 
+    tmp_path = filepath + ".part"
+    written = 0
+    expected = None
     try:
         custom_print(f"正在下载: {filename} ...")
         # CDN 下载不过令牌桶（保持每线程 sleep(1) 的既有节奏），重试读 Retry-After
         r = http_client.request(
             "GET", url,
-            kind="cdn", retries=retries, timeout=30,
+            kind="cdn", retries=retries, timeout=http_client.CDN_TIMEOUT,
             headers=HEADERS, proxies=PROXIES,
             base_delay=delay,
+            stream=True,
+            cancel_check=(cancel_token.cancelled if cancel_token is not None else None),
         )
-        with open(filepath, 'wb') as f:
-            f.write(r.content)
+        expected = _expected_size(r)
+        try:
+            with open(tmp_path, 'wb') as f:
+                # ⚠ 不传 chunk_size：curl_cffi 会发一条「chunk_size is ignored」的
+                #    CurlCffiWarning，而这里确实改不了它的分块大小。
+                for chunk in r.iter_content():
+                    if cancel_token is not None and cancel_token.cancelled():
+                        raise http_client.RequestCancelled(f"下载已取消: {filename}")
+                    f.write(chunk)
+                    written += len(chunk)
+        finally:
+            # ⚠ 必须在读完 / 中途放弃时显式关掉流式响应。
+            #   curl_cffi 的 iter_content 只在「正常读完」和「迭代器自己抛异常」
+            #   两条路上做收尾（_finalize_stream）；**消费者**抛异常（我们那个
+            #   取消检查）时它不会跑 —— 底层的 curl 传输线程会继续在后台把整个
+            #   文件拉完。close() 内部置 quit_now 并 join 传输线程，是唯一安全的
+            #   收尾点，而它必须由**读它的这个线程**来调（理由见 http_client.close_quietly）。
+            http_client.close_quietly(r)
+        # ⚠ 落盘前的两道终检。**必须在 os.replace 之前**，否则半截文件会改名成成品、
+        #    下次进来「文件已存在」直接跳过 = 一张永久坏图。
+        #    ① 被取消 → 一律不认这次下载。哪怕刚好在取消那一刻把整个响应体收完了，
+        #       也只让它在队列里重下一次 —— 代价是一次白下载，换来的是「绝不会把
+        #       半截图记成成功」（没有 Content-Length 的响应没法用长度兜底）。
+        if cancel_token is not None and cancel_token.cancelled():
+            raise http_client.RequestCancelled(f"下载已取消: {filename}")
+        #    ② 字节数对不上（有 Content-Length 才判）：截断的响应不能算下载成功。
+        if expected is not None and written != expected:
+            raise _PartialDownloadError(f"{filename} 只收到 {written}/{expected} 字节")
+        os.replace(tmp_path, filepath)   # 原子：读者永远看不到半截文件
         custom_print(f"下载完成: {filename}")
         return filename
+    except http_client.RequestCancelled:
+        _discard_partial(tmp_path)
+        raise
     except PermanentHTTPError as e:
+        _discard_partial(tmp_path)
         custom_print(f"下载失败(已删除/不可用 {e.status_code}): {url}")
         return None
     except Exception as e:
+        _discard_partial(tmp_path)
+        # ⚠ 取消引起的中止（CancelToken 置 quit_now → curl 抛 RequestException）与
+        #    「网络错误」长得**一模一样**，必须先按取消判定：
+        #    否则上层会把它当永久失败 —— resolve_pending_id 把 id 从待下载队列里删掉，
+        #    用户点一次停止，在途的那几张图就被静默丢了（既不重试也不报错）。
+        if cancel_token is not None and cancel_token.cancelled():
+            raise http_client.RequestCancelled(f"下载已取消: {filename}")
         custom_print(f"下载失败(网络，重试 {retries} 次仍失败)，第 {retries}/{retries} 次: {e}")
         if raise_on_transient:
             raise TransientImageError(f"图片下载重试 {retries} 次仍失败: {filename}")

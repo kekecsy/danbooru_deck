@@ -15,6 +15,14 @@ danbooru_api / gelbooru_api / main.py 的直连点全部走这里。
 4. 网络活动探针 —— seconds_since_activity() 供 main.py 的「空闲下载」判断网络是否安静。
    刻意挂在 request() 这个唯一入口上，而不是让每个调用方自己上报：列表请求 / 元数据 /
    CDN 下载 / 缩略图代理全都经过这里，一处记录即全局有效。
+
+5. ⚠ 可取消（2026-10）—— CancelToken / RequestCancelled / close_quietly()。
+   没有它的时候「停止」是**假的**：停信号只改一个布尔量，而 worker 一旦进了
+   download_image 就卡在 socket 上，要等满「retries × timeout + 退避」才回来
+   （旧参数下最坏 4×30 + 21 ≈ 141 秒），期间 UI 一直写着「正在停止…」。
+   掐掉的是 ①还没开始的尝试与退避等待（cancel_check）、②正在传的那一次（读循环
+   逐块检查 + 读完/放弃时 close_quietly 收尾）。
+   ⚠ **没有**「取消线程去掐在途连接」这条路：试过，两版都无效，理由见 CancelToken。
 """
 import email.utils
 import json
@@ -22,6 +30,7 @@ import os
 import random
 import threading
 import time
+from contextlib import contextmanager
 
 from curl_cffi import requests
 
@@ -46,6 +55,123 @@ class PermanentHTTPError(Exception):
         super().__init__(f"HTTP {status_code} 永久错误: {url}")
         self.status_code = int(status_code)
         self.url = url
+
+
+class RequestCancelled(Exception):
+    """请求被**主动取消**（用户点了「停止」）。
+
+    ⚠ 必须与「网络失败」严格区分：上层捕获它要**静默收手** ——
+    不计失败、**不写 failed_ids**。混同的后果是「用户每点一次停止，
+    在途的那几张图就被误报成『下载失败可重试』」，点得越多失败表越长。
+    """
+
+
+# CDN 大字节请求（图片本体）的超时。
+# ⚠ **stream 模式下 curl_cffi 的 timeout 不是「总超时」**（见其 requests/utils.py）：
+#     tuple → CONNECTTIMEOUT_MS=connect，同时 LOW_SPEED_LIMIT=1 / LOW_SPEED_TIME=connect+read
+#     裸数字 → CONNECTTIMEOUT_MS=timeout，LOW_SPEED_TIME=timeout
+#   即「连接最慢 connect 秒」+「吞吐低于 1 B/s 持续 connect+read 秒就中断」。
+#   用元组是为了把「连接卡住」与「传输卡住」分开管。
+# ⚠ 这两个值同时是**「停止」在最坏情况下的上界**：数据在流动时，取消一置位、
+#   下一个 chunk 到达就会被放弃（≈瞬间）；只有 socket **一个字节都不来**时才退化成
+#   「等 curl 的低速率关口」。所以别把它们放大 —— 5 秒内 <1 B/s 对一条活着的链路
+#   几乎不可能发生（TCP 会重传），但对一条已经死掉的连接是确定的。
+#   ⚠ 顺带修掉旧行为：裸 30 是**总超时**，30MB 的图在慢链路上会在第 30 秒被砍掉。
+CDN_CONNECT_TIMEOUT = 10
+CDN_STALL_TIMEOUT = 5
+CDN_TIMEOUT = (CDN_CONNECT_TIMEOUT, CDN_STALL_TIMEOUT)
+
+
+def close_quietly(resp):
+    """把流式响应关掉（读完 / 中途放弃都要调）。不抛异常。
+
+    ⚠ **这个收尾只能在「读它的那个线程」里做。** curl_cffi 的 `Response.close()`
+    内部会置 `quit_now` → `stream_task.result()` 等传输线程收工 → `curl_easy_cleanup`；
+    读取线程被异常唤醒后也会走同一段收尾，两边撞在一起就是两次 cleanup。
+    所以「取消」那一侧只置标记，收尾一律留给读者（见下）。
+
+    ⚠ 非流式响应上它是空操作（curl_cffi 内部早退），可以无条件调。
+    """
+    try:
+        resp.close()
+    except Exception:
+        pass
+
+
+class CancelToken:
+    """一次「可取消的网络活动」的令牌 —— 每个 job 一个。
+
+    `cancel()` 置位之后：
+      1. `request()` 不再发新尝试，退避 / Retry-After 的 sleep 立刻中断；
+      2. 下载的读循环在每个 chunk 之后查一次，被取消就抛 RequestCancelled。
+
+    ⚠⚠ 这里**刻意只做一个标记**，别再加「从取消线程去掐响应」那套：
+        试过两条路，实测都无效 ——
+        · `resp.close()`：会和读线程被异常唤醒后的收尾撞车（两次 curl_easy_cleanup）；
+        · 只置 curl_cffi 的 `quit_now`：它只在 **write 回调**里被读到，而 write 回调
+          **只在有数据到达时**才被调用 —— 所以它永远快不过「下一个 chunk 到达」，
+          对「一个字节都不来的僵死连接」更是完全没有作用（那种情况只能等 curl
+          自己的 LOW_SPEED 关口）。三个场景（503 退避 / 慢速吐字节 / 彻底僵死）
+          各测一遍，加与不加耗时和连接数**完全一样**，所以不留这段死代码。
+
+    ⚠ 为什么不是全进程一个：`/api/stop?job_id=` 只该停**这一个**任务。
+      空闲下载轮次与用户任务可能同时在跑，全局中断会把另一个也一起打断。
+    """
+
+    def __init__(self, label=""):
+        self.label = label
+        self._ev = threading.Event()
+
+    def cancelled(self) -> bool:
+        return self._ev.is_set()
+
+    def cancel(self):
+        """置位。可重复调用（幂等）。"""
+        self._ev.set()
+
+
+def _sleep_cancellable(seconds, cancel_check, step=0.1):
+    """可被打断的 sleep：退避等待不该让「停止」陪着一起等。
+
+    用 0.1s 的步长轮询，而不是「一次 sleep 完再看」—— 退避上限 30s、
+    Retry-After 上限 60s，一次睡完的话停止最多要等 1 分钟。
+    """
+    if cancel_check is None:
+        time.sleep(seconds)
+        return
+    deadline = time.monotonic() + seconds
+    while True:
+        if cancel_check():
+            raise RequestCancelled("等待重试期间被取消")
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            return
+        time.sleep(min(step, remain))
+
+
+# ---- 线程局部「当前任务令牌」 ------------------------------------------------
+# `_fetch_page_or_pause(lambda: api.get_posts_by_tags(...))` 这类闭包在 main.py 里
+# 遍地都是（列表抓取 / 元数据预取 / 缩略图…），把 cancel_check 一层层穿进 api 层
+# 要改一大片签名；而「这个线程正在替哪个 job 干活」本来就是**线程的属性**。
+# 于是：job 的主线程进来时绑一次，request() 在调用方没显式传 cancel_check 时用它兜底。
+# ⚠ 只覆盖任务自己的线程。ThreadPoolExecutor 的工作线程是新线程、拿不到绑定 ——
+#   下载路径必须**显式**把 token 传进 download_image（main.py 三处都传了）。
+_TLS = threading.local()
+
+
+@contextmanager
+def bind_cancel_token(token):
+    prev = getattr(_TLS, "token", None)
+    _TLS.token = token
+    try:
+        yield token
+    finally:
+        _TLS.token = prev
+
+
+def _ambient_cancel_check():
+    token = getattr(_TLS, "token", None)
+    return token.cancelled if token is not None else None
 
 
 # ---------------- 线程局部 Session 池 ----------------
@@ -200,7 +326,8 @@ def _backoff_delay(attempt, base_delay, max_delay):
 
 def request(method, url, *, kind="json", retries=5, timeout=20,
             permanent=None, headers=None, params=None, data=None,
-            proxies=None, limiter=None, base_delay=1.0, max_delay=30.0):
+            proxies=None, limiter=None, base_delay=1.0, max_delay=30.0,
+            stream=False, cancel_check=None):
     """发起 HTTP 请求并按统一策略重试。
 
     kind:
@@ -212,12 +339,30 @@ def request(method, url, *, kind="json", retries=5, timeout=20,
     CDN 请求遇到其余状态码按瞬时处理（保持 download_image 旧契约）。
     重试耗尽：瞬时状态码走 raise_for_status 抛出，网络异常抛出最后一次异常。
     返回 curl_cffi Response（status 2xx）。
+
+    stream=True: 交给 curl_cffi 的流式模式，**响应体由调用方自己读**
+        （`iter_content()` 或 `.content`）—— 图片本体走这条路才有被取消的可能，
+        因为非流式模式下响应体在 `session.request()` 内部就读完了，
+        调用方拿不到句柄、也就没有任何东西可以中止它。
+    cancel_check: 返回真表示「已取消」的可调用对象（通常传 `token.cancelled`）。
+        每次尝试之前、以及退避/Retry-After 等待期间都会查一次；
+        查到就抛 RequestCancelled。
+        ⚠ 它**管不了「已经卡在 socket read 上的那一次」** —— 那一层得靠调用方在
+        自己的读循环里逐个 chunk 复查（见 danbooru_api.download_image），
+        因为没有别的线程能安全地替它掐掉连接（理由见 CancelToken）。
+        ⚠ 不传时用当前线程绑定的任务令牌兜底（见 bind_cancel_token）——
+        这条兜底覆盖的是遍地都是的 `lambda: api.get_xxx(...)` 闭包。
     """
     if kind == "cdn":
         limiter = None
+    if cancel_check is None:
+        # 调用方没显式给 → 用当前线程绑定的那个任务令牌兜底（见 bind_cancel_token）。
+        cancel_check = _ambient_cancel_check()
     permanent_set = DEFAULT_PERMANENT_STATUS if permanent is None else frozenset(permanent)
     attempt = 0
     while True:
+        if cancel_check is not None and cancel_check():
+            raise RequestCancelled(f"请求已取消: {url}")
         if limiter is not None:
             limiter.acquire()
         attempt += 1
@@ -231,29 +376,40 @@ def request(method, url, *, kind="json", retries=5, timeout=20,
                 data=data,
                 proxies=proxies,
                 timeout=timeout,
+                stream=stream,
             )
         except Exception:
+            # 被取消时抛出去的异常和「网络错误」长得一样，先按取消判定，
+            # 否则停止瞬间会白睡一次退避、还会把它当成一次真实失败往上抛。
+            if cancel_check is not None and cancel_check():
+                raise RequestCancelled(f"请求已取消: {url}")
             if attempt > retries:
                 raise
-            time.sleep(_backoff_delay(attempt, base_delay, max_delay))
+            _sleep_cancellable(_backoff_delay(attempt, base_delay, max_delay), cancel_check)
             continue
 
         status = resp.status_code
         if 200 <= status < 300:
             return resp
         if status in permanent_set:
+            close_quietly(resp)
             raise PermanentHTTPError(status, url)
         if status in TRANSIENT_STATUS:
             if attempt > retries:
+                close_quietly(resp)
                 resp.raise_for_status()
             delay = _retry_after_delay(resp)
             if delay is None:
                 delay = _backoff_delay(attempt, base_delay, max_delay)
-            time.sleep(delay)
+            close_quietly(resp)
+            _sleep_cancellable(delay, cancel_check)
             continue
         # 其余状态码：JSON 类请求视为永久（400 非法查询等），CDN 类视为瞬时重试。
         if kind == "json":
+            close_quietly(resp)
             raise PermanentHTTPError(status, url)
         if attempt > retries:
+            close_quietly(resp)
             resp.raise_for_status()
-        time.sleep(_backoff_delay(attempt, base_delay, max_delay))
+        close_quietly(resp)
+        _sleep_cancellable(_backoff_delay(attempt, base_delay, max_delay), cancel_check)

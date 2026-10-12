@@ -115,7 +115,10 @@ def get_posts_by_tags(tags, page, limit=100, timeout=20):
     return _normalize_posts(post_data)
 
 
-def download_image(url, folder, custom_print=print, retries=3, delay=3, raise_on_transient=False):
+def download_image(url, folder, custom_print=print, retries=3, delay=3,
+                   raise_on_transient=False, cancel_token=None):
+    """与 danbooru_api.download_image 同一套契约（stream + .part 原子落盘 + 可取消），
+    差异只有 headers / 代理来源。改动理由与坑见 danbooru_api.download_image 的注释。"""
     if not url:
         return None
     filename = url.split("/")[-1].split("?")[0]
@@ -125,22 +128,49 @@ def download_image(url, folder, custom_print=print, retries=3, delay=3, raise_on
         custom_print(f"文件已存在: {filename}")
         return filename
 
+    tmp_path = filepath + ".part"
+    written = 0
+    expected = None
     try:
         custom_print(f"正在下载: {filename} ...")
         r = http_client.request(
             "GET", url,
-            kind="cdn", retries=retries, timeout=30,
+            kind="cdn", retries=retries, timeout=http_client.CDN_TIMEOUT,
             headers=HEADERS, proxies=danbooru_api.PROXIES,
             base_delay=delay,
+            stream=True,
+            cancel_check=(cancel_token.cancelled if cancel_token is not None else None),
         )
-        with open(filepath, "wb") as f:
-            f.write(r.content)
+        expected = danbooru_api._expected_size(r)
+        try:
+            with open(tmp_path, "wb") as f:
+                for chunk in r.iter_content():
+                    if cancel_token is not None and cancel_token.cancelled():
+                        raise http_client.RequestCancelled(f"下载已取消: {filename}")
+                    f.write(chunk)
+                    written += len(chunk)
+        finally:
+            # 收尾必须由读线程做（理由见 http_client.close_quietly / danbooru_api.download_image）
+            http_client.close_quietly(r)
+        # 落盘前的终检：取消 / 截断都不许改名成成品（理由见 danbooru_api.download_image）
+        if cancel_token is not None and cancel_token.cancelled():
+            raise http_client.RequestCancelled(f"下载已取消: {filename}")
+        if expected is not None and written != expected:
+            raise danbooru_api._PartialDownloadError(f"{filename} 只收到 {written}/{expected} 字节")
+        os.replace(tmp_path, filepath)
         custom_print(f"下载完成: {filename}")
         return filename
+    except http_client.RequestCancelled:
+        danbooru_api._discard_partial(tmp_path)
+        raise
     except http_client.PermanentHTTPError as e:
+        danbooru_api._discard_partial(tmp_path)
         custom_print(f"下载失败(已删除/不可用 {e.status_code}): {url}")
         return None
     except Exception as e:
+        danbooru_api._discard_partial(tmp_path)
+        if cancel_token is not None and cancel_token.cancelled():
+            raise http_client.RequestCancelled(f"下载已取消: {filename}")
         custom_print(f"下载失败(网络，重试 {retries} 次仍失败): {e}")
         if raise_on_transient:
             raise TransientImageError(f"图片下载重试 {retries} 次仍失败: {filename}")

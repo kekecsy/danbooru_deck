@@ -193,6 +193,12 @@ class DownloadJob:
     viewer_data: list = field(default_factory=list)
     viewer_lock: threading.RLock = field(default_factory=threading.RLock)
     play_event: threading.Event = field(default_factory=threading.Event)
+    # 「停止」用的取消令牌：置位后**在途的图片下载会立刻中断**（http_client.CancelToken）。
+    # ⚠ 没有它的时候停信号只是改一下 is_running 这个布尔量，而 worker 一旦进了
+    #   download_image 就卡在 socket 上 —— 要等满「retries × timeout + 退避」才回得来
+    #   （实测最坏 2 分钟以上），期间前端一直写着「正在停止…」。用户点停止要的是
+    #   「停下」，不是「排队等网络自己超时」。
+    cancel_token: object = field(default_factory=http_client.CancelToken)
     is_running: bool = False
     logs: list = field(default_factory=list)
     sent_image_count: int = 0
@@ -1859,9 +1865,16 @@ def _list_posts_for_page(job, source, page_num, fetch_fn, label, scope=None):
     return _slice_page(st.get("posts") or [], page_num - first)
 
 
+# _process_post 的「被停止」返回值 —— 必须与 None（跳过）区分开：
+# 停止时在途的 post 既没成功、也没跳过、更不是失败，混进任何一个计数都是在报假账
+# （用户看到「跳过 37」会以为是过滤标签跳过，实际是自己点的那下停止）。
+POST_STOPPED = "__POST_STOPPED__"
+
+
 def _process_post(post, job, do_download=True):
     """处理单个 post：过滤、提取画师、可选下载。返回 (ids, artist, saved_filename) 或 None。
-    log.json 走全局 log_store；下载目录由 job.save_dir 决定。"""
+    log.json 走全局 log_store；下载目录由 job.save_dir 决定。
+    停止时返回 POST_STOPPED（见 _process_posts_concurrent：停止既不算成功也不算跳过/失败）。"""
     source = post.get("_source") or getattr(job, "tag_source", "danbooru") or "danbooru"
     ids = str(post.get('id'))
     if not ids:
@@ -1901,7 +1914,7 @@ def _process_post(post, job, do_download=True):
 
         job.play_event.wait()
         if not job.is_running:
-            return None
+            return POST_STOPPED
 
         # 无论以何种方式要下载图片，都先把 id 写入 folder 的 ids_data.json（待下载队列）。
         # 这样中断 / 失败后该 id 仍留在文件里，可被「按 id 重试」直接消费。
@@ -1909,7 +1922,13 @@ def _process_post(post, job, do_download=True):
 
         download_fn = gelbooru_api.download_image if source == "gelbooru" else danbooru_api.download_image
         try:
-            saved_filename = download_fn(image_url, job.save_dir, job.append_log, raise_on_transient=True)
+            saved_filename = download_fn(image_url, job.save_dir, job.append_log,
+                                         raise_on_transient=True,
+                                         cancel_token=job.cancel_token)
+        except http_client.RequestCancelled:
+            # 停止：在途下载被掐断。**不是失败** —— 不计失败、不写 failed_ids，
+            # 而且这个 id 已经在队列里，下次接着跑就下回来了。
+            return POST_STOPPED
         except (danbooru_api.TransientImageError, gelbooru_api.TransientImageError) as e:
             # 瞬时网络失败（已内部重试耗尽）：id 保留在 ids_data.json，记入失败表供前端按 id 重试
             job.record_failed_id(ids)
@@ -1976,8 +1995,10 @@ def _process_posts_concurrent(job, posts, page_need_update, new_hot_artists,
         循环里串行调用，绝不放进工作线程。
     暂停：投递前 play_event.wait()，且 _process_post 内部下载前还会再 wait 一次，
          已投递的在途任务会在各自的下载点暂停。
-    停止：投递循环见 is_running=False 即停止投递；在途/排队任务 _process_post 内部
-         检测 is_running=False 直接返回 None，快速排空。
+    停止：投递循环见 is_running=False 即停止投递；已经在途的任务分两种 ——
+         还没进 HTTP 的 _process_post 会立刻返回 POST_STOPPED；已经进了 HTTP 的
+         由 job.cancel_token 掐断连接后也返回 POST_STOPPED（见 http_client.CancelToken）。
+         **停止不计入成功/跳过/失败任何一个计数**。
     max_workers：None 时回退到 job.download_concurrency（来自用户设置），都没有再用 DOWNLOAD_CONCURRENCY。"""
     if max_workers is None:
         max_workers = max(1, min(int(getattr(job, 'download_concurrency', 0) or DOWNLOAD_CONCURRENCY), 16))
@@ -1985,7 +2006,8 @@ def _process_posts_concurrent(job, posts, page_need_update, new_hot_artists,
     if not posts:
         return 0, 0, 0
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    try:
         future_to_post = {}
         for post in posts:
             if not job.is_running:
@@ -2006,6 +2028,10 @@ def _process_posts_concurrent(job, posts, page_need_update, new_hot_artists,
             if result == "__TRANSIENT__":
                 page_failed += 1
                 continue
+            if result == POST_STOPPED:
+                # 停止：不算成功、不算跳过、不算失败。必须排在下面那句元组解包之前，
+                # 否则这个字符串会被当成 (ids, artist, filename) 解出 15 个字符。
+                continue
             if result is None:
                 page_skipped += 1
                 job.skip_count += 1
@@ -2020,6 +2046,10 @@ def _process_posts_concurrent(job, posts, page_need_update, new_hot_artists,
             # 仅主线程改这两个未加锁的 list
             _update_artist_stats(job, artist, page_need_update, new_hot_artists)
             job.append_viewer_entry(ids, artist, saved_filename, post)
+    finally:
+        # 被停止时把「已投递但还没开跑」的直接取消：它们只会立刻返回 POST_STOPPED，
+        # 但对着上千个 post 逐个建任务再逐个跑一遍，白让用户多等好几秒。
+        executor.shutdown(wait=True, cancel_futures=not job.is_running)
 
     # 本页所有图片处理完，统一把 pending 移除增量落盘一次（旧实现每张图都全量重写）
     job.flush_pending_ids()
@@ -2382,7 +2412,13 @@ def task_download_ids(job, inline_ids=None):
             return "stopped"
 
         try:
-            saved_filename = danbooru_api.download_image(image_url, job.save_dir, job.append_log, raise_on_transient=True)
+            saved_filename = danbooru_api.download_image(image_url, job.save_dir, job.append_log,
+                                                         raise_on_transient=True,
+                                                         cancel_token=job.cancel_token)
+        except http_client.RequestCancelled:
+            # 停止：连接被掐断。**不是失败** —— 不计失败、不写 failed_ids、也不动队列，
+            # 这个 id 留在 ids_data.json 里等下次跑。
+            return "stopped"
         except danbooru_api.TransientImageError as e:
             # 瞬时失败：id 留在队列并记入失败表供再次重试
             job.record_failed_id(pid_str)
@@ -2417,7 +2453,8 @@ def task_download_ids(job, inline_ids=None):
         job.append_viewer_entry(pid_str, artist, saved_filename, entry_post)
         return "ok"
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
+    try:
         futures = []
         for pid_str in ids_data:
             if not job.is_running:
@@ -2444,6 +2481,10 @@ def task_download_ids(job, inline_ids=None):
             except Exception as e:
                 job.fail_count += 1
                 job.append_log(f"下载线程异常: {e}")
+    finally:
+        # 停止时丢掉「投递了但还没开跑」的那些：它们只会立刻 return "stopped"，
+        # 但上千个 id 逐个建任务 + 逐个跑一遍，用户要多等好几秒才看到「已停止」。
+        executor.shutdown(wait=True, cancel_futures=not job.is_running)
 
     _persist_global_data()
     job.flush_viewer_data()
@@ -2680,7 +2721,12 @@ def task_popular_recover(job, start_page, end_page):
                 return "skip"
 
         try:
-            saved = danbooru_api.download_image(image_url, job.save_dir, job.append_log)
+            saved = danbooru_api.download_image(image_url, job.save_dir, job.append_log,
+                                               cancel_token=job.cancel_token)
+        except http_client.RequestCancelled:
+            # 停止：在途下载被掐断。静默收手 —— 不算失败、不写 failed_ids，
+            # id 仍在 ids_data.json 里等下次跑。
+            return "stopped"
         except Exception as e:
             # 异常也算瞬时失败：保留 id 让后续重试
             job.append_log(f"[Recover] ID {pid_str} 异常: {e}")
@@ -2704,7 +2750,8 @@ def task_popular_recover(job, start_page, end_page):
         job.append_log(f"[Recover] [{job.success_count}/{len(targets)}] ID {pid_str} 下载成功 → {saved}")
         return "ok"
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
+    try:
         futures = []
         for pid_str, cdn_url in targets:
             if not job.is_running:
@@ -2727,6 +2774,8 @@ def task_popular_recover(job, start_page, end_page):
                         flushed_since_start = 0
             except Exception as e:
                 job.append_log(f"[Recover] 下载线程异常: {e}")
+    finally:
+        executor.shutdown(wait=True, cancel_futures=not job.is_running)
 
     _persist_global_data()
     job.flush_viewer_data()
@@ -2738,6 +2787,18 @@ def task_popular_recover(job, start_page, end_page):
 def task_recover_popular(job, start_page, end_page):
     """向后兼容的 alias：旧 mode `recover_popular` 仍走这里，内部转调新实现。"""
     return task_popular_recover(job, start_page, end_page)
+
+
+def _run_job_bound(job, *args, **kwargs):
+    """job 线程的入口：把「本线程属于哪个 job」告诉 http_client。
+
+    ⚠ 必须绑在这一层而不是下载的调用点上：列表抓取 / 元数据预取 / 缩略图这些路径
+    都藏在 `lambda: api.get_xxx(...)` 里，request() 拿不到 job；绑了之后它们
+    一律能被同一个 cancel_token 掐断（否则光「一次列表请求 = 5 次内部重试 × 20s」
+    就能让「停止」白等一百多秒）。
+    """
+    with http_client.bind_cancel_token(job.cancel_token):
+        return _run_job(job, *args, **kwargs)
 
 
 def _run_job(job, start_page, end_page, mode, target_date, start_date, end_date,
@@ -3641,7 +3702,7 @@ def start_scraper(req: StartRequest, background_tasks: BackgroundTasks):
             }
 
     job.thread = threading.Thread(
-        target=_run_job,
+        target=_run_job_bound,
         args=(job, req.start_page, req.end_page, req.mode, req.target_date,
               req.start_date, req.end_date, req.ids, req.tag_query, tag_source,
               [int(p) for p in (req.pages or [])]),
@@ -3707,6 +3768,10 @@ def stop_scraper(job_id: str = ""):
     job.outcome = "stopped"
     job.is_running = False
     job.play_event.set()
+    # ⚠ 真正让「停止」立刻生效的是这一句，不是上面那行布尔量：
+    #   它会把正在下载的那几张图的连接直接掐掉。少了它，网络不好时任务线程要等
+    #   在途请求各自超时（最长 2 分钟）才会退出，前端全程停在「正在停止…」。
+    job.cancel_token.cancel()
     # 真正落盘在 worker 线程的 finally 块里做（finalize_on_stop）：
     # 1) collect 阶段 → pending_ids 同步到 ids_data.json
     # 2) download 阶段 → viewer_data flush 到 viewer_data.json
@@ -3720,7 +3785,7 @@ def shutdown_backend():
     """Electron 退出前的优雅关闭口（替代直接 taskkill /F 导致 Python finally 不执行、
     最后 ≤20 条已下载记录丢失）：
 
-    1. 给所有活跃任务发停止信号（同 /api/stop）；
+    1. 给所有活跃任务发停止信号（同 /api/stop，含掐掉在途下载的 cancel_token）；
     2. 给 worker 线程最多 3s 自行收尾（它们本来就在多个检查点轮询 is_running）；
     3. 在本请求线程内同步跑一遍 finalize_on_stop() —— 所有写都走 viewer_lock /
        per-path 文件锁，与 worker 互斥；worker 之后自己的 finalize 只是幂等重放；
@@ -3733,6 +3798,9 @@ def shutdown_backend():
         job.outcome = "stopped"
         job.is_running = False
         job.play_event.set()
+        # 退出前也要掐掉在途下载，否则下面的 join(timeout=3) 必然超时、
+        # finalize 与还在写盘/写 log 的 worker 抢同一份状态。
+        job.cancel_token.cancel()
     for job in active:
         if job.thread is not None and job.thread.is_alive():
             job.thread.join(timeout=3.0)
@@ -4585,7 +4653,9 @@ def _idle_run_round(job, ids):
     """跑一轮空闲下载：复用 _run_job 的全部收尾逻辑（outcome / 落盘 / 注册表延迟清理）。"""
     started_rev = getattr(job, "idle_rev", 0)
     try:
-        _run_job(job, 1, 1, "download_ids", job.target_folder, "", "", ids, "", "danbooru", [])
+        # 走 _run_job_bound（不是 _run_job）：空闲轮次的线程同样要绑定 cancel_token，
+        # 否则「让位给前台任务」只能干等网络超时（见 _run_job_bound 的注释）。
+        _run_job_bound(job, 1, 1, "download_ids", job.target_folder, "", "", ids, "", "danbooru", [])
     finally:
         with idle_state.lock:
             idle_state.last_round = {
@@ -4682,6 +4752,9 @@ def _yield_idle_jobs(timeout=10.0):
         j.outcome = "stopped"
         j.is_running = False
         j.play_event.set()
+        # 让位同样要掐在途下载：不掐的话下面这个 deadline 只能干等网络超时，
+        # 前台任务要白白推迟十几秒才开得起来。
+        j.cancel_token.cancel()
     deadline = time.time() + timeout
     while time.time() < deadline and jobs.list_active():
         sleep(0.05)
