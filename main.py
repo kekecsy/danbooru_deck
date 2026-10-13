@@ -3234,6 +3234,73 @@ def _browse_video_cover_url(post: dict) -> str:
     return ""
 
 
+def _library_root_paths():
+    """{library_id: Path}。只在真要落盘判定时才调（get_library_roots 有 mtime 缓存，但它不该进热路径）。"""
+    return {r["id"]: r["path"] for r in get_library_roots()}
+
+
+def _post_folder_candidates(rows, roots):
+    """把同一个 post 的多条 viewer 记录排成「最可能是真的那一个」在前，并补上两个实测标记。
+
+    一个 post 可能被下到过多个目录（重复下载 / 手工移库 —— 本机真实数据里有 767 例），
+    其中若干已经被删掉或移走。排序键：① 文件真的还在 ② 目录还在 ③ 都不是（保持记录顺序）。
+
+    ⚠ 展示与跳转**共用这一套判断**：浏览页价签上写的「跳到 <日期>」必须和点下去实际跳的
+      日期一致，否则会出现「价签指向 A、跳过去却是 B」这种自相矛盾。
+    ⚠ folder_exists / exists 是**此刻**的实测，不缓存：用户完全可能在打开浏览页之后把文件
+      挪走，而「挪走了」正是这个功能最该报出来的事情（宁可当场多 stat 一次）。
+    """
+    ranked = []
+    for r in rows:
+        root = roots.get(r["library_id"]) or roots.get("default")
+        folder_dir = (root / r["folder"]) if root else None
+        try:
+            folder_ok = bool(folder_dir is not None and folder_dir.is_dir())
+            file_ok = bool(
+                folder_ok and r["filename"] and (folder_dir / r["filename"]).is_file()
+            )
+        except OSError:
+            folder_ok = file_ok = False
+        ranked.append((
+            0 if file_ok else (1 if folder_ok else 2),
+            {**r, "folder_exists": folder_ok, "exists": file_ok},
+        ))
+    ranked.sort(key=lambda t: t[0])   # 稳定排序：同一档里保持记录顺序
+    return [cand for _, cand in ranked]
+
+
+def _attach_download_folders(posts: list):
+    """给浏览页里「已下载」的 post 补上 `downloaded_folder`：它落在哪个目录（日期 / tag_xxx）。
+
+    前端 Rank / Tag 浏览据此在缩略图上显示「库里在哪天」，并可一键跳过去。
+    一屏 40 条 → 一次 IN 查询（表达式索引，见 deck_db.VIEWER_POST_ID_SQL），实测 <1ms。
+    ⚠ 反查失败只是少一个日期提示，**不该让整页浏览跟着失败** → 这里整体吞掉异常。
+    ⚠ 只对 `downloaded` 为真的 post 查：没下载过的 id 根本不可能有 viewer 记录，
+      白查一遍等于每次翻页多一次全索引探查。
+    """
+    if not posts:
+        return
+    ids = [p["id"] for p in posts if p.get("downloaded") and p.get("id")]
+    if not ids:
+        return
+    try:
+        found = deck_db.viewer_folders_for_post_ids(ids)
+    except Exception as e:
+        print(f"反查已下载图片所在目录失败: {e}")
+        return
+    roots = None
+    for p in posts:
+        rows = found.get(str(p.get("id"))) or []
+        if not rows:
+            continue
+        if roots is None:
+            roots = _library_root_paths()   # 只有真有记录时才去读配置
+        # ⚠ 展示用的目录与点「跳到日期」时实际跳的目录必须是**同一个判断**的结果：
+        #   调 _post_folder_candidates 挑「盘上真的还在」的那一处，而不是无脑取第一条
+        #   （第一条可能已经被删掉/移走 → 价签指向 A、点下去跳到 B）。
+        p["downloaded_folder"] = _post_folder_candidates(rows, roots)[0]["folder"]
+
+
 def _slim_post_for_browse(post: dict) -> dict:
     """从 Danbooru posts.json 的单条 post 里挑出前端预览要用的字段。
     已删除 / 无预览图的帖子（file_url 全空）返回 None 由上层过滤。"""
@@ -3310,6 +3377,7 @@ def browse_tags(tags: str = "", page: int = 1, limit: int = 40):
         return {"ok": False, "msg": "Danbooru 返回格式异常（可能触发限流或 tag 无效）", "posts": []}
 
     posts = [slim for slim in (_slim_post_for_browse(p) for p in raw) if slim]
+    _attach_download_folders(posts)
     return {
         "ok": True,
         "tags": tags,
@@ -3345,6 +3413,7 @@ def browse_rank(page: int = 1, limit: int = 40):
         return {"ok": False, "msg": "Danbooru 返回格式异常（可能触发限流）", "posts": []}
 
     posts = [slim for slim in (_slim_post_for_browse(p) for p in raw) if slim]
+    _attach_download_folders(posts)
     return {
         "ok": True,
         "page": page,
@@ -3452,6 +3521,45 @@ def downloaded_ids(contains: str = ""):
         "total": len(snap),
         "sample": sample,
     }
+
+
+@app.get("/api/post_dates")
+def api_post_dates(ids: str = ""):
+    """反查「这些 post 落在哪个目录」—— Rank / Tag 浏览里「跳到这张图所在的日期」用。
+
+    ids 逗号分隔（上限 200，够一屏 + 余量）。返回 {"ok": true, "dates": {id: {...}}}；
+    **查不到的 id 不出现在 dates 里**，前端据此提示「不存在，可能移动到其他文件夹」。
+
+    每条含 folder（日期目录名，也可能是 tag_xxx 目录）/ library_id / filename / local_path /
+    folder_exists / exists。两个 exists 都是**此刻**的实测，不落任何缓存：用户完全可能
+    在打开浏览页之后把文件挪走，而「挪走了」正是这个接口最该报出来的事情。
+
+    ⚠ 为什么不让前端直接拿浏览页附带的 `downloaded_folder` 去跳：那是**列表页生成时**的快照，
+      而 resolve_selected_date 对「不存在但格式合法」的日期会**建一个空文件夹并进进去**
+      （用户主动选日期优先于回退 today）。拿陈旧/失效的日期去跳，用户会落到一个空目录里，
+      而正确的反馈是「不存在」。所以跳转前必须由这里实探一次。
+    """
+    want = []
+    for s in (ids or "").split(","):
+        s = s.strip()
+        if s.isdigit() and s not in want:
+            want.append(s)
+    want = want[:200]
+    if not want:
+        return {"ok": False, "msg": "ids 参数需要逗号分隔的数字 post id", "dates": {}}
+    try:
+        found = deck_db.viewer_folders_for_post_ids(want)
+    except Exception as e:
+        return {"ok": False, "msg": f"反查失败: {e}", "dates": {}}
+
+    roots = _library_root_paths()
+    dates = {}
+    for pid in want:
+        rows = found.get(pid) or []
+        if rows:
+            # 「盘上真的还在」的那一条排在最前（见 _post_folder_candidates）。
+            dates[pid] = _post_folder_candidates(rows, roots)[0]
+    return {"ok": True, "dates": dates}
 
 
 @app.get("/api/proxy_thumb")

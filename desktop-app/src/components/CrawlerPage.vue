@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import GalleryCalendar from './GalleryCalendar.vue';
 import TaskDatePicker from './TaskDatePicker.vue';
 import TutorialsModal from './crawler/TutorialsModal.vue';
@@ -3363,6 +3363,87 @@ function openRankBrowse() {
 
 function closeBrowse() {
   browse.value.open = false;
+}
+
+// ── 「跳到这张图所在的日期」（Rank / Tag / 收集 浏览里的已下载缩略图）────────────
+// 在当前日期的图库里定位某张图：翻到它所在的那一页 + 高亮 + 滚进视野。
+// 高亮直接复用键盘导航那套（galleryFocusKey → .is-keyboard-focused + scrollIntoView），
+// 不再另起一套「临时高亮」状态，免得两套状态各自计时、互相打架。
+async function locateGalleryPost(postId) {
+  const id = String(postId || '').trim();
+  if (!id) return false;
+  const findIdx = () => filteredLocalImages.value.findIndex(it => getPostId(it) === id);
+  let idx = findIdx();
+  if (idx < 0) {
+    // 可能有三种原因：① 该 folder 的元数据里压根没这张（孤立文件 / 已被移走）；
+    // ② 被关键字搜索挡掉了；③ 被分级筛选 / 「只看已选」挡掉了。
+    // ① 没救；②③ 都是用户自己设的筛选，而用户此刻要的是「看到这张图」——
+    // 所以他主动点了跳转时，把筛选让开是符合意图的，但要说一声（不静默改状态）。
+    if (!gallery.value.images.some(it => getPostId(it) === id)) return false;
+    gallery.value.search = '';
+    gallery.value.filterFormat = 'all';
+    gallery.value.filterRatings = [];
+    showOnlySelected.value = false;
+    await nextTick();
+    idx = findIdx();
+    if (idx < 0) return false;
+    showToast('已让开当前的搜索 / 筛选，为了显示出目标图片', 'info');
+  }
+  gallery.value.page = Math.floor(idx / gallery.value.pageSize) + 1;
+  await nextTick();
+  const item = filteredLocalImages.value[idx];
+  focusGalleryItem(item);
+  await nextTick();
+  const pageIdx = pagedLocalImages.value.findIndex(it => getPostId(it) === id);
+  const card = document.querySelectorAll('.gallery-grid .image-card')[pageIdx];
+  // block:'center' 而不是 'nearest'：跳过来是为了「看见并确认是哪一张」，
+  // 贴着边缘滚进来会看不出它是被特意定位到的那张。
+  card?.scrollIntoView({ block: 'center', inline: 'nearest' });
+  return true;
+}
+
+// 反查 + 实探 + 跳转。⚠ **必须实探**，不能直接拿 post.downloaded_folder 去 loadGallery：
+// 后端 resolve_selected_date 对「格式合法但磁盘上不存在」的日期会**建一个空文件夹并进进去**
+// （用户主动选日期优先于回退 today）—— 那样「图片不存在」会被伪装成「跳进一个空图库」，
+// 用户看到的是空白而不是「它不在了」。所以这里先问 /api/post_dates，拿到
+// folder_exists / exists 两个此刻的实测值再决定跳不跳、提示什么。
+// 浏览页附带的 downloaded_folder 只用于**显示**（「跳到 2025-03-19」那个价签）。
+async function browseGotoDate(post) {
+  const id = String(post?.id || '').trim();
+  if (!id) return;
+  let info = null;
+  try {
+    const res = await fetch(`http://127.0.0.1:18765/api/post_dates?ids=${encodeURIComponent(id)}`);
+    const data = await res.json();
+    if (!data?.ok) throw new Error(data?.msg || '反查失败');
+    info = (data.dates || {})[id] || null;
+  } catch (e) {
+    showToast(`反查所在日期失败：${e?.message || e}`, 'error');
+    return;
+  }
+  if (!info) {
+    showToast(`${id} 在库里没有下载记录：可能已移动到其他文件夹`, 'warning');
+    return;
+  }
+  const folder = info.folder;
+  if (!info.folder_exists) {
+    // 不跳：跳进去只会得到一个空图库（见上面 resolve_selected_date 的坑）
+    showToast(`记录的目录 ${folder} 已不存在：可能已移动到其他文件夹`, 'warning');
+    return;
+  }
+  closeBrowse();
+  if (folder !== gallery.value.selectedDate) {
+    await loadGallery(folder);
+  }
+  const located = await locateGalleryPost(id);
+  if (!located) {
+    showToast(`已跳到 ${folder}，但该图不在其中：可能已移动到其他文件夹`, 'warning');
+  } else if (!info.exists) {
+    // 记录在、目录在，但文件不在了（被改名 / 移走）—— 仍然跳，只是说清楚
+    showToast(`已跳到 ${folder}：原文件已不在该目录（可能已移动到其他文件夹）`, 'warning');
+  } else {
+    showToast(`已跳到 ${folder}`, 'info');
+  }
 }
 
 // collected 模式：先拉某日期收集到的全部 ID，再切片拉第 page 页的在线预览
@@ -6879,6 +6960,7 @@ const downloadTargetHint = computed(() => {
       @clear-tag-history="clearTagSearchHistory"
       @add-saved-tag="addSavedTag"
       @remove-saved-tag="removeSavedTag"
+      @goto-date="browseGotoDate"
     />
     </Teleport>
 

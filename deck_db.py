@@ -21,6 +21,16 @@ from runtime_paths import DECK_DB_PATH, ensure_user_directories
 
 SCHEMA_VERSION = 1
 
+# 「这条 viewer 记录对应哪个 post」—— 取 post_url 结尾的那串数字：
+#   https://danbooru.donmai.us/posts/9019905      → 9019905
+#   https://safebooru.donmai.us/posts/9019905     → 9019905
+#   https://gelbooru.com/index.php?page=post&s=view&id=123 → 123（⚠ **不是** Danbooru 的 123）
+# ⚠ 正因为 gelbooru 的 id 会与 Danbooru 数值撞车，这个数字**单独不足以定位站点**，
+#   查询里必须再限定 URL 形态（见 viewer_folders_for_post_ids 的 LIKE 那一段）。
+# ⚠ 这份文本同时用在「表达式索引」与「查询」两处，**必须逐字一致**：改一处忘另一处
+#   不会报错，只会让查询计划悄悄退回全表扫描（506k 行实测 1.1s，点一下等一秒）。
+VIEWER_POST_ID_SQL = "CAST(substr(post_url, length(rtrim(post_url,'0123456789')) + 1) AS INTEGER)"
+
 # ---------------------------------------------------------------- DDL --------
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS meta(
@@ -227,6 +237,15 @@ def _open_conn() -> sqlite3.Connection:
             time.sleep(0.1)
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(SCHEMA_SQL)
+        # post_id → folder 的反查索引（Rank/Tag 浏览里「跳到这张图所在的日期」用）。
+        # ⚠ 刻意**不写进 SCHEMA_SQL**：那个表达式只有 VIEWER_POST_ID_SQL 一份，
+        #   索引与查询共用它；塞进 DDL 字符串就变成两份文本，改一处忘另一处不会报错，
+        #   只会让查询静默退化成全表扫描（506k 行实测 1.1s）。
+        # 已有库首次启动时建一次（506k 行 ~2s），之后 IF NOT EXISTS 直接跳过。
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_viewer_post_id "
+            f"ON viewer_entries({VIEWER_POST_ID_SQL})"
+        )
         _conn = conn
         return _conn
 
@@ -713,6 +732,47 @@ def viewer_filename_set(library_id: str, folder: str) -> set:
         (library_id, folder),
     )
     return {r["filename"] for r in rows if r["filename"]}
+
+
+def viewer_folders_for_post_ids(post_ids) -> dict:
+    """反查「这些 post 落在哪些 folder」→ {post_id: [{library_id, folder, filename, local_path}, ...]}。
+
+    用途：Rank / Tag 浏览里看到「已下载」的图，要跳到它所在的日期目录。
+    同一个 post 可能被下到过多个目录（重复下载 / 手工移库），所以值是**列表**；
+    调用方按需挑（main.api_post_dates 会优先挑盘上真的还在的那一条）。
+    查不到 / 非数字 id 一律不出现，调用方据此提示「不存在」。
+
+    ⚠ 必须再带 `post_url LIKE '%/posts/%'` 筛一道：结尾数字对 gelbooru 的
+      `.../index.php?page=post&s=view&id=123` 同样成立，只按数字匹配会把
+      Danbooru 的 123 和 gelbooru 的 123 混成一个。那个 LIKE 不参与索引，
+      只对索引命中的少数行做过滤，代价可忽略。
+    """
+    nums = []
+    for pid in post_ids or ():
+        s = str(pid).strip()
+        if s.isdigit() and int(s) > 0 and int(s) not in nums:
+            nums.append(int(s))
+    if not nums:
+        return {}
+    placeholders = ",".join("?" * len(nums))
+    rows = query_all(
+        f"SELECT {VIEWER_POST_ID_SQL} AS pid, library_id, folder, filename, local_path "
+        f"FROM viewer_entries "
+        f"WHERE {VIEWER_POST_ID_SQL} IN ({placeholders}) AND post_url LIKE '%/posts/%'",
+        nums,
+    )
+    out = {}
+    for r in rows:
+        folder = r["folder"]
+        if not folder:
+            continue
+        out.setdefault(str(r["pid"]), []).append({
+            "library_id": r["library_id"] or "default",
+            "folder": folder,
+            "filename": r["filename"] or "",
+            "local_path": r["local_path"] or "",
+        })
+    return out
 
 
 def viewer_replace(library_id: str, folder: str, items: list, progress_cb=None):

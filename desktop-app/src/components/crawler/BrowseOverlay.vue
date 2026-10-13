@@ -50,6 +50,7 @@ const emit = defineEmits([
   'clear-tag-history',  // () 清空全部
   'add-saved-tag',      // (tag: string) 把当前 query 保存为常用 tag
   'remove-saved-tag',   // (tag: string) 移除一条常用 tag
+  'goto-date',          // (post) 跳到这张图所在的日期（已下载的图才有；不存在时父组件提示）
 ]);
 
 const open = computed({
@@ -345,12 +346,25 @@ function submitJump() {
             <div class="browse-cell-check" :class="{ on: state.selected.has(post.id) }">✓</div>
             <button class="browse-open-post" @click.stop="openPost(post)" title="在浏览器打开 Danbooru 原帖">↗</button>
             <!-- 已下载价签：左侧竖向绿色吊牌，告诉用户这张已经在库里了，不需要再勾选下载 -->
-            <div v-if="post.downloaded" class="browse-downloaded-ribbon" title="已在库（log.json）">已下载</div>
+            <div v-if="post.downloaded" class="browse-downloaded-ribbon" title="已在库（deck.db post_log）">已下载</div>
             <div class="browse-cell-meta">
               <span class="browse-badge" :class="`rating-${ratingBucket(post)}`">{{ (post.rating || '?').toUpperCase() }}</span>
               <span class="browse-badge">▲{{ post.score }}</span>
               <span class="browse-badge" v-if="post.image_width">{{ post.image_width }}×{{ post.image_height }}</span>
               <span class="browse-badge browse-ext">{{ (post.file_ext || '').toUpperCase() }}</span>
+              <!-- 「跳到这张图所在的日期」：只有已下载的图才有意义。
+                   downloaded_folder 是后端在拉这一页时顺带反查出来的（一屏一次 IN 查询）；
+                   拿不到（库里没记录 / 反查失败）就显示「跳到日期」，点了由父组件实探后提示。
+                   ⚠ 必须 @click.stop —— 整格点击是「勾选 / 取消勾选」，两个动作不能混。 -->
+              <button
+                v-if="post.downloaded"
+                type="button"
+                class="browse-badge browse-badge-date"
+                :title="post.downloaded_folder
+                  ? `跳到这张图所在的日期：${post.downloaded_folder}`
+                  : '跳到这张图所在的日期（库里没查到记录时会提示不存在）'"
+                @click.stop="emit('goto-date', post)"
+              >跳到 {{ post.downloaded_folder || '日期' }}</button>
             </div>
           </div>
         </div>
@@ -645,6 +659,30 @@ function submitJump() {
 .browse-badge.rating-e { background: rgba(220, 50, 50, 0.85); }
 .browse-badge.rating-q { background: rgba(220, 150, 40, 0.85); }
 .browse-badge.rating-s { background: rgba(50, 160, 90, 0.85); }
+/* 「跳到 <日期>」：同行其他 badge 都是 <span>，只有这个是真的 <button>，
+   所以要把全局 button 的圆角(10px)/内边距(8px 12px)/accent 底色/13px 字号全部压回来，
+   否则它会比旁边的 badge 高出一截、把 meta 行顶乱。
+   （选择器带两个类 + data-v 属性，特异性 0,3,0 > 全局 `button:hover:not(:disabled)` 的 0,2,1，
+     所以无需 !important。） */
+.browse-badge.browse-badge-date {
+  background: rgba(16, 185, 129, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #fff;
+  box-shadow: none;
+  cursor: pointer;
+}
+.browse-badge.browse-badge-date:hover:not(:disabled) {
+  filter: none;
+  background: #047857;
+}
+.browse-badge.browse-badge-date:active:not(:disabled) {
+  transform: none;
+  filter: none;
+}
 .browse-foot {
   display: flex;
   align-items: center;
