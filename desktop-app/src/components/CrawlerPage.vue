@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import GalleryCalendar from './GalleryCalendar.vue';
+import AppIcon from './AppIcon.vue';
 import TaskDatePicker from './TaskDatePicker.vue';
 import TutorialsModal from './crawler/TutorialsModal.vue';
 import ArtistFavoriteModal from './crawler/ArtistFavoriteModal.vue';
@@ -24,6 +25,12 @@ const props = defineProps({
   active: { type: Boolean, default: true },
 });
 const emit = defineEmits(['edit-image', 'caption-image']);
+const taskPanelOpen = ref(window.matchMedia('(min-width: 901px)').matches);
+const taskPanelView = ref('new');
+function closeTaskPanel() {
+  taskPanelOpen.value = false;
+  nextTick(() => document.querySelector('.task-panel-trigger')?.focus());
+}
 
 const savedHabitsStr = localStorage.getItem('crawlerHabits') || '{}';
 const habits = JSON.parse(savedHabitsStr);
@@ -128,11 +135,13 @@ function openDownloadByIdsMode() {
 function onTaskDateJump(date) {
   if (date) loadGallery(date);
 }
-// 右侧画廊日历「同步左」：把画廊当前日期反向灌进左侧任务日期。
-// - 不在日期热门模式时先切到日期热门（单日），否则左侧没有日期控件可同步；
+// 图库日历「同步任务」：把当前日期传给任务配置，并打开新建面板。
+// - 不在日期热门模式时先切到日期热门（单日）；
 //   selectTaskMode 会顺带退出可能残留的按ID 子态。
 // - 单日模式直接写 targetDate；范围模式按「先填起、再填止、都有则覆盖起」的直觉顺序。
 function onGallerySyncTaskDate(date) {
+  taskPanelOpen.value = true;
+  taskPanelView.value = 'new';
   if (!ISO_DATE.test(date)) return;
   if (form.value.mode !== 'popular') {
     selectTaskMode('popular');
@@ -141,7 +150,7 @@ function onGallerySyncTaskDate(date) {
     return;
   }
   if (form.value.dateRange) {
-    // 「同步左」= 把右侧画廊的日期一次性搬过来：**起止一起置为同一天**（单日范围）。
+    // 「同步任务」= 把图库日期一次性搬过来：**起止一起置为同一天**（单日范围）。
     // 这里曾经是「增量选区」：第一次点填起、第二次点填止、第三次点改起 —— 用户点一下
     // 只同步了半边（另半边还停在旧值），看上去就像没同步。要选多天就在左侧两个日期框
     // 里各自选，别让「同步」这个动作有隐藏的第二击。
@@ -151,7 +160,7 @@ function onGallerySyncTaskDate(date) {
     form.value.targetDate = date;
   }
 }
-// 点模式 chip 的统一入口。按ID下载是只能从工具按钮进入的 popular 子态：
+// 来源切换入口；按 ID 下载是 popular 模式下的独立子操作。
 // 不在这里清掉的话，① 已在按ID 时点「日期热门」—— mode 赋了相同的值，watcher 不触发，
 // 界面永远留在按ID；② 绕道排行榜/标签再回日期热门 —— watcher 不管 popularAction，又落回按ID。
 function selectTaskMode(mode) {
@@ -3121,54 +3130,37 @@ const idleDlTooltip = computed(() => {
   return lines.join('\n');
 });
 
-// 工具栏下拉互斥：显示 / 翻译两个下拉菜单的触发按钮都用了 @click.stop
-// （@click.stop 的初衷是：阻止冒泡到 document click 后立刻被 onDocClickFor*Menu 把自己关掉）。
-// 副作用是点另一个下拉的触发按钮时，document click 不会触发，原本打开的那个下拉就关不掉，
-// 多个下拉同时展开会互相重叠，看着很乱。解决：每次「打开」某个下拉时，主动把另一个收起来。
-// 「关闭」时不主动收其他（用户是显式收起的，别动他的状态）；外部点击关闭仍走 onDocClickFor*Menu。
-// （「刷新热度」原本也是这套机制里的第三个下拉，改成单个按钮后已退出互斥组。）
-function closeOtherToolbarDropdowns(exceptKey) {
-  if (exceptKey !== 'display') displayMenu.value.open = false;
-  if (exceptKey !== 'translate') translateMenu.value.open = false;
+// Toolbar panels open explicitly so they also work with keyboard and touch.
+const displayMenu = ref({ open: false });
+const moreMenuOpen = ref(false);
+function closeToolbarMenus(event) {
+  displayMenu.value.open = false;
+  moreMenuOpen.value = false;
+  if (event?.type === 'keydown') {
+    event.currentTarget.querySelector('button')?.focus();
+  }
 }
-
-// 「翻译」下拉菜单：把「翻译角色」和「导入翻译字典」合并成一个入口，
-// 这两个都是低频操作，原先两个独立按钮加起来太宽导致工具栏换行
-const translateMenu = ref({ open: false });
-function toggleTranslateMenu() {
-  // 翻译菜单由鼠标悬浮显示，点击不再把菜单固定打开。
-  translateMenu.value.open = false;
+function toggleDisplayMenu() {
+  moreMenuOpen.value = false;
+  displayMenu.value.open = !displayMenu.value.open;
+}
+function toggleMoreMenu() {
+  displayMenu.value.open = false;
+  moreMenuOpen.value = !moreMenuOpen.value;
+}
+function onToolbarFocusOut(event) {
+  if (!event.currentTarget.contains(event.relatedTarget)) closeToolbarMenus();
+}
+function onDocPointerForToolbar(event) {
+  if (!event.target.closest('.toolbar-dropdown')) closeToolbarMenus();
 }
 function onTranslateChoice(action) {
-  translateMenu.value.open = false;
+  closeToolbarMenus();
   if (action === 'character') openTranslationModal();
   else if (action === 'dictionary') openCharacterDictionary();
   else if (action === 'import') importTranslationFile();
 }
-function onDocClickForTranslateMenu(e) {
-  if (!translateMenu.value.open) return;
-  const dropdown = document.querySelector('.translate-dropdown');
-  if (dropdown && !dropdown.contains(e.target)) {
-    translateMenu.value.open = false;
-  }
-}
 
-// 「显示 ▾」下拉菜单：把纯显示偏好（排序/格式筛选/卡片大小/缩略图分辨率/每页张数）
-// 收进一个入口，避免工具栏一排控件在常规窗口宽度下参差换行。
-// 「看图刷新热度」开关改放刷新热度下拉里（与"刷新范围"语义同源），这里不再放。
-// 这些都绑定 gallery.*，已有 habits watcher 持久化，菜单只是换个容器展示同样的 v-model。
-const displayMenu = ref({ open: false });
-function toggleDisplayMenu() {
-  // 显示菜单由鼠标悬浮显示，点击不再把菜单固定打开。
-  displayMenu.value.open = false;
-}
-function onDocClickForDisplayMenu(e) {
-  if (!displayMenu.value.open) return;
-  const dropdown = document.querySelector('.display-dropdown');
-  if (dropdown && !dropdown.contains(e.target)) {
-    displayMenu.value.open = false;
-  }
-}
 function onDocClickForPagePicker(e) {
   if (!pagePicker.value.open) return;
   const host = document.querySelector('.pg-picker-host');
@@ -5425,7 +5417,8 @@ async function onKeyDown(event) {
   }
 
   const tag = event.target?.tagName?.toLowerCase();
-  if (['input', 'textarea', 'select', 'video'].includes(tag)) return;
+  if (['input', 'textarea', 'select', 'video', 'summary'].includes(tag)) return;
+  if (tag === 'button' && !viewer.value.open) return;
 
   // 预览打开时的其余快捷键（方向键翻页；搜索结果单张，忽略）。
   if (viewer.value.open) {
@@ -5528,6 +5521,7 @@ watch(() => gallery.value.thumbSize, () => {
 // （留在 .shell 内的弹窗——刷新范围 / 合并 / 教程 / 已选列表 / 加密工具——不需要，
 //  它们会随 v-show 一起隐藏。）
 function dismissFloatingLayers() {
+  closeToolbarMenus();
   // 先关预览：它是「最上面」的那层，且搜索预览被关时不会连带关掉搜索浮层
   if (viewer.value.open) closeViewer();
   if (searchModal.value.open) closeSearchModal();
@@ -5563,8 +5557,7 @@ onMounted(async () => {
   loadFavSnapshot();
   pollTimer = window.setInterval(syncStatus, 1200);
   window.addEventListener('keydown', onKeyDown);
-  document.addEventListener('click', onDocClickForTranslateMenu);
-  document.addEventListener('click', onDocClickForDisplayMenu);
+  document.addEventListener('pointerdown', onDocPointerForToolbar, true);
   document.addEventListener('click', onDocClickForPagePicker);
   // 角色 chip 右键菜单的全局 dismiss 监听
   document.addEventListener('mousedown', onCharMenuDismiss, true);
@@ -5578,8 +5571,7 @@ onBeforeUnmount(() => {
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
   if (pollTimer) window.clearInterval(pollTimer);
   window.removeEventListener('keydown', onKeyDown);
-  document.removeEventListener('click', onDocClickForTranslateMenu);
-  document.removeEventListener('click', onDocClickForDisplayMenu);
+  document.removeEventListener('pointerdown', onDocPointerForToolbar, true);
   document.removeEventListener('click', onDocClickForPagePicker);
   window.removeEventListener('resize', positionPagePicker);
   window.removeEventListener('scroll', positionPagePicker, true);
@@ -5621,57 +5613,403 @@ const downloadTargetHint = computed(() => {
 </script>
 
 <template>
-  <div class="crawler-layout">
-    <section class="panel card control-panel">
+  <div class="crawler-layout library-workspace" :class="{ 'tasks-hidden': !taskPanelOpen }">
+    <section class="panel card gallery-panel">
+      <div class="gallery-head">
+        <div class="library-heading">
+          <div class="library-heading-copy"><span class="section-eyebrow">DANBOORU DECK</span><h1>我的图库<span class="library-total">{{ galleryStats.total }}</span></h1><p>按日期浏览和整理本地图片。</p></div>
+          <button class="task-panel-trigger" :class="{ active: taskPanelOpen }" :aria-expanded="taskPanelOpen" aria-controls="library-task-panel" @click="taskPanelOpen = !taskPanelOpen"><AppIcon name="panel" :size="17" /> 抓取任务<span v-if="task.isRunning" class="task-running-dot"></span></button>
+        </div>
+        <div class="gallery-title-row">
+          <GalleryCalendar
+            class="title-row-calendar"
+            :available-dates="gallery.availableDates"
+            :date-folders="gallery.availableDateFolders"
+            :available-tags="gallery.availableTags"
+            :selected-date="gallery.selectedDate"
+            :today="gallery.today"
+            syncable
+            :sync-range="form.mode === 'popular' && form.dateRange"
+            @select="loadGallery"
+            @sync-task-date="onGallerySyncTaskDate"
+          />
+          <span class="gallery-stats-inline">
+            共 {{ galleryStats.total }} 张<span v-if="galleryStats.filtered !== galleryStats.total"> · 已筛选 {{ galleryStats.filtered }} 张</span>
+            <span v-if="galleryStats.roots.length > 1" class="gallery-root-breakdown">
+              <span
+                v-for="root in galleryStats.roots"
+                :key="root.key"
+                class="gallery-root-pill"
+                :title="`${root.label}: ${root.count} 张`"
+              >{{ root.label }} {{ root.count }}</span>
+            </span>
+          </span>
+        </div>
+        <div class="gallery-tools">
+          <button
+            class="secondary tool-btn search-entry-btn"
+            @click="openSearchModal"
+            title="在本地 deck.db 内跨日期搜索角色/出处/作者：支持中文名（离线字典展开）、Danbooru 英文 tag、作品/系列出处及其别名（如 kancolle / 舰娘），可限定日期范围，只搜当前在线的图库"
+          ><AppIcon name="search" :size="15" /> 跨日期</button>
+          <button
+            class="secondary tool-btn"
+            @click="reloadCurrentGallery"
+            :disabled="!gallery.selectedDate || loadingGallery"
+            title="重新读取当前日期目录，显示下载任务刚写入的新图片，并保留当前页"
+          ><AppIcon name="refresh" :size="15" /> {{ loadingGallery ? '刷新中…' : '刷新' }}</button>
+          <button
+            class="secondary tool-btn select-mode-btn"
+            :class="{ active: selection.enabled }"
+            @click="setSelectionEnabled(!selection.enabled)"
+            :title="selection.enabled ? '退出选择模式（已选记录会保留）' : '进入选择模式：可勾选多张图片分享；也可按 Ctrl+点击图片快速选择'"
+          ><AppIcon name="select" :size="16" /> {{ selection.enabled ? `已选 ${selection.ids.size}` : (selection.ids.size ? `选择 (${selection.ids.size})` : '选择') }}</button>
+          <button
+            v-if="gallery.sortBy === 'score' || gallery.sortBy === 'fav'"
+            class="secondary tool-btn"
+            @click="rebuildSortSnapshot"
+            title="按当前最新 score / 收藏数 重新排序（默认锁定排序，避免点开卡片刷新热度时位置乱跳）"
+          >重新排序</button>
+          <div class="display-dropdown toolbar-dropdown" @keydown.esc.stop.prevent="closeToolbarMenus($event)" @focusout="onToolbarFocusOut($event)">
+            <button
+              class="secondary tool-btn"
+              :class="{ 'menu-open': displayMenu.open }"
+              @click.stop="toggleDisplayMenu"
+              :aria-expanded="displayMenu.open" aria-controls="gallery-display-menu"
+              title="显示设置：排序 / 筛选 / 卡片大小 / 缩略图 / 每页张数"
+            ><AppIcon name="sliders" :size="16" /> 筛选与显示</button>
+            <div v-if="displayMenu.open" id="gallery-display-menu" class="display-menu is-open" @click.stop>
+              <div class="display-menu-row" title="排序方式">
+                <span class="display-menu-label">排序</span>
+                <div class="seg-group">
+                  <button type="button" class="seg-btn" :class="{ active: gallery.sortBy === 'default' }" @click="gallery.sortBy = 'default'">默认</button>
+                  <button type="button" class="seg-btn" :class="{ active: gallery.sortBy === 'score' }" @click="gallery.sortBy = 'score'">Score</button>
+                  <button type="button" class="seg-btn" :class="{ active: gallery.sortBy === 'fav' }" @click="gallery.sortBy = 'fav'">收藏数</button>
+                </div>
+              </div>
+              <label class="display-menu-row" title="按格式 / 收藏 / Caption 筛选">
+                <span class="display-menu-label">筛选</span>
+                <select v-model="gallery.filterFormat" class="display-menu-control">
+                  <option value="all">全部格式</option>
+                  <option value="image">图片</option>
+                  <option value="video">视频</option>
+                  <option value="zip">动图ZIP</option>
+                  <option value="favorited_artist">仅收藏画师</option>
+                  <option value="favorited_character">仅收藏角色</option>
+                  <option value="not_favorited_artist">仅非收藏画师</option>
+                  <option value="not_favorited_character">仅非收藏角色</option>
+                  <option value="captioned">仅已生成 Caption</option>
+                  <option value="not_captioned">仅未生成 Caption</option>
+                </select>
+              </label>
+              <div class="display-menu-row" title="按 Danbooru 分级筛选（可多选）。S 安全含 general / Q 存疑 / E 限制。全部不选 = 显示全部。旧图需先刷新热度补全分级">
+                <span class="display-menu-label">分级</span>
+                <div class="seg-group">
+                  <button type="button" class="seg-btn" :class="{ active: gallery.filterRatings.includes('s') }" @click="toggleRatingFilter('s')">S · 安全</button>
+                  <button type="button" class="seg-btn" :class="{ active: gallery.filterRatings.includes('q') }" @click="toggleRatingFilter('q')">Q · 存疑</button>
+                  <button type="button" class="seg-btn" :class="{ active: gallery.filterRatings.includes('e') }" @click="toggleRatingFilter('e')">E · 限制</button>
+                </div>
+              </div>
+              <label class="display-menu-row" title="卡片大小">
+                <span class="display-menu-label">卡片大小</span>
+                <select v-model.number="gallery.cardSize" class="display-menu-control">
+                  <option :value="120">紧凑</option>
+                  <option :value="150">小</option>
+                  <option :value="180">默认</option>
+                  <option :value="220">大</option>
+                </select>
+              </label>
+              <label class="display-menu-row" title="缩略图分辨率：越低越省内存、翻页越流畅；点开看大图仍是原图">
+                <span class="display-menu-label">缩略图</span>
+                <select v-model.number="gallery.thumbSize" class="display-menu-control">
+                  <option :value="240">省流</option>
+                  <option :value="360">标准</option>
+                  <option :value="540">高清</option>
+                  <option :value="0">原图</option>
+                </select>
+              </label>
+              <label class="display-menu-row" title="每页显示张数（大屏可调高，默认 15）。过高会一次渲染很多卡片，翻页变卡">
+                <span class="display-menu-label">每页张数</span>
+                <input
+                  type="number" min="1" max="120" step="1"
+                  class="display-menu-control page-size-input"
+                  :value="gallery.pageSize"
+                  @input="onPageSizeInput"
+                  @change="onPageSizeInput"
+                  @keyup.enter="onPageSizeInput"
+                />
+              </label>
+            </div>
+          </div>
+          <!-- 刷新热度：单一动作，点一下就把当前日期的**全部**图刷一遍。
+               曾经是「本页 / 指定页码范围 / 全部」三选一的下拉，外加每 4 页一批的节流；
+               后端改成批量拉取后（一次请求 200 个 id）1522 张也只有 8 个请求、十几秒，
+               那两档和节流全成了多余，已删除。运行中按钮变成停止入口。 -->
+          <div class="gallery-more toolbar-dropdown" @keydown.esc.stop.prevent="closeToolbarMenus($event)" @focusout="onToolbarFocusOut($event)">
+            <button class="secondary tool-btn" :class="{ 'menu-open': moreMenuOpen }"
+              :aria-expanded="moreMenuOpen" aria-controls="gallery-more-menu"
+              @click.stop="toggleMoreMenu" title="图库维护与翻译工具" aria-label="图库更多工具"><span aria-hidden="true">···</span></button>
+            <div v-if="moreMenuOpen" id="gallery-more-menu" class="gallery-more-menu" @click.stop>
+              <span class="more-section-label">图库维护</span>
+          <button
+            :class="['refresh-btn', { active: refresh.isRunning }]"
+            @click="refresh.isRunning ? stopRefreshScores() : startRefreshScores()"
+            :disabled="!gallery.selectedDate && !refresh.isRunning"
+            :title="refresh.isRunning
+              ? '刷新中，点击停止（已经发出的请求后端还会跑完，只是不再等它返回）'
+              : '刷新当前日期全部图片的 score / 收藏数。后端按 200 个 id 一批批量拉取，整日一次跑完'"
+          >
+            <span v-if="!refresh.isRunning">刷新全部图片热度</span>
+            <!-- ⚠ 运行中刻意用短文案「刷新中…」：工具栏在 1600px 宽下本来就是满的，
+                 写成「刷新中… 点此停止」会把「翻译 ▾」挤出去、整条工具栏重排。
+                 「点击停止」的语义放 title + 进度行里那个 × 按钮。 -->
+            <span v-else>刷新中…</span>
+          </button>
+
+          <button
+            class="secondary tool-btn"
+            @click="convertAllZipsToGif"
+            :disabled="!gallery.selectedDate || loadingGallery || convertingZips"
+            title="用 ffmpeg 把当前日期文件夹里的所有 .zip 动画批量转成 .gif（已存在 .gif 的会自动跳过），完成后自动刷新图库"
+          >{{ convertingZips ? '转 GIF 中…' : '批量转 GIF' }}</button>
+          <button
+            class="secondary tool-btn"
+            @click="clearThumbCache"
+            :disabled="clearingThumbCache"
+            title="清空 .thumb_cache 和 .browse_thumb_cache：清掉旧的 MD5 残骸、ffmpeg 失败留下的 0 字节缩略图，或单纯想腾空间。已生成的 mp4/gif 首帧 JPEG 会全部重新生成"
+          >{{ clearingThumbCache ? '清缓存中…' : '清缩略图缓存' }}</button>
+          <button
+            class="secondary tool-btn"
+            @click="mergeViewerData"
+            :disabled="!gallery.selectedDate || task.isRunning || task.isStopping"
+            title="跨盘合并 viewer_data.json：把源 root（默认 hot_pic 或某外置盘）的 viewer_data 增量同步到目标 root。post_url 去重，重写 local_path 到目标盘路径，幂等可重复执行"
+          >合并图库数据</button>
+          <button
+            class="secondary tool-btn refresh-onview-btn"
+            :class="{ active: gallery.refreshOnView }"
+            @click="gallery.refreshOnView = !gallery.refreshOnView"
+            title="开启后，点开 / 切换大图会联网刷新该图 score / 收藏数；离线时建议保持关闭"
+          >看图刷新热度 {{ gallery.refreshOnView ? '开' : '关' }}</button>
+              <span class="more-section-label">角色与翻译</span>
+              <button class="secondary tool-btn" :disabled="!gallery.selectedDate" @click="onTranslateChoice('character')">手动翻译角色</button>
+              <button class="secondary tool-btn" @click="onTranslateChoice('dictionary')">角色字典</button>
+              <button class="secondary tool-btn" @click="onTranslateChoice('import')">导入翻译字典</button>
+            </div>
+          </div>
+          <div class="gallery-search-group">
+            <span class="search-input-wrap"><AppIcon class="gallery-search-icon" name="search" :size="17" />
+              <input
+                v-model="searchInput"
+                class="search-input search-input-with-clear"
+                type="text"
+                placeholder="搜索此图库的作者或角色…"
+                @focus="showSearchHistory = true"
+                @blur="onSearchHistoryBlur"
+                @keyup.enter="commitGallerySearch"
+                @input="searchHistoryRef?.resetSelection?.()"
+                @keydown="searchHistoryRef?.handleKeydown?.($event)"
+              />
+              <button
+                v-if="searchInput"
+                class="search-clear-btn"
+                @click="setSearch('')"
+                title="清空搜索"
+                type="button"
+              >×</button>
+              <SearchHistoryDropdown
+                ref="searchHistoryRef"
+                :items="searchHistory"
+                :open="showSearchHistory"
+                header-label="最近搜索"
+                @pick="onPickSearchHistory"
+                @remove="removeSearchHistoryEntry"
+                @clear="clearSearchHistory"
+                @close="showSearchHistory = false"
+              />
+            </span>
+            <button class="gallery-search-submit" @click="commitGallerySearch" aria-label="搜索图库" title="搜索图库"><AppIcon name="chevron" :size="15" /></button>
+          </div>
+          <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
+        </div>
+      </div>
+
+      <!-- 统一选择器：日期日历 + tag 文件夹列表（搜索 + 最近使用置顶），
+           内部根据 selectedDate 是否以 'tag_' 开头决定默认 tab -->
+      <!-- 旧位置：第 3 行；现已在第 1 行 .gallery-title-row 顶部和 H2 合并，省一行。 -->
+
+      <div v-if="selection.enabled" class="selection-bar inline-bar">
+        <span class="selection-count">已选 <strong>{{ selection.ids.size }}</strong> 张</span>
+        <button
+          class="secondary"
+          :class="{ active: showOnlySelected }"
+          @click="showOnlySelected = !showOnlySelected"
+          :disabled="!showOnlySelected && !selection.ids.size"
+          title="切换：只显示当前日期里已选的图片"
+        >只看已选</button>
+        <button
+          class="secondary"
+          @click="selectionListOpen = true"
+          :disabled="!selection.ids.size"
+          title="查看所有已选 ID（可逐个跳转/移除）"
+        >已选清单</button>
+        <button class="secondary" @click="copySelectedIds" :disabled="!selection.ids.size" title="复制选中图片的 IDs 到剪贴板（明文逗号分隔）">复制 IDs</button>
+        <button class="secondary" @click="openCryptoTool" title="打开加密工具：把任意 IDs 文本压缩成短字符串方便分享">加密工具</button>
+        <button class="ghost" @click="clearSelection" :disabled="!selection.ids.size">清空</button>
+        <button class="ghost" @click="setSelectionEnabled(false)" title="退出选择模式（已选记录会保留）">退出</button>
+      </div>
+
+      <div v-if="loadingGallery" class="gallery-switch-status" role="status">
+        正在切换到 {{ galleryPendingDate || gallery.selectedDate }}…
+      </div>
+      <div v-if="!activeItems.length && !loadingGallery" class="gallery-empty">
+        {{ showOnlySelected ? '当前日期没有已选图片，切换日期试试' : '当前日期没有图片' }}
+      </div>
+      <div v-else-if="activeItems.length" class="gallery-grid" :class="{ 'is-switching': loadingGallery }" :style="`--card-min-w: ${gallery.cardSize}px`" :aria-busy="loadingGallery">
+        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" tabindex="0" @keydown.enter.self.prevent.stop="onThumbClick($event, item)" :class="{ 'is-keyboard-focused': galleryFocusKey === itemKey(item), 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item), 'has-caption': hasCaption(item), 'has-ai-badge': !!aiTagOf(item) }" :title="cardBadgeTitle(item)">
+          <span v-if="galleryFocusKey === itemKey(item)" class="keyboard-focus-badge" aria-label="当前键盘选中">当前</span>
+          <div class="thumb-wrap" :class="{ 'is-broken': item.thumbBroken }">
+            <img
+              class="thumb clickable-thumb"
+              :class="{ 'is-loaded': item.loaded }"
+              :src="item.thumbUrl"
+              :alt="item.filename"
+              loading="lazy"
+              decoding="async"
+              @load="onThumbLoad(item)"
+              @error="onThumbError(item)"
+              @click="onThumbClick($event, item)"
+            />
+            <div class="thumb-skeleton" :class="{ 'is-hidden': item.loaded }" aria-hidden="true"></div>
+            <span
+              v-if="isAnimatedCard(item)"
+              class="video-format-watermark"
+              :class="`format-${cardFormatLabel(item)}`"
+              :aria-label="cardFormatLabel(item).toUpperCase()"
+            >
+              <svg v-if="isVideoItem(item)" class="format-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M8 5v14l11-7z"/>
+              </svg>
+              <span v-else class="format-text">GIF</span>
+            </span>
+            <button
+              v-if="selection.enabled"
+              class="img-select-toggle"
+              :class="{ active: isItemSelected(item) }"
+              @click.stop="toggleItemSelection(item)"
+              :title="isItemSelected(item) ? '取消选择' : '加入选择'"
+            >{{ isItemSelected(item) ? '✓' : '' }}</button>
+            <span v-if="hasCaption(item)" class="caption-badge" title="已生成 Caption，点击查看/编辑">📝</span>
+            <!-- 收藏画师/角色命中 → 见 .image-card.is-favorited 金色光圈（CSS 实现）。
+                 AI 标签 → 见 .image-card.has-ai-badge 紫色光圈。
+                 鼠标悬停整张卡片的 title 由 cardBadgeTitle() 汇总，缩略图区不再堆角标。 -->
+            <span v-if="item.rating" class="rating-badge" :class="`rating-${item.rating}`" :title="`Danbooru 分级：${item.rating.toUpperCase()}`">{{ item.rating.toUpperCase() }}</span>
+          </div>
+          <button
+            class="img-fav-toggle"
+            :class="{ active: isImageFavorited(item) }"
+            @click.stop="toggleImageFavorite(item)"
+            :title="isImageFavorited(item) ? '取消图片收藏' : '加入图片收藏'"
+            :aria-label="isImageFavorited(item) ? '取消图片收藏' : '收藏图片'"
+            :aria-pressed="isImageFavorited(item)"
+          ><AppIcon name="bookmark" :size="17" /></button>
+          <div class="card-info">
+            <span class="card-artist" :title="item.artist || item.filename">{{ item.artistTokens?.[0] || item.filename }}</span>
+            <span v-if="aiTagOf(item)" class="card-type-label" title="AI 生成或辅助">AI</span>
+            <span v-if="isCardFavorited(item)" class="card-followed-dot" title="已收藏的图片、画师或角色"></span>
+            <span class="card-score" :title="`评分 ${item.score || 0} · 收藏 ${item.favCount || 0}`"><AppIcon name="star" :size="12" />{{ item.score || 0 }}</span>
+          </div>
+          <div class="button-row compact card-actions" aria-label="图片操作">
+            <button class="secondary" @click="openOriginal(item)" :disabled="!item.postUrl" title="打开 Danbooru 原帖" aria-label="打开原帖"><AppIcon name="external" :size="15" /></button>
+          <button class="secondary" @click="openLocal(item)" :disabled="!item.localPath" :title="isVideoItem(item) || ['gif', 'zip'].includes(itemExtension(item)) ? '打开文件夹并选中媒体文件' : '打开本地文件'" aria-label="打开本地文件"><AppIcon name="folder" :size="15" /></button>
+            <button class="secondary card-edit-btn" @click="editItem(item)" title="编辑打码" aria-label="编辑图片"><AppIcon name="edit" :size="15" /><span>编辑</span></button>
+            <button v-if="item.filename?.toLowerCase().endsWith('.zip') && !item.hasGifCompanion" class="secondary" @click="convertGif(item)" title="ZIP 动画转 GIF">转GIF</button>
+          </div>
+        </article>
+      </div>
+
+      <div class="pagination-bar cr-pg-bar" v-if="activeCount">
+        <button class="ghost pg-btn" @click="gotoPage(1)" :disabled="activePage <= 1" title="首页">«</button>
+        <button class="ghost pg-btn" @click="gotoPage(activePage - 1)" :disabled="activePage <= 1" title="上一页 (←)">‹</button>
+        <button
+          v-for="(n, i) in pageNumbers"
+          :key="`pg-${i}-${n}`"
+          class="pg-num"
+          :class="{ active: n === activePage, ellipsis: n === '…' }"
+          :disabled="n === '…'"
+          @click="gotoPage(n)"
+        >{{ n }}</button>
+        <button class="ghost pg-btn" @click="gotoPage(activePage + 1)" :disabled="activePage >= activeTotalPages" title="下一页 (→)">›</button>
+        <button class="ghost pg-btn" @click="gotoPage(activeTotalPages)" :disabled="activePage >= activeTotalPages" title="末页">»</button>
+        <span class="pg-jump pg-picker-host" ref="pagePickerHost">
+          <!-- 块导航（每50页一块）并入页码选择组，与跳转/页码列表同一行 -->
+          <template v-if="hasMultipleBlocks">
+            <button class="pg-jump-btn pg-block-mini" @click="prevBlock" :disabled="currentBlock <= 0" title="上一块（50页）">‹‹</button>
+            <select class="pg-block-select" :value="currentBlock" @change="onBlockSelect" title="选择页码区块（每50页）">
+              <option v-for="b in blockLabels" :key="`blk-${b.index}`" :value="b.index">{{ b.label }}</option>
+            </select>
+            <button class="pg-jump-btn pg-block-mini" @click="nextBlock" :disabled="currentBlock >= totalBlocks - 1" title="下一块（50页）">››</button>
+          </template>
+          <button class="pg-jump-btn" @click="doJump" title="跳转到输入的页码">跳转</button>
+          <input type="number" min="1" :max="activeTotalPages" v-model.number="jumpInput" @keyup.enter="doJump" />
+          <button
+            class="pg-jump-btn pg-jump-go"
+            :class="{ active: pagePicker.open }"
+            @click.stop="pagePicker.open = !pagePicker.open"
+            :title="pagePicker.open ? '关闭页码列表' : '展开页码列表（10列/行）'"
+          >页码</button>
+          / {{ activeTotalPages }}
+          <Teleport to="body">
+          <div v-if="pagePicker.open" class="pg-picker-panel" :style="pagePickerStyle" @click.stop>
+            <div class="pg-picker-head">
+              <div v-if="hasMultipleBlocks" class="pg-picker-block-nav">
+                <button class="ghost pg-block-btn" @click="prevBlock" :disabled="currentBlock <= 0" title="上一块">‹</button>
+                <select class="pg-picker-block-select" :value="currentBlock" @change="onBlockSelect">
+                  <option v-for="b in blockLabels" :key="`pblk-${b.index}`" :value="b.index">{{ b.label }} 页</option>
+                </select>
+                <button class="ghost pg-block-btn" @click="nextBlock" :disabled="currentBlock >= totalBlocks - 1" title="下一块">›</button>
+                <span class="pg-picker-meta">第 {{ currentBlock + 1 }} / {{ totalBlocks }} 块</span>
+              </div>
+              <span v-else>共 {{ activeTotalPages }} 页 · 点击跳转</span>
+              <button class="ghost" @click="pagePicker.open = false">×</button>
+            </div>
+            <div class="pg-picker-grid">
+              <button
+                v-for="n in blockPageNumbers"
+                :key="`picker-${n}`"
+                class="pg-picker-cell"
+                :class="{ active: n === activePage }"
+                @click="gotoPage(n); pagePicker.open = false"
+              >{{ n }}</button>
+            </div>
+          </div>
+          </Teleport>
+        </span>
+      </div>
+    </section>
+
+    <section v-show="taskPanelOpen" id="library-task-panel" class="panel card control-panel" aria-label="抓取任务面板" @keydown.esc.stop.prevent="closeTaskPanel">
       <div class="panel-head compact-head cp-head">
-        <h2>抓图任务</h2>
-        <button class="cp-icon-btn" @click="openTutorials"
-          title="教程：修改 hosts 直连 Danbooru / 安装 ffmpeg（用于 zip→gif）">?</button>
+        <div><span class="section-eyebrow">下载工作台</span><h2>抓取任务</h2></div>
+        <button class="cp-icon-btn" @click="closeTaskPanel" aria-label="收起任务面板" title="收起任务面板"><AppIcon name="panel" :size="17" /></button>
       </div>
-
-      <!-- 快速开关行：站点模式 / 代理（高频切换的小药丸）+ 并发数 -->
-      <div class="cp-quick-row">
-        <button
-          class="cp-chip safe-mode-btn"
-          :class="{ 'is-safe': safeMode, 'is-unsafe': !safeMode }"
-          @click="toggleSafeMode"
-          :title="safeMode ? '当前走 safebooru.donmai.us（无 R-18）。点击切换为完整 danbooru' : '当前走 danbooru.donmai.us（含 NSFW）。点击切回 SFW'"
-        >{{ safeMode ? 'SFW' : 'NSFW' }}</button>
-        <button
-          class="cp-chip proxy-mode-btn"
-          :class="{ 'is-proxy': useProxy, 'is-direct': !useProxy }"
-          @click="toggleProxy"
-          :title="useProxy ? '当前走代理下载。关掉代理软件后点这里切「直连」' : '当前直连下载。开了代理软件点这里切「走代理」'"
-        >{{ useProxy ? '走代理' : '直连' }}</button>
-        <label class="concurrency-field-inline" title="下载协程数：1=最稳，4=平衡，8+=速度优先但易撞风控">
-          <span>并发</span>
-          <input type="number" min="1" max="16" step="1" v-model.number="downloadConcurrency" class="concurrency-input" />
-        </label>
+      <div class="task-panel-tabs" role="tablist" aria-label="任务工作台">
+        <button role="tab" id="task-new-tab" aria-controls="task-new-content" :tabindex="taskPanelView === 'new' ? 0 : -1" :aria-selected="taskPanelView === 'new'" :class="{ active: taskPanelView === 'new' }" @click="taskPanelView = 'new'" @keydown.right.prevent="taskPanelView = 'queue'; queueCollapsed = false; $event.currentTarget.nextElementSibling.focus()">新建任务</button>
+        <button role="tab" id="task-queue-tab" aria-controls="task-queue-content" :tabindex="taskPanelView === 'queue' ? 0 : -1" :aria-selected="taskPanelView === 'queue'" :class="{ active: taskPanelView === 'queue' }" @click="taskPanelView = 'queue'; queueCollapsed = false" @keydown.left.prevent="taskPanelView = 'new'; $event.currentTarget.previousElementSibling.focus()">队列 <span class="task-tab-count">{{ taskQueue.length }}</span></button>
       </div>
-
-      <!-- 在线预览/浏览工具：四等分连体按钮，任何分辨率都保持在同一行 -->
-      <div class="cp-tools">
-        <button class="cp-tool-btn" @click="openRankBrowse"
-          title="按 Danbooru 排行榜 order:rank 分页预览缩略图，勾选后下载到指定日期">Rank</button>
-        <button class="cp-tool-btn" @click="openBrowse"
-          title="按 tag 像 Danbooru 原网页一样预览缩略图，勾选后下载到指定日期">Tag</button>
-        <button class="cp-tool-btn" @click="openCollectedBrowse"
-          title="查看「仅收集ID」模式收集到的 ID 的在线预览图，勾选后下载">收集ID</button>
-        <button class="cp-tool-btn" :class="{ active: isDownloadByIdsMode }" @click="openDownloadByIdsMode"
-          title="日期热门·按 ID 下载：粘贴 ID 列表，或消费目标日期 folder 已收集的待下载 ID">按ID</button>
-      </div>
-
+      <!-- 新建参数与队列各自保留状态，中间区域独立滚动。 -->
+      <div class="control-scroll">
+      <div v-show="taskPanelView === 'new'" id="task-new-content" role="tabpanel" aria-labelledby="task-new-tab" class="task-new-content">
+      <span class="task-field-title">抓取来源</span>
       <div class="mode-selector">
         <button class="mode-chip" :class="{ active: form.mode === 'rank' }" @click="selectTaskMode('rank')"
           title="按 Danbooru 排行榜：先收集所有 ID，再按 ID 批量下载">排行榜</button>
         <button class="mode-chip" :class="{ active: form.mode === 'popular' && !isDownloadByIdsMode }" @click="selectTaskMode('popular')"
           title="按指定日期（或日期范围）获取热门帖子并下载；其下含仅收集ID/补全/按ID下载">日期热门</button>
         <button class="mode-chip" :class="{ active: form.mode === 'tags' }" @click="selectTaskMode('tags')"
-          title="按 tag 查询下载到独立的 tag_xxx 文件夹，与日期文件夹并行">标签下载</button>
+          title="按 tag 查询下载到独立的 tag_xxx 文件夹，与日期文件夹并行">标签</button>
+        <button class="mode-chip" :class="{ active: isDownloadByIdsMode }" @click="openDownloadByIdsMode">按 ID</button>
       </div>
 
-      <!-- 中间可滚动区：表单/按钮/失败横幅/多任务队列/状态/错误条都放这里，超高时内部滚动，永不溢出卡片 -->
-      <div class="control-scroll">
+
       <!-- 紧凑参数区：下拉选动作/范围，页码两个小输入框（最近用过的值走原生 datalist）。
             by-ids 子操作没有页码/动作概念，单独跳过这一行。 -->
       <div v-if="form.mode === 'rank'" class="cp-rows">
@@ -5696,9 +6034,7 @@ const downloadTargetHint = computed(() => {
         </label>
       </div>
 
-      <!-- popular：动作下拉（下载/仅收集ID/补全补齐；范围下自动隐藏不支持项）+
-           单日/日期范围下拉（切范围会自动把 recover/download_by_ids 重置为 download）。
-           「按ID下载」从顶部工具按钮进入，不在此下拉中。 -->
+      <!-- 日期热门：动作 / 范围；按 ID 下载由来源切换进入。 -->
       <div v-if="form.mode === 'popular' && !isDownloadByIdsMode" class="cp-rows">
         <label class="cp-field">
           <span class="cp-label">动作</span>
@@ -5821,10 +6157,10 @@ const downloadTargetHint = computed(() => {
       </label>
 
       <div class="muted compact-text cp-target-hint" v-if="downloadTargetHint">
-        📁 {{ downloadTargetHint }}
+        <AppIcon name="folder" :size="14" /> {{ downloadTargetHint }}
       </div>
       <div class="button-row">
-        <button class="tq-add-btn" @click="addCurrentToQueue" title="把当前配置追加到顺序队列">入队</button>
+        <button class="tq-add-btn" @click="addCurrentToQueue" title="把当前配置追加到顺序队列"><AppIcon name="plus" :size="16" /> 添加到下载队列</button>
         <button
           class="tq-add-btn tq-add-btn-ghost"
           @click="checkRecoveryForCurrentScope"
@@ -5836,6 +6172,37 @@ const downloadTargetHint = computed(() => {
            里积压的待下载 id 下一批。与「顺序队列」并列但互补：队列跑用户显式排的
            任务，它跑没人管的积压。开关 / 等待时间 / 每轮张数都存后端（deck.db meta），
            前端只读写 —— 所以「记得我设过的值」这件事不需要前端再存一份。 -->
+      <div class="task-online-section"><span class="task-field-title">在线选图</span>
+      <div class="cp-tools">
+        <button class="cp-tool-btn" @click="openRankBrowse"
+          title="按 Danbooru 排行榜 order:rank 分页预览缩略图，勾选后下载到指定日期">排行榜</button>
+        <button class="cp-tool-btn" @click="openBrowse"
+          title="按 tag 像 Danbooru 原网页一样预览缩略图，勾选后下载到指定日期">标签</button>
+        <button class="cp-tool-btn" @click="openCollectedBrowse"
+          title="查看「仅收集ID」模式收集到的 ID 的在线预览图，勾选后下载">已收集 ID</button>
+      </div>
+
+      </div>
+      <details class="task-advanced"><summary>连接与自动下载</summary><div class="task-advanced-content">
+      <div class="cp-quick-row">
+        <button
+          class="cp-chip safe-mode-btn"
+          :class="{ 'is-safe': safeMode, 'is-unsafe': !safeMode }"
+          @click="toggleSafeMode"
+          :title="safeMode ? '当前走 safebooru.donmai.us（无 R-18）。点击切换为完整 danbooru' : '当前走 danbooru.donmai.us（含 NSFW）。点击切回 SFW'"
+        >{{ safeMode ? 'SFW' : 'NSFW' }}</button>
+        <button
+          class="cp-chip proxy-mode-btn"
+          :class="{ 'is-proxy': useProxy, 'is-direct': !useProxy }"
+          @click="toggleProxy"
+          :title="useProxy ? '当前走代理下载。关掉代理软件后点这里切「直连」' : '当前直连下载。开了代理软件点这里切「走代理」'"
+        >{{ useProxy ? '走代理' : '直连' }}</button>
+        <label class="concurrency-field-inline" title="下载协程数：1=最稳，4=平衡，8+=速度优先但易撞风控">
+          <span>并发</span>
+          <input type="number" min="1" max="16" step="1" v-model.number="downloadConcurrency" class="concurrency-input" />
+        </label>
+      </div>
+
       <div
         class="idle-dl-panel"
         :class="{ 'is-on': idleDl.enabled }"
@@ -5885,9 +6252,13 @@ const downloadTargetHint = computed(() => {
         <span class="idle-dl-status" :title="idleDlTooltip">{{ idleDlStatusText }}</span>
       </div>
 
+      <button class="task-help-link" @click="openTutorials">连接设置与使用帮助 <AppIcon name="external" :size="13" /></button>
+      </div></details>
+      </div>
+
       <!-- 顺序任务队列：默认折叠成一行标题（含图标化的运行/暂停/停止/跳过/清除），
            点 ▸ 展开明细；运行中可继续追加任务，可删除未运行任务。折叠选择持久化。 -->
-      <div class="task-queue-panel cp-tq" :class="{ collapsed: queueCollapsed }">
+      <div v-show="taskPanelView === 'queue'" id="task-queue-content" role="tabpanel" aria-labelledby="task-queue-tab" class="task-queue-panel cp-tq" :class="{ collapsed: queueCollapsed }">
         <div class="tq-header cp-tq-header">
           <button type="button" class="tq-caret" @click="toggleQueueCollapsed"
             :title="queueCollapsed ? '展开队列明细' : '折叠'">{{ queueCollapsed ? '▸' : '▾' }}</button>
@@ -5898,19 +6269,19 @@ const downloadTargetHint = computed(() => {
           <span class="cp-tq-ops" @click.stop>
             <button type="button" class="tq-ico tq-ico-run" @click="runQueue"
               :disabled="queueRunning || task.isRunning || task.isStopping || !pendingQueueCount"
-              :title="`按顺序依次执行待执行任务（${pendingQueueCount} 项）`">▶</button>
+              :title="`按顺序依次执行待执行任务（${pendingQueueCount} 项）`"><AppIcon name="play" :size="14" /></button>
             <button type="button" class="tq-ico" @click="pauseTask"
-              :disabled="!task.isRunning || task.isPaused" title="暂停当前任务">⏸</button>
+              :disabled="!task.isRunning || task.isPaused" title="暂停当前任务"><AppIcon name="pause" :size="14" /></button>
             <button type="button" class="tq-ico" @click="resumeTask"
-              :disabled="!task.isRunning || !task.isPaused" title="继续">⏵</button>
+              :disabled="!task.isRunning || !task.isPaused" title="继续"><AppIcon name="play" :size="14" /></button>
             <button type="button" class="tq-ico" @click="skipCurrentQueueItem"
               :disabled="!queueRunning || queueIndex < 0 || !task.isRunning || task.isStopping || queueSkipItemId !== null"
-              title="结束当前任务，保留队列并继续下一项">⏭</button>
+              title="结束当前任务，保留队列并继续下一项"><AppIcon name="skip" :size="14" /></button>
             <button type="button" class="tq-ico tq-ico-stop" @click="stopTaskOrQueue" :disabled="!task.isRunning"
-              :title="queueRunning ? '结束当前任务并停止整个顺序队列' : '结束当前任务'">⏹</button>
+              :title="queueRunning ? '结束当前任务并停止整个顺序队列' : '结束当前任务'"><AppIcon name="stop" :size="14" /></button>
             <button type="button" class="tq-ico" @click="clearQueue"
               :disabled="queueRunning && taskQueue.every(item => item.status === 'running')"
-              :title="queueRunning ? '清除尚未执行的项（不影响正在跑的任务）' : '清空整个队列'">🗑</button>
+              :title="queueRunning ? '清除尚未执行的项（不影响正在跑的任务）' : '清空整个队列'"><AppIcon name="trash" :size="14" /></button>
           </span>
         </div>
 
@@ -5947,7 +6318,7 @@ const downloadTargetHint = computed(() => {
           </div>
         </TransitionGroup>
         <div v-if="!taskQueue.length && !queueCollapsed" class="tq-empty">
-          配置好任务后点「入队」，任务按列表顺序依次执行。
+          队列还没有任务。配置抓取来源后，点击「添加到下载队列」。
         </div>
       </div>
 
@@ -6116,399 +6487,7 @@ const downloadTargetHint = computed(() => {
       </div>
     </section>
 
-    <section class="panel card gallery-panel">
-      <div class="gallery-head">
-        <div class="gallery-title-row">
-          <!-- 统一选择器：日期日历 + tag 文件夹列表（搜索 + 最近使用置顶）。
-               提到第 1 行：触发按钮本身已显示当前日期，替代原 H2，省掉单独一行。
-               内部根据 selectedDate 是否以 'tag_' 开头决定默认 tab -->
-          <GalleryCalendar
-            class="title-row-calendar"
-            :available-dates="gallery.availableDates"
-            :date-folders="gallery.availableDateFolders"
-            :available-tags="gallery.availableTags"
-            :selected-date="gallery.selectedDate"
-            :today="gallery.today"
-            syncable
-            :sync-range="form.mode === 'popular' && form.dateRange"
-            @select="loadGallery"
-            @sync-task-date="onGallerySyncTaskDate"
-          />
-          <span class="gallery-stats-inline">
-            共 {{ galleryStats.total }} 张<span v-if="galleryStats.filtered !== galleryStats.total"> · 已筛选 {{ galleryStats.filtered }} 张</span>
-            <span v-if="galleryStats.roots.length > 1" class="gallery-root-breakdown">
-              <span
-                v-for="root in galleryStats.roots"
-                :key="root.key"
-                class="gallery-root-pill"
-                :title="`${root.label}: ${root.count} 张`"
-              >{{ root.label }} {{ root.count }}</span>
-            </span>
-            <span class="border-legend" aria-label="图片边框颜色含义">
-              <span class="legend-item" title="含有已收藏的画师或角色">
-                <span class="legend-dot legend-dot-fav" aria-hidden="true"></span>收藏画师/角色
-              </span>
-              <span class="legend-item" title="含 ai-generated / ai-assisted 标签">
-                <span class="legend-dot legend-dot-ai" aria-hidden="true"></span>AI 图
-              </span>
-            </span>
-          </span>
-        </div>
-        <div class="gallery-tools">
-          <button
-            class="secondary tool-btn search-entry-btn"
-            @click="openSearchModal"
-            title="在本地 deck.db 内跨日期搜索角色/出处/作者：支持中文名（离线字典展开）、Danbooru 英文 tag、作品/系列出处及其别名（如 kancolle / 舰娘），可限定日期范围，只搜当前在线的图库"
-          >🔍 跨日期搜索</button>
-          <button
-            class="secondary tool-btn"
-            @click="reloadCurrentGallery"
-            :disabled="!gallery.selectedDate || loadingGallery"
-            title="重新读取当前日期目录，显示下载任务刚写入的新图片，并保留当前页"
-          >{{ loadingGallery ? '刷新中…' : '↻ 刷新图库' }}</button>
-          <button
-            class="secondary tool-btn"
-            @click="convertAllZipsToGif"
-            :disabled="!gallery.selectedDate || loadingGallery || convertingZips"
-            title="用 ffmpeg 把当前日期文件夹里的所有 .zip 动画批量转成 .gif（已存在 .gif 的会自动跳过），完成后自动刷新图库"
-            style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;"
-          >{{ convertingZips ? '转 GIF 中…' : '批量转 GIF' }}</button>
-          <button
-            class="secondary tool-btn"
-            @click="clearThumbCache"
-            :disabled="clearingThumbCache"
-            title="清空 .thumb_cache 和 .browse_thumb_cache：清掉旧的 MD5 残骸、ffmpeg 失败留下的 0 字节缩略图，或单纯想腾空间。已生成的 mp4/gif 首帧 JPEG 会全部重新生成"
-          >{{ clearingThumbCache ? '清缓存中…' : '清缩略图缓存' }}</button>
-          <button
-            class="secondary tool-btn"
-            @click="mergeViewerData"
-            :disabled="!gallery.selectedDate || task.isRunning || task.isStopping"
-            title="跨盘合并 viewer_data.json：把源 root（默认 hot_pic 或某外置盘）的 viewer_data 增量同步到目标 root。post_url 去重，重写 local_path 到目标盘路径，幂等可重复执行"
-          >🔗 合并 viewer_data</button>
-          <button
-            class="secondary tool-btn select-mode-btn"
-            :class="{ active: selection.enabled }"
-            @click="setSelectionEnabled(!selection.enabled)"
-            :title="selection.enabled ? '退出选择模式（已选记录会保留）' : '进入选择模式：可勾选多张图片分享；也可按 Ctrl+点击图片快速选择'"
-          >{{ selection.enabled ? `✓ 选择中 (${selection.ids.size})` : (selection.ids.size ? `☐ 选择模式 (${selection.ids.size})` : '☐ 选择模式') }}</button>
-          <button
-            v-if="gallery.sortBy === 'score' || gallery.sortBy === 'fav'"
-            class="secondary tool-btn"
-            @click="rebuildSortSnapshot"
-            title="按当前最新 score / 收藏数 重新排序（默认锁定排序，避免点开卡片刷新热度时位置乱跳）"
-          >🔃 排序</button>
-          <div class="display-dropdown">
-            <button
-              class="secondary tool-btn"
-              :class="{ 'menu-open': displayMenu.open }"
-              @click.stop="toggleDisplayMenu"
-              title="显示设置：排序 / 筛选 / 卡片大小 / 缩略图 / 每页张数"
-            >显示 ▾</button>
-            <div class="display-menu" @click.stop>
-              <div class="display-menu-row" title="排序方式">
-                <span class="display-menu-label">排序</span>
-                <div class="seg-group">
-                  <button type="button" class="seg-btn" :class="{ active: gallery.sortBy === 'default' }" @click="gallery.sortBy = 'default'">默认</button>
-                  <button type="button" class="seg-btn" :class="{ active: gallery.sortBy === 'score' }" @click="gallery.sortBy = 'score'">Score</button>
-                  <button type="button" class="seg-btn" :class="{ active: gallery.sortBy === 'fav' }" @click="gallery.sortBy = 'fav'">收藏数</button>
-                </div>
-              </div>
-              <label class="display-menu-row" title="按格式 / 收藏 / Caption 筛选">
-                <span class="display-menu-label">筛选</span>
-                <select v-model="gallery.filterFormat" class="display-menu-control">
-                  <option value="all">全部格式</option>
-                  <option value="image">图片</option>
-                  <option value="video">视频</option>
-                  <option value="zip">动图ZIP</option>
-                  <option value="favorited_artist">仅收藏画师</option>
-                  <option value="favorited_character">仅收藏角色</option>
-                  <option value="not_favorited_artist">仅非收藏画师</option>
-                  <option value="not_favorited_character">仅非收藏角色</option>
-                  <option value="captioned">仅已生成 Caption</option>
-                  <option value="not_captioned">仅未生成 Caption</option>
-                </select>
-              </label>
-              <div class="display-menu-row" title="按 Danbooru 分级筛选（可多选）。S 安全含 general / Q 存疑 / E 限制。全部不选 = 显示全部。旧图需先刷新热度补全分级">
-                <span class="display-menu-label">分级</span>
-                <div class="seg-group">
-                  <button type="button" class="seg-btn" :class="{ active: gallery.filterRatings.includes('s') }" @click="toggleRatingFilter('s')">S · 安全</button>
-                  <button type="button" class="seg-btn" :class="{ active: gallery.filterRatings.includes('q') }" @click="toggleRatingFilter('q')">Q · 存疑</button>
-                  <button type="button" class="seg-btn" :class="{ active: gallery.filterRatings.includes('e') }" @click="toggleRatingFilter('e')">E · 限制</button>
-                </div>
-              </div>
-              <label class="display-menu-row" title="卡片大小">
-                <span class="display-menu-label">卡片大小</span>
-                <select v-model.number="gallery.cardSize" class="display-menu-control">
-                  <option :value="120">紧凑</option>
-                  <option :value="150">小</option>
-                  <option :value="180">默认</option>
-                  <option :value="220">大</option>
-                </select>
-              </label>
-              <label class="display-menu-row" title="缩略图分辨率：越低越省内存、翻页越流畅；点开看大图仍是原图">
-                <span class="display-menu-label">缩略图</span>
-                <select v-model.number="gallery.thumbSize" class="display-menu-control">
-                  <option :value="240">省流</option>
-                  <option :value="360">标准</option>
-                  <option :value="540">高清</option>
-                  <option :value="0">原图</option>
-                </select>
-              </label>
-              <label class="display-menu-row" title="每页显示张数（大屏可调高，默认 15）。过高会一次渲染很多卡片，翻页变卡">
-                <span class="display-menu-label">每页张数</span>
-                <input
-                  type="number" min="1" max="120" step="1"
-                  class="display-menu-control page-size-input"
-                  :value="gallery.pageSize"
-                  @input="onPageSizeInput"
-                  @change="onPageSizeInput"
-                  @keyup.enter="onPageSizeInput"
-                />
-              </label>
-            </div>
-          </div>
-          <!-- 刷新热度：单一动作，点一下就把当前日期的**全部**图刷一遍。
-               曾经是「本页 / 指定页码范围 / 全部」三选一的下拉，外加每 4 页一批的节流；
-               后端改成批量拉取后（一次请求 200 个 id）1522 张也只有 8 个请求、十几秒，
-               那两档和节流全成了多余，已删除。运行中按钮变成停止入口。 -->
-          <button
-            :class="['refresh-btn', { active: refresh.isRunning }]"
-            @click="refresh.isRunning ? stopRefreshScores() : startRefreshScores()"
-            :disabled="!gallery.selectedDate && !refresh.isRunning"
-            :title="refresh.isRunning
-              ? '刷新中，点击停止（已经发出的请求后端还会跑完，只是不再等它返回）'
-              : '刷新当前日期全部图片的 score / 收藏数。后端按 200 个 id 一批批量拉取，整日一次跑完'"
-          >
-            <span v-if="!refresh.isRunning">↻ 刷新热度</span>
-            <!-- ⚠ 运行中刻意用短文案「刷新中…」：工具栏在 1600px 宽下本来就是满的，
-                 写成「刷新中… 点此停止」会把「翻译 ▾」挤出去、整条工具栏重排。
-                 「点击停止」的语义放 title + 进度行里那个 × 按钮。 -->
-            <span v-else>刷新中…</span>
-          </button>
-          <button
-            class="secondary tool-btn refresh-onview-btn"
-            :class="{ active: gallery.refreshOnView }"
-            @click="gallery.refreshOnView = !gallery.refreshOnView"
-            title="开启后，点开 / 切换大图会联网刷新该图 score / 收藏数；离线时建议保持关闭"
-          >看图刷新热度 {{ gallery.refreshOnView ? '开' : '关' }}</button>
-          <div class="translate-dropdown">
-            <button
-              class="secondary translate-trigger tool-btn"
-              :class="{ 'menu-open': translateMenu.open }"
-              @click.stop="toggleTranslateMenu"
-              title="翻译角色 / 导入翻译字典"
-            >翻译 ▾</button>
-            <div class="translate-menu" @click.stop>
-              <button
-                class="translate-menu-item"
-                :disabled="!gallery.selectedDate"
-                @click="onTranslateChoice('character')"
-              >
-                <span class="translate-menu-label">手动翻译角色</span>
-                <span class="translate-menu-meta">{{ gallery.selectedDate ? '复制 Prompt，粘贴 JSON' : '先选日期' }}</span>
-              </button>
-              <button
-                class="translate-menu-item"
-                @click="onTranslateChoice('dictionary')"
-              >
-                <span class="translate-menu-label">角色字典</span>
-                <span class="translate-menu-meta">搜索和修正同名/多皮肤</span>
-              </button>
-              <button
-                class="translate-menu-item"
-                @click="onTranslateChoice('import')"
-              >
-                <span class="translate-menu-label">导入翻译字典</span>
-                <span class="translate-menu-meta">从 JSON 文件合并</span>
-              </button>
-            </div>
-          </div>
-          <div class="gallery-search-group">
-            <span class="search-input-wrap">
-              <input
-                v-model="searchInput"
-                class="search-input search-input-with-clear"
-                type="text"
-                placeholder="搜索作者 / 角色"
-                @focus="showSearchHistory = true"
-                @blur="onSearchHistoryBlur"
-                @keyup.enter="commitGallerySearch"
-                @input="searchHistoryRef?.resetSelection?.()"
-                @keydown="searchHistoryRef?.handleKeydown?.($event)"
-              />
-              <button
-                v-if="searchInput"
-                class="search-clear-btn"
-                @click="setSearch('')"
-                title="清空搜索"
-                type="button"
-              >×</button>
-              <SearchHistoryDropdown
-                ref="searchHistoryRef"
-                :items="searchHistory"
-                :open="showSearchHistory"
-                header-label="最近搜索"
-                @pick="onPickSearchHistory"
-                @remove="removeSearchHistoryEntry"
-                @clear="clearSearchHistory"
-                @close="showSearchHistory = false"
-              />
-            </span>
-            <button class="secondary" @click="commitGallerySearch">搜索</button>
-          </div>
-          <input type="file" ref="translationFileInput" style="display: none" accept=".json" @change="onTranslationFileSelected" />
-        </div>
-      </div>
 
-      <!-- 统一选择器：日期日历 + tag 文件夹列表（搜索 + 最近使用置顶），
-           内部根据 selectedDate 是否以 'tag_' 开头决定默认 tab -->
-      <!-- 旧位置：第 3 行；现已在第 1 行 .gallery-title-row 顶部和 H2 合并，省一行。 -->
-
-      <div v-if="selection.enabled" class="selection-bar inline-bar">
-        <span class="selection-count">已选 <strong>{{ selection.ids.size }}</strong> 张</span>
-        <button
-          class="secondary"
-          :class="{ active: showOnlySelected }"
-          @click="showOnlySelected = !showOnlySelected"
-          :disabled="!showOnlySelected && !selection.ids.size"
-          title="切换：只显示当前日期里已选的图片"
-        >只看已选</button>
-        <button
-          class="secondary"
-          @click="selectionListOpen = true"
-          :disabled="!selection.ids.size"
-          title="查看所有已选 ID（可逐个跳转/移除）"
-        >已选清单</button>
-        <button class="secondary" @click="copySelectedIds" :disabled="!selection.ids.size" title="复制选中图片的 IDs 到剪贴板（明文逗号分隔）">复制 IDs</button>
-        <button class="secondary" @click="openCryptoTool" title="打开加密工具：把任意 IDs 文本压缩成短字符串方便分享">加密工具</button>
-        <button class="ghost" @click="clearSelection" :disabled="!selection.ids.size">清空</button>
-        <button class="ghost" @click="setSelectionEnabled(false)" title="退出选择模式（已选记录会保留）">退出</button>
-      </div>
-
-      <div v-if="loadingGallery" class="gallery-switch-status" role="status">
-        正在切换到 {{ galleryPendingDate || gallery.selectedDate }}…
-      </div>
-      <div v-if="!activeItems.length && !loadingGallery" class="gallery-empty">
-        {{ showOnlySelected ? '当前日期没有已选图片，切换日期试试' : '当前日期没有图片' }}
-      </div>
-      <div v-else-if="activeItems.length" class="gallery-grid" :class="{ 'is-switching': loadingGallery }" :style="`--card-min-w: ${gallery.cardSize}px`" :aria-busy="loadingGallery">
-        <article v-for="item in activeItems" :key="item.localPath || item.filename" class="image-card" :class="{ 'is-keyboard-focused': galleryFocusKey === itemKey(item), 'is-favorited': isCardFavorited(item), 'is-img-favorited': isImageFavorited(item), 'is-selected': isItemSelected(item), 'has-caption': hasCaption(item), 'has-ai-badge': !!aiTagOf(item) }" :title="cardBadgeTitle(item)">
-          <span v-if="galleryFocusKey === itemKey(item)" class="keyboard-focus-badge" aria-label="当前键盘选中">当前</span>
-          <div class="thumb-wrap" :class="{ 'is-broken': item.thumbBroken }">
-            <img
-              class="thumb clickable-thumb"
-              :class="{ 'is-loaded': item.loaded }"
-              :src="item.thumbUrl"
-              :alt="item.filename"
-              loading="lazy"
-              decoding="async"
-              @load="onThumbLoad(item)"
-              @error="onThumbError(item)"
-              @click="onThumbClick($event, item)"
-            />
-            <div class="thumb-skeleton" :class="{ 'is-hidden': item.loaded }" aria-hidden="true"></div>
-            <span
-              v-if="isAnimatedCard(item)"
-              class="video-format-watermark"
-              :class="`format-${cardFormatLabel(item)}`"
-              :aria-label="cardFormatLabel(item).toUpperCase()"
-            >
-              <svg v-if="isVideoItem(item)" class="format-icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                <path d="M8 5v14l11-7z"/>
-              </svg>
-              <span v-else class="format-text">GIF</span>
-            </span>
-            <button
-              v-if="selection.enabled"
-              class="img-select-toggle"
-              :class="{ active: isItemSelected(item) }"
-              @click.stop="toggleItemSelection(item)"
-              :title="isItemSelected(item) ? '取消选择' : '加入选择'"
-            >{{ isItemSelected(item) ? '✓' : '' }}</button>
-            <span v-if="hasCaption(item)" class="caption-badge" title="已生成 Caption，点击查看/编辑">📝</span>
-            <!-- 收藏画师/角色命中 → 见 .image-card.is-favorited 金色光圈（CSS 实现）。
-                 AI 标签 → 见 .image-card.has-ai-badge 紫色光圈。
-                 鼠标悬停整张卡片的 title 由 cardBadgeTitle() 汇总，缩略图区不再堆角标。 -->
-            <span v-if="item.rating" class="rating-badge" :class="`rating-${item.rating}`" :title="`Danbooru 分级：${item.rating.toUpperCase()}`">{{ item.rating.toUpperCase() }}</span>
-          </div>
-          <button
-            class="img-fav-toggle"
-            :class="{ active: isImageFavorited(item) }"
-            @click.stop="toggleImageFavorite(item)"
-            :title="isImageFavorited(item) ? '取消图片收藏' : '加入图片收藏'"
-          >{{ isImageFavorited(item) ? '♥' : '♡' }}</button>
-          <div v-if="(item.score || 0) > 0 || (item.favCount || 0) > 0" class="score-badge">
-            <span><span class="score-star">★</span> {{ item.score || 0 }}</span>
-            <span><span class="score-heart">♥</span> {{ item.favCount || 0 }}</span>
-          </div>
-          <div class="button-row compact card-actions">
-            <button class="secondary" @click="openOriginal(item)" :disabled="!item.postUrl" title="打开 Danbooru 原帖">原帖</button>
-          <button class="secondary" @click="openLocal(item)" :disabled="!item.localPath" :title="isVideoItem(item) || ['gif', 'zip'].includes(itemExtension(item)) ? '打开文件夹并选中媒体文件' : '打开本地文件'">本地</button>
-            <button @click="editItem(item)" title="编辑打码">编辑</button>
-            <button v-if="item.filename?.toLowerCase().endsWith('.zip') && !item.hasGifCompanion" class="secondary" @click="convertGif(item)" style="background: linear-gradient(135deg, #10b981, #059669); border: none; color: white;" title="ZIP 动画转 GIF">转GIF</button>
-          </div>
-        </article>
-      </div>
-
-      <div class="pagination-bar cr-pg-bar" v-if="activeCount">
-        <button class="ghost pg-btn" @click="gotoPage(1)" :disabled="activePage <= 1" title="首页">«</button>
-        <button class="ghost pg-btn" @click="gotoPage(activePage - 1)" :disabled="activePage <= 1" title="上一页 (←)">‹</button>
-        <button
-          v-for="(n, i) in pageNumbers"
-          :key="`pg-${i}-${n}`"
-          class="pg-num"
-          :class="{ active: n === activePage, ellipsis: n === '…' }"
-          :disabled="n === '…'"
-          @click="gotoPage(n)"
-        >{{ n }}</button>
-        <button class="ghost pg-btn" @click="gotoPage(activePage + 1)" :disabled="activePage >= activeTotalPages" title="下一页 (→)">›</button>
-        <button class="ghost pg-btn" @click="gotoPage(activeTotalPages)" :disabled="activePage >= activeTotalPages" title="末页">»</button>
-        <span class="pg-jump pg-picker-host" ref="pagePickerHost">
-          <!-- 块导航（每50页一块）并入页码选择组，与跳转/页码列表同一行 -->
-          <template v-if="hasMultipleBlocks">
-            <button class="pg-jump-btn pg-block-mini" @click="prevBlock" :disabled="currentBlock <= 0" title="上一块（50页）">‹‹</button>
-            <select class="pg-block-select" :value="currentBlock" @change="onBlockSelect" title="选择页码区块（每50页）">
-              <option v-for="b in blockLabels" :key="`blk-${b.index}`" :value="b.index">{{ b.label }}</option>
-            </select>
-            <button class="pg-jump-btn pg-block-mini" @click="nextBlock" :disabled="currentBlock >= totalBlocks - 1" title="下一块（50页）">››</button>
-          </template>
-          <button class="pg-jump-btn" @click="doJump" title="跳转到输入的页码">跳转</button>
-          <input type="number" min="1" :max="activeTotalPages" v-model.number="jumpInput" @keyup.enter="doJump" />
-          <button
-            class="pg-jump-btn pg-jump-go"
-            :class="{ active: pagePicker.open }"
-            @click.stop="pagePicker.open = !pagePicker.open"
-            :title="pagePicker.open ? '关闭页码列表' : '展开页码列表（10列/行）'"
-          >页码</button>
-          / {{ activeTotalPages }}
-          <Teleport to="body">
-          <div v-if="pagePicker.open" class="pg-picker-panel" :style="pagePickerStyle" @click.stop>
-            <div class="pg-picker-head">
-              <div v-if="hasMultipleBlocks" class="pg-picker-block-nav">
-                <button class="ghost pg-block-btn" @click="prevBlock" :disabled="currentBlock <= 0" title="上一块">‹</button>
-                <select class="pg-picker-block-select" :value="currentBlock" @change="onBlockSelect">
-                  <option v-for="b in blockLabels" :key="`pblk-${b.index}`" :value="b.index">{{ b.label }} 页</option>
-                </select>
-                <button class="ghost pg-block-btn" @click="nextBlock" :disabled="currentBlock >= totalBlocks - 1" title="下一块">›</button>
-                <span class="pg-picker-meta">第 {{ currentBlock + 1 }} / {{ totalBlocks }} 块</span>
-              </div>
-              <span v-else>共 {{ activeTotalPages }} 页 · 点击跳转</span>
-              <button class="ghost" @click="pagePicker.open = false">×</button>
-            </div>
-            <div class="pg-picker-grid">
-              <button
-                v-for="n in blockPageNumbers"
-                :key="`picker-${n}`"
-                class="pg-picker-cell"
-                :class="{ active: n === activePage }"
-                @click="gotoPage(n); pagePicker.open = false"
-              >{{ n }}</button>
-            </div>
-          </div>
-          </Teleport>
-        </span>
-      </div>
-    </section>
 
     <!-- 角色 / 画师 chip 右键弹出的迷你菜单：编辑词条（仅角色） / 复制
          Teleport 到 body 避免被 viewer overlay / translate modal 的 z-index 遮住。
@@ -11366,4 +11345,7 @@ const downloadTargetHint = computed(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
 </style>
+
+<style scoped src="../styles/library-workspace.css"></style>

@@ -464,7 +464,7 @@ onBeforeUnmount(() => {
           type="button"
           class="date-quick date-quick-go"
           :disabled="!modelValue"
-          :title="modelValue ? `右侧画廊前往 ${modelValue}` : '请先选择日期'"
+          :title="modelValue ? `图库前往 ${modelValue}` : '请先选择日期'"
           @click="jumpToGallery"
         >前往 →</button>
       </div>

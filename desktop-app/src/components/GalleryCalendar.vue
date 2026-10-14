@@ -9,7 +9,7 @@ const props = defineProps({
   availableTags: { type: Array, default: () => [] },
   selectedDate: { type: String, default: '' },
   today: { type: String, default: '' },
-  // 日期 tab 快捷栏显示「同步左」：把当前画廊日期 emit 给父组件，同步到左侧任务日历
+  // 日期 tab 快捷栏显示「同步任务」：把当前画廊日期 emit 给父组件，同步到左侧任务日历
   syncable: { type: Boolean, default: false },
   // 左侧任务当前是「日期范围」模式：同步时起止会一起置为同一天，tooltip 得说实话
   syncRange: { type: Boolean, default: false }
@@ -586,9 +586,9 @@ function pickTag(folder) {
             v-if="syncable"
             class="date-quick date-quick-sync"
             :disabled="!canSyncTaskDate"
-            :title="canSyncTaskDate ? (syncRange ? `把左侧任务的起止日期一起同步为 ${selectedDate}` : `把左侧任务日期同步为 ${selectedDate}`) : '当前是 tag 文件夹，无法同步到日期任务'"
+            :title="canSyncTaskDate ? (syncRange ? `把抓取任务的起止日期一起同步为 ${selectedDate}` : `把抓取任务日期同步为 ${selectedDate}`) : '当前是 tag 文件夹，无法同步到日期任务'"
             @click="syncTaskDate"
-          >同步左</button>
+          >同步任务</button>
         </div>
 
         <template v-if="dateView === 'days'">
@@ -791,7 +791,7 @@ function pickTag(folder) {
   cursor: not-allowed;
 }
 
-/* 带「同步左」时 5 列：面板内宽 292px，11px 字号 + 紧 padding 才能容下「今年今月」 */
+/* 带「同步任务」时 5 列：面板内宽 292px，11px 字号 + 紧 padding 才能容下「今年今月」 */
 .date-quickbar.with-sync {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }
@@ -1310,7 +1310,7 @@ function pickTag(folder) {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
-/* 「同步左」主动作：渐变填充；位于样式表末尾以压过上方 .date-quick 的 hover 覆盖 */
+/* 「同步任务」主动作：渐变填充；位于样式表末尾以压过上方 .date-quick 的 hover 覆盖 */
 .date-quick-sync,
 .date-quick-sync:hover:not(:disabled) {
   border-color: transparent;

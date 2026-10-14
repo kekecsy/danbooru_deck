@@ -1,4 +1,5 @@
 <script setup>
+import AppIcon from './AppIcon.vue';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 
 const emit = defineEmits(['edit-image']);
@@ -1228,8 +1229,8 @@ onMounted(loadFavorites);
           <button
             class="img-fav-toggle active"
             @click.stop="removeImageFavorite(it)"
-            title="从收藏中移除"
-          >♥</button>
+            title="从收藏中移除" aria-label="从收藏中移除"
+          ><AppIcon name="bookmark" :size="17" /></button>
           <div v-if="(it.score || 0) > 0 || (it.fav_count || 0) > 0" class="score-badge">
             <span><span class="score-star">★</span> {{ it.score || 0 }}</span>
             <span><span class="score-heart">♥</span> {{ it.fav_count || 0 }}</span>
@@ -2585,4 +2586,14 @@ onMounted(loadFavorites);
 .group-tag { background: var(--soft-violet); color: var(--accent-deep); }
 .fav-modal { border: 1px solid var(--line); background: rgba(255, 255, 255, 0.98); box-shadow: 0 24px 60px rgba(39, 34, 67, 0.22); }
 .fav-checkbox-list { background: var(--surface-muted); }
+</style>
+
+<style scoped>
+.favorites-images-panel .img-fav-toggle.active {
+  display: grid; place-items: center; width: 29px; height: 29px;
+  border: 1px solid #f1f6f2; border-radius: 6px; background: #f1f6f2;
+  color: #405e52; box-shadow: 0 1px 4px #20342a0a;
+}
+.favorites-images-panel .img-fav-toggle.active:hover { background: #fff; color: #304d41; box-shadow: none; filter: none; }
+.favorites-images-panel .img-fav-toggle.active :deep(svg) { fill: currentColor; }
 </style>
