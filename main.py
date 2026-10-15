@@ -992,6 +992,39 @@ def _expand_cjk_tokens(text: str):
     return expanded, expanded
 
 
+# 「名字 [出处] [出处别名]」—— 本项目展示角色 token 的固定写法（见 _translate_characters_str /
+# build_local_image_library 拼 meta 时的 f" [{hint}]" + f" [{alias}]"）。方括号在 Danbooru tag
+# 里不合法，所以**末尾连着几对方括号都认**：从右往左逐个剥掉。
+_BRACKET_TAIL_RE = re.compile(r"\s*[\[【]\s*([^\[\]【】]*?)\s*[\]】]\s*$")
+
+
+def _split_bracket_hint(part: str):
+    """把一段查询拆成 (名字, [出处, ...])。
+
+    ⚠ 末尾可能**连着好几对**方括号 —— 真实展示格式是「中文名 [source_hint] [别名]」
+      （博丽灵梦 [touhou] [东方Project]），用户整段抄进搜索框就会带两对。全部剥掉，
+      返回的名字里不含任何方括号。
+
+    没有末尾方括号时返回 (整段, [])，且返回的整段是**原样**的（不做任何归一），
+    保证既有行为一字不变。写了空方括号（'[]'）时它不算出处，但仍要被剥掉。
+    """
+    text = (part or "").strip()
+    hints, seen = [], False
+    while True:
+        m = _BRACKET_TAIL_RE.search(text)
+        if not m:
+            break
+        seen = True
+        hint = m.group(1).strip()
+        if hint:
+            hints.append(hint)
+        text = text[:m.start()].strip()
+    if not seen:
+        return (part or "").strip(), []
+    hints.reverse()   # 还原成从左到右的书写顺序
+    return text, hints
+
+
 def _expand_search_tokens(q: str, kind: str):
     """把搜索框输入归一成 deck_db.viewer_search 的查询条件。
 
@@ -1005,29 +1038,78 @@ def _expand_search_tokens(q: str, kind: str):
       source_hint 'kancolle' 整词搜 0 条（库里的系列 tag 是 kantai_collection、角色 tag
       形如 ``xxx_(kancolle)``），'fate' 同样 0 条（库里是 fate_(series)）。
       但出处标记必须与字面 tag **同组 OR**（不能另立 AND 组）—— 撞名很常见，见 viewer_search。
+
+    ⚠ 支持「名字 [出处]」（乃至展示用的「名字 [出处] [出处别名]」）的方括号写法 ——
+      用户照抄界面上展示的角色 token。实测「樋口圆香」120 行、「樋口圆香 [idolmaster]」**0 行**
+      （整串被当成一个 tag `樋口圆香_[idolmaster]` 去整词匹配）。拆出的出处另立成
+      **独立的 AND 组**（它是限定条件），名字那半照常走下面的展开；
+      出处解析不出（不是任何 source_hint / 别名）就只丢掉方括号内容、按名字搜。
     """
     raw = (q or "").strip()
     if not raw:
         return [], [], []
-    has_cjk = bool(re.search(r"[一-鿿]", raw))
-    ascii_token = re.sub(r"\s+", "_", raw.lower()).strip("_")
     # 逗号分隔多个词（如 "hatsune_miku, kagamine_rin"）；词内空格按下划线归一
     parts = [p for p in re.split(r"[,，]+", raw) if p.strip()]
+    names = []
+    for part in parts:
+        name, _ = _split_bracket_hint(part)
+        names.append(name or part)
+    # 剥掉方括号后的串（没方括号时**逐字节等于原文**，既有行为一字不变）
+    clean_raw = ", ".join(names) if names != [p.strip() for p in parts] else raw
+    has_cjk = bool(re.search(r"[一-鿿]", clean_raw))
+    ascii_token = re.sub(r"\s+", "_", clean_raw.lower()).strip("_")
 
     # ① 出处 / 出处别名（仅角色维度 —— 出处不是作者）。
-    resolved, rest, series_hints = [], [], []
+    #    两个来源：方括号里显式写的出处（→ 独立 AND 组）、整段本身就是出处（→ 与字面 tag
+    #    同组 OR，见下面的 ⚠）。
+    resolved, rest, series_hints, bracket_groups = [], [], [], []
     if kind in ("auto", "character"):
         for part in parts:
-            hits = translator.resolve_search_series(part)
-            if hits:
-                resolved.append((part, hits))
-                series_hints.extend(hits)
-            else:
-                rest.append(part)
+            name, hint_parts = _split_bracket_hint(part)
+            # 方括号里的出处：解析得出才当限定条件。
+            # ⚠ 两对方括号（[source_hint] [别名]）说的是**同一个系列**，所以全部 OR 进
+            #   同一个组里，不能各立一个 AND 组 —— 两个键（如 kancolle / kantai_collection）
+            #   在库里命中的列可能不同，AND 上去反而可能两边都不中。
+            bracket_hits, bracket_tokens = [], []
+            for h in hint_parts:
+                hits = translator.resolve_search_series(h)
+                if not hits:
+                    continue
+                bracket_hits.extend(hits)
+                token = re.sub(r"\s+", "_", h.lower()).strip("_")
+                if token and not re.fullmatch(r"[一-鿿_]+", token):
+                    bracket_tokens.append(token)
+            # 「[source_hint] [别名]」两个写法常常归一成**同一个键**（别名就是指向它的），
+            # 去重后再拼组，别把同一条 OR 子句在 SQL 里堆两遍。
+            bracket_hits = list(dict.fromkeys(bracket_hits))
+            if not bracket_hits:
+                # 方括号里不是出处（或压根没写方括号）→ 丢掉方括号那截，只按名字搜。
+                # 名字那半自己也可能就是出处（如「碧蓝档案 [azur_lane]」）。
+                probe = name or part
+                hits = translator.resolve_search_series(probe)
+                if hits:
+                    resolved.append((probe, hits))
+                    series_hints.extend(hits)
+                else:
+                    rest.append(probe)
+                continue
+            series_hints.extend(bracket_hits)
+            group = [{"hint": h} for h in bracket_hits]
+            group.extend(dict.fromkeys(bracket_tokens))
+            bracket_groups.append(group)
+            # 名字那半照常当 tag / 中文名搜（它是同一个 AND 条件里的另一半）。
+            # 纯方括号输入（'[idolmaster]'）没有名字 → 这一搜就只按出处。
+            if name:
+                hits = translator.resolve_search_series(name)
+                if hits:
+                    resolved.append((name, hits))
+                    series_hints.extend(hits)
+                else:
+                    rest.append(name)
     else:
-        rest = parts
+        rest = names
 
-    if series_hints:
+    if series_hints or bracket_groups:
         # ② 命中出处的段：一个段 = 一个 OR 组。
         # ⚠ 组里同时放**字面 tag** 与出处标记，不能只放标记：字典里 source_hint 与角色 tag
         #   撞名极常见（实测 355 例 —— 'hatsune_miku' 是 cinnamiku / mikudayo 等换装条目的
@@ -1041,21 +1123,29 @@ def _expand_search_tokens(q: str, kind: str):
                 group.append(token)
             groups.append(group)
         # 其余段照常当 tag 搜，整体等价于「出处 ∩ 其它条件」。
+        expanded_tags = []
         for part in rest:
             token = re.sub(r"\s+", "_", part.lower()).strip("_")
             group = []
             if re.search(r"[一-鿿]", part):
                 expanded, _ = _expand_cjk_tokens(part)
                 group = expanded[:]
+                expanded_tags.extend(expanded)
             if token and not re.fullmatch(r"[一-鿿_]+", token) and token not in group:
                 group.insert(0, token)
             if group:
                 groups.append(group)
-        return groups, list(dict.fromkeys(series_hints)), []
+        # 方括号里显式写的出处：独立 AND 组（限定条件，不跟名字那半 OR）
+        for group in bracket_groups:
+            if group not in groups:
+                groups.append(group)
+        # ⚠ 这里也要下发中文名展开的 tag：方括号写法会走到这一支，若返回空，
+        #    同一个中文名「带方括号搜」就比「不带方括号搜」少一条「已展开为哪些 tag」提示。
+        return groups, list(dict.fromkeys(series_hints)), list(dict.fromkeys(expanded_tags))
 
     # ③ 没有出处命中：与既有行为完全一致（先整串中文名展开，再退回逐段整词）。
     if has_cjk and kind in ("auto", "character"):
-        expanded, _ = _expand_cjk_tokens(raw)
+        expanded, _ = _expand_cjk_tokens(clean_raw)
         if expanded:
             group = expanded[:]
             # 原文里若带英文/数字片段（如「初音 miku」），也作为 OR 候选
@@ -1064,7 +1154,7 @@ def _expand_search_tokens(q: str, kind: str):
             return [group], [], expanded
 
     groups = []
-    for part in parts:
+    for part in names:
         token = re.sub(r"\s+", "_", part.lower()).strip("_")
         # 纯中文且没有翻译命中时，它不可能是 deck.db 里的 tag —— 别制造必空的全表扫描
         if token and not re.fullmatch(r"[一-鿿_]+", token):
